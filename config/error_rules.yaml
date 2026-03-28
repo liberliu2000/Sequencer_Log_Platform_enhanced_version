@@ -1,0 +1,175 @@
+normalization_rules:
+  remove_patterns:
+    - "\\b\\d+\\b"
+    - "0x[a-fA-F0-9]+"
+    - "\\b[0-9a-fA-F-]{16,}\\b"
+    - "[A-Z]:\\\\[^ ]+"
+    - "/[^ ]+"
+    - ":\\d+\\b"
+
+fallback_family: general_error
+
+family_rules:
+  - key: connection_lost
+    label: 连接中断
+    description: RPC 或底层通信链路被远端关闭，通常表现为 ConnectionLostException、broken pipe 或链路中断。
+    tone: "#A63D40"
+    patterns:
+      - "connectionlostexception"
+      - "connection lost"
+      - "broken pipe"
+      - "peer shutdown"
+
+  - key: rpc_ice_error
+    label: RPC / Ice 通信异常
+    description: 与 Ice / RPC 调用相关的远程通信异常，但未明确落到连接断开。
+    tone: "#C45B3C"
+    patterns:
+      - "\\bice\\."
+      - "\\brpc\\b"
+
+  - key: af_timeout
+    label: AF 对焦超时
+    description: 自动对焦流程长时间未完成，常见于 Wait for AF timeout 一类消息。
+    tone: "#D96B3B"
+    patterns:
+      - "wait for af timeout"
+      - "\\baf timeout\\b"
+      - "autofocus timeout"
+      - "focus timeout"
+
+  - key: vacuum_pressure_timeout
+    label: 真空 / 压力等待超时
+    description: 真空吸附、放气或压力阈值等待阶段超时，通常出现在 SlideVacuumON、VacuumOFF、pressure threshold 等消息中。
+    tone: "#D97706"
+    patterns:
+      - "slidevacuumon.*timeoutsec"
+      - "vacuumoff.*timeoutsec"
+      - "vacuum adsorption start.*timeoutsec"
+      - "pressure threshold:.*timeoutsec"
+
+  - key: sequencing_not_ready
+    label: 流程状态未就绪
+    description: 当前流程状态不满足继续执行条件，例如 sequencing not ready、remain time 无法发送等。
+    tone: "#A16207"
+    patterns:
+      - "sequencing not ready"
+      - "cannot send remain time"
+      - "remain time"
+
+  - key: runinfo_state_conflict
+    label: RunInfo 状态冲突
+    description: 运行上下文重复初始化、重复 setup 或状态切换冲突。
+    tone: "#8C6A00"
+    patterns:
+      - "skip setup runinfo"
+      - "runinfo already setup"
+      - "already setup"
+
+  - key: stage_reset_error
+    label: Stage 复位异常
+    description: XYZ Stage 或相关运动平台在复位、回零或收尾阶段发生异常。
+    tone: "#B54708"
+    patterns:
+      - "reset xyzstage"
+      - "reset stage"
+      - "stage reset"
+
+  - key: motion_axis_error
+    label: 轴运动异常
+    description: 运动轴执行 MoveAxis、MoveTo、homing 等动作时发生异常或异常轨迹。
+    tone: "#C2410C"
+    patterns:
+      - "moveaxisrelative"
+      - "moveaxisabsolute"
+      - "\\bmove axis\\b"
+      - "\\bhoming\\b"
+      - "axis \\["
+
+  - key: registration_alignment_warning
+    label: 配准 / 对位异常
+    description: 图像通道未注册、粗调角度异常、精对位失败等注册类问题。
+    tone: "#B45309"
+    patterns:
+      - "not-registered"
+      - "not registered"
+      - "coarse theta"
+      - "finealign failed"
+
+  - key: imaging_device_exception
+    label: 成像设备异常
+    description: 成像设备、相机或光学链路抛出的显式设备异常。
+    tone: "#1D4ED8"
+    patterns:
+      - "iswdeviceexception"
+      - "imaging .*exception"
+      - "camera exception"
+
+  - key: script_execution_exception
+    label: 脚本执行异常
+    description: "脚本运行阶段抛出的异常，常见于 Ending Status: Exception、script exception 等消息。"
+    tone: "#7C3AED"
+    patterns:
+      - "ending status: exception"
+      - "script exception"
+      - "script failed"
+
+  - key: workflow_traceback
+    label: Workflow Traceback 异常
+    description: Workflow 或脚本执行中出现 Python Traceback / 调用栈错误。
+    tone: "#9333EA"
+    patterns:
+      - "traceback \\(most recent call last\\)"
+      - "workflow exception"
+      - "run failed"
+      - "sequencing failed"
+
+  - key: camera_optics_error
+    label: 相机 / 光学异常
+    description: 相机、曝光、光路或聚焦相关异常，但未命中更具体的 AF / 成像设备类别。
+    tone: "#2563EB"
+    patterns:
+      - "\\bcamera\\b"
+      - "\\boptic"
+      - "\\bexposure\\b"
+      - "\\bfocus\\b"
+
+  - key: db_open_failure
+    label: 数据库打开失败
+    description: 数据库访问、连接或 sqlite 打开失败。
+    tone: "#475569"
+    patterns:
+      - "db open"
+      - "database"
+      - "sqlite"
+
+  - key: file_io_error
+    label: 文件 I/O 异常
+    description: 文件不存在、无法打开、IOException 等文件读写错误。
+    tone: "#64748B"
+    patterns:
+      - "file not found"
+      - "ioexception"
+      - "cannot open file"
+
+  - key: bad_image_format
+    label: 图像格式异常
+    description: 输入图像格式不合法或不受支持。
+    tone: "#0F766E"
+    patterns:
+      - "bad image format"
+      - "image format"
+
+  - key: timeout
+    label: 通用超时
+    description: 未命中更细粒度类别的通用 timeout / time out 异常。
+    tone: "#DC2626"
+    patterns:
+      - "timeout"
+      - "time out"
+
+  - key: general_error
+    label: 通用异常
+    description: 当前规则尚未识别到更具体家族的错误。
+    tone: "#6B7280"
+    patterns: []

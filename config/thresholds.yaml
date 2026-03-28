@@ -1,0 +1,64 @@
+default_threshold_ms: 10000
+step_thresholds_ms:
+  default:
+    optical cpas workflow for stage b1: 120000
+    b1 fill ir: 45000
+    setup: 5000
+    setcamdirection: 3000
+    setcameradirection: 3000
+    sendfluidicsboardinfos, timeout: 5000
+    scan: 3000
+    MoveStageFromLoadPosToFirstField: 5000
+    CoarseThetaWithoutMoveStage: 5000
+    FineAlign: 10000
+    Row scan: 1360
+    cPAS reagent priming: 40000
+    升温时间 N: 13000
+    升温时间 F: 13000
+    降温时间 N: 13000
+    降温时间 F: 13000
+  Workflow:
+    b1 fill ir: 40000
+  OpticalBoard:
+    setcamdirection: 2500
+    setcameradirection: 2500
+  ImagingMetrics:
+    scan: 1360
+
+parameter_thresholds_seconds:
+  cycle_time: 530
+  imaging_time: 150
+  coarse_theta: 5
+  finealign: 10
+  row_scan: 1.36
+  cpas_time: 360
+  cpas_priming: 40
+  transfer_time: 20
+  temperature_rise: 13
+  temperature_drop: 13
+  mda: 5400
+  bc: 1800
+
+parameter_expected_seconds:
+  cycle_time: 500
+  imaging_time: 125
+  coarse_theta: 3
+  finealign: 5
+  row_scan: 1.15
+  cpas_time: 330
+  cpas_priming: 30
+  transfer_time: 15
+  temperature_rise: 11
+  temperature_drop: 11
+  mda: 5000
+  bc: 1200
+
+llm_context:
+  pre_lines: 8
+  post_lines: 8
+  time_window_seconds: 90
+  related_component_limit: 30
+  related_cycle_limit: 30
+  max_stack_frames: 8
+  max_token_budget: 2200
+  stage1_token_budget: 1200

@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  sequencer-log-platform:
+    build: .
+    container_name: sequencer-log-platform
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/workspace/data
+      - ./config:/workspace/config

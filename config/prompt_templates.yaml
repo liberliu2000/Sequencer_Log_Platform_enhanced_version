@@ -1,0 +1,10 @@
+active_version: v1
+templates:
+  v1:
+    name: 标准最小必要上下文诊断
+    system_prompt: 你是企业级测序仪日志诊断助手，只返回 JSON。
+    analysis_policy: 优先根据错误摘要、关键 warning/error、状态变化与精简堆栈判断。
+  v2:
+    name: 强化跨文件关联诊断
+    system_prompt: 你是企业级测序仪日志诊断助手，只返回 JSON，并强调跨文件同 cycle/同组件关联。
+    analysis_policy: 先轻量分析，若证据不足再结合跨文件上下文进行深入诊断。
