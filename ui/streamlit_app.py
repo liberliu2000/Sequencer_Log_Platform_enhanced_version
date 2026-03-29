@@ -393,6 +393,7 @@ def inject_design_system(mode: str = "light"):
             color: #ffffff !important;
         }
 
+        [data-testid="stNumberInputContainer"],
         div[data-baseweb="input"] > div,
         div[data-baseweb="select"] > div,
         [data-testid="stTextArea"] textarea,
@@ -402,6 +403,24 @@ def inject_design_system(mode: str = "light"):
             border: 1px solid var(--line) !important;
             border-radius: 18px !important;
             box-shadow: none !important;
+        }
+
+        [data-testid="stNumberInputContainer"] [data-baseweb="input"] > div,
+        [data-testid="stNumberInputContainer"] [data-baseweb="input"] {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+
+        [data-testid="stNumberInputContainer"] button,
+        [data-testid="stNumberInputContainer"] button svg {
+            color: var(--ink) !important;
+            fill: currentColor !important;
+        }
+
+        [data-testid="stNumberInputContainer"] button {
+            background: var(--surface) !important;
+            border-left: 1px solid var(--line) !important;
         }
 
         [data-baseweb="tag"] {
@@ -419,21 +438,26 @@ def inject_design_system(mode: str = "light"):
         .stButton > button,
         .stDownloadButton > button,
         [data-testid="stBaseButton-secondary"],
-        [data-testid="stBaseButton-primary"] {
+        [data-testid="stBaseButton-secondary"] > button,
+        [data-testid="stBaseButton-primary"],
+        [data-testid="stBaseButton-primary"] > button {
             min-height: 2.85rem;
             border-radius: 999px !important;
             border: 1px solid var(--line-strong) !important;
             background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(193, 232, 255, 0.72) 100%) !important;
+            background-color: #FFFFFF !important;
             color: var(--ink) !important;
             font-weight: 600 !important;
             padding: 0.55rem 1.1rem !important;
             transition: all 0.18s ease;
         }
 
-        [data-testid="stBaseButton-primary"] {
-            background: linear-gradient(135deg, #052659 0%, #5483B3 100%) !important;
-            color: #f4fbff !important;
-            border-color: #052659 !important;
+        [data-testid="stBaseButton-primary"],
+        [data-testid="stBaseButton-primary"] > button {
+            background: linear-gradient(135deg, #FFFFFF 0%, #EAF4FF 100%) !important;
+            background-color: #FFFFFF !important;
+            color: var(--ink) !important;
+            border-color: #7DA0CA !important;
         }
 
         .stButton > button p,
@@ -443,7 +467,11 @@ def inject_design_system(mode: str = "light"):
         .stButton > button span,
         .stDownloadButton > button span,
         [data-testid="stBaseButton-secondary"] span,
-        [data-testid="stBaseButton-primary"] span {
+        [data-testid="stBaseButton-primary"] span,
+        [data-testid="stBaseButton-secondary"] > button p,
+        [data-testid="stBaseButton-primary"] > button p,
+        [data-testid="stBaseButton-secondary"] > button span,
+        [data-testid="stBaseButton-primary"] > button span {
             color: inherit !important;
             mix-blend-mode: normal !important;
         }
@@ -535,7 +563,7 @@ def inject_design_system(mode: str = "light"):
         }
 
         div[data-testid="stPlotlyChart"] {
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(233, 245, 255, 0.92) 100%);
+            background: linear-gradient(180deg, var(--plot-start) 0%, var(--plot-end) 100%);
             border: 1px solid var(--line);
             border-radius: 26px;
             box-shadow: var(--shadow);
@@ -547,6 +575,24 @@ def inject_design_system(mode: str = "light"):
         div[data-testid="stPlotlyChart"] > div {
             position: relative;
             z-index: 0;
+        }
+
+        div[data-testid="stPlotlyChart"],
+        div[data-testid="stPlotlyChart"] > div,
+        div[data-testid="stPlotlyChart"] .js-plotly-plot,
+        div[data-testid="stPlotlyChart"] .plot-container,
+        div[data-testid="stPlotlyChart"] .svg-container,
+        div[data-testid="stPlotlyChart"] .gl-container,
+        div[data-testid="stPlotlyChart"] canvas {
+            transition: background-color 0.18s ease, border-color 0.18s ease;
+        }
+
+        div[data-testid="stPlotlyChart"] .js-plotly-plot,
+        div[data-testid="stPlotlyChart"] .plot-container,
+        div[data-testid="stPlotlyChart"] .svg-container,
+        div[data-testid="stPlotlyChart"] .gl-container,
+        div[data-testid="stPlotlyChart"] canvas {
+            background: var(--chart-paper-bg) !important;
         }
 
         .chart-frame-title {
@@ -982,6 +1028,26 @@ def inject_design_system(mode: str = "light"):
 
         .config-panel-note {
             color: #4b6e94;
+        }
+
+        .diagnosis-summary-card {
+            background: var(--surface-bg, var(--surface-strong));
+            border: 1px solid var(--surface-line, var(--line));
+            border-radius: 22px;
+            box-shadow: 0 18px 44px rgba(2, 16, 36, 0.12);
+            padding: 1rem 1.1rem;
+            margin: 0.45rem 0 0.9rem;
+        }
+
+        .diagnosis-summary-content {
+            margin: 0;
+            color: var(--surface-ink, var(--ink));
+            font-size: 0.98rem;
+            font-weight: 600;
+            line-height: 1.75;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         .config-chip-row {
@@ -1578,6 +1644,18 @@ def enrich_error_family_frame(data) -> pd.DataFrame:
     return df
 
 
+def _chart_theme(mode: str | None) -> dict[str, str]:
+    theme = get_design_tokens(mode)
+    chart_surface = "#FFFFFF" if theme.name == "light" else theme.surface_strong
+    return {
+        "template": "plotly_dark" if theme.name == "dark" else "plotly_white",
+        "paper_bgcolor": chart_surface,
+        "plot_bgcolor": chart_surface,
+        "hover_bgcolor": theme.surface_solid,
+        "map_style": "carto-darkmatter" if theme.name == "dark" else "carto-positron",
+    }
+
+
 def render_fig(
     fig,
     key: str | None = None,
@@ -1588,7 +1666,10 @@ def render_fig(
     title_y: float = 0.98,
 ):
     theme = get_design_tokens(st.session_state.get("theme_mode", "light"))
-    plotly_template = "plotly_dark" if theme.name == "dark" else "plotly_white"
+    chart_theme = _chart_theme(st.session_state.get("theme_mode", "light"))
+    plotly_template = chart_theme["template"]
+    plot_area_bg = chart_theme["plot_bgcolor"]
+    paper_bg = chart_theme["paper_bgcolor"]
     title_text = _clean_chart_title(title if title is not None else getattr(getattr(fig.layout, "title", None), "text", None))
     wrapped_title_lines = _wrap_chart_title(title_text) if title_text else []
     if wrapped_title_lines and title_outside:
@@ -1618,8 +1699,8 @@ def render_fig(
         autosize=True,
         height=height,
         template=plotly_template,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor=theme.surface_strong,
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=plot_area_bg,
         colorway=PLOTLY_COLOR_SEQUENCE,
         font=dict(family='"Avenir Next", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif', color=theme.ink, size=13),
         title=dict(text="<br>".join(wrapped_title_lines) if wrapped_title_lines and not title_outside else "", font=dict(family='"Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif', size=22, color=theme.accent), x=title_x, xanchor="left", y=title_y, yanchor="top", pad=dict(b=18)),
@@ -1636,7 +1717,28 @@ def render_fig(
             font=dict(color=theme.ink),
         ),
         uniformtext=dict(minsize=10, mode="hide"),
-        hoverlabel=dict(bgcolor=theme.surface_solid, bordercolor=theme.accent_soft, font=dict(color=theme.ink)),
+        hoverlabel=dict(bgcolor=chart_theme["hover_bgcolor"], bordercolor=theme.accent_soft, font=dict(color=theme.ink)),
+    )
+    fig.update_layout(
+        polar=dict(
+            bgcolor=plot_area_bg,
+            radialaxis=dict(gridcolor=theme.line, linecolor=theme.line_strong, tickfont=dict(color=theme.ink)),
+            angularaxis=dict(gridcolor=theme.line, linecolor=theme.line_strong, tickfont=dict(color=theme.ink)),
+        ),
+        ternary=dict(
+            bgcolor=plot_area_bg,
+            aaxis=dict(gridcolor=theme.line, linecolor=theme.line_strong, tickfont=dict(color=theme.ink)),
+            baxis=dict(gridcolor=theme.line, linecolor=theme.line_strong, tickfont=dict(color=theme.ink)),
+            caxis=dict(gridcolor=theme.line, linecolor=theme.line_strong, tickfont=dict(color=theme.ink)),
+        ),
+        geo=dict(
+            bgcolor=plot_area_bg,
+            lakecolor=plot_area_bg,
+            landcolor=plot_area_bg,
+            showlakes=False,
+            showland=False,
+        ),
+        mapbox=dict(style=chart_theme["map_style"]),
     )
     fig.update_annotations(font=dict(color=theme.ink))
     fig.update_xaxes(
@@ -2096,7 +2198,18 @@ elif page == "LLM 诊断":
                     picked = st.selectbox("选择历史结果", labels, key="llm_hist_pick")
                     idx = labels.index(picked)
                     selected_hist = filtered_rows[idx]
-                    st.text(str(selected_hist.get("chinese_summary", "")))
+                    summary_text = str(selected_hist.get("chinese_summary") or "").strip()
+                    if summary_text:
+                        st.markdown(
+                            _html_block(
+                                f"""
+                                <article class="diagnosis-summary-card">
+                                    <div class="diagnosis-summary-content">{escape(summary_text)}</div>
+                                </article>
+                                """
+                            ),
+                            unsafe_allow_html=True,
+                        )
                     token_summary = selected_hist.get("token_summary", {}) or {}
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("分析深度", selected_hist.get("analysis_stage", "-"))
@@ -2226,7 +2339,18 @@ elif page == "LLM 诊断":
                 result = st.session_state.get("latest_diag_result") if st.session_state.get("latest_diag_signature") == signature else None
                 if result:
                     st.markdown("### 诊断结论")
-                    st.text(str(result.get("chinese_summary", "")))
+                    summary_text = str(result.get("chinese_summary") or "").strip()
+                    if summary_text:
+                        st.markdown(
+                            _html_block(
+                                f"""
+                                <article class="diagnosis-summary-card">
+                                    <div class="diagnosis-summary-content">{escape(summary_text)}</div>
+                                </article>
+                                """
+                            ),
+                            unsafe_allow_html=True,
+                        )
                     token_summary = result.get("token_summary", {}) or {}
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("分析深度", result.get("analysis_stage", "-"))

@@ -110,8 +110,8 @@ LIGHT_TOKENS = DesignTokens(
     card_end="rgba(237, 247, 255, 0.92)",
     dashboard_start="rgba(255, 255, 255, 0.97)",
     dashboard_end="rgba(233, 245, 255, 0.94)",
-    plot_start="rgba(255, 255, 255, 0.96)",
-    plot_end="rgba(233, 245, 255, 0.92)",
+    plot_start="#FFFFFF",
+    plot_end="#FFFFFF",
     sidebar_start="rgba(2, 16, 36, 0.96)",
     sidebar_end="rgba(5, 38, 89, 0.95)",
     sidebar_card_start="rgba(7, 45, 96, 0.72)",
@@ -126,7 +126,7 @@ LIGHT_TOKENS = DesignTokens(
     accent_strong="#5483B3",
     accent_soft="#7DA0CA",
     accent_ice="#C1E8FF",
-    on_primary="#F4FBFF",
+    on_primary="#021024",
     success="#2E7D5A",
     warning="#D96B3B",
     danger="#D94841",
@@ -138,8 +138,8 @@ LIGHT_TOKENS = DesignTokens(
     input_label="#3B6898",
     button_secondary_start="rgba(255, 255, 255, 0.96)",
     button_secondary_end="rgba(193, 232, 255, 0.72)",
-    button_primary_start="#052659",
-    button_primary_end="#5483B3",
+    button_primary_start="#FFFFFF",
+    button_primary_end="#EAF4FF",
     progress_track="rgba(31, 36, 33, 0.08)",
     progress_start="#052659",
     progress_mid="#5483B3",
@@ -293,6 +293,9 @@ def get_flet_design_tokens(mode: str | None) -> DesignTokens:
 
 
 def streamlit_root_vars(theme: DesignTokens) -> str:
+    chart_surface = "#FFFFFF" if theme.name == "light" else theme.surface_strong
+    dataframe_surface = "#FFFFFF" if theme.name == "light" else theme.surface_strong
+    dataframe_header = theme.surface_soft if theme.name == "light" else theme.surface_solid
     variables = {
         "bg-top": theme.bg_top,
         "bg-mid": theme.bg_mid,
@@ -363,6 +366,20 @@ def streamlit_root_vars(theme: DesignTokens) -> str:
         "note": theme.note,
         "disabled-bg": theme.disabled_bg,
         "disabled-fg": theme.disabled_fg,
+        "chart-paper-bg": chart_surface,
+        "chart-plot-bg": chart_surface,
+        "chart-hover-bg": theme.surface_solid,
+        "chart-grid": theme.line,
+        "chart-line": theme.line_strong,
+        "chart-ink": theme.ink,
+        "dataframe-bg": dataframe_surface,
+        "dataframe-header-bg": dataframe_header,
+        "dataframe-border": theme.line,
+        "dataframe-border-strong": theme.line_strong,
+        "dataframe-text": theme.ink,
+        "dataframe-muted": theme.muted,
+        "dataframe-row-hover": theme.surface_soft,
+        "dataframe-toolbar-bg": dataframe_surface,
         "page-pad": "clamp(1rem, 2vw, 2rem)",
     }
     joined = "\n            ".join(f"--{name}: {value};" for name, value in variables.items())
@@ -437,6 +454,7 @@ def streamlit_component_overrides() -> str:
             background: var(--sidebar-icon-chip-bg);
         }
 
+        [data-testid=\"stNumberInputContainer\"],
         div[data-baseweb=\"input\"] > div,
         div[data-baseweb=\"select\"] > div,
         [data-testid=\"stTextArea\"] textarea,
@@ -445,6 +463,30 @@ def streamlit_component_overrides() -> str:
             background: var(--input-bg) !important;
             border: 1px solid var(--line) !important;
             color: var(--input-text) !important;
+        }
+
+        [data-testid=\"stNumberInputContainer\"] [data-baseweb=\"input\"] > div,
+        [data-testid=\"stNumberInputContainer\"] [data-baseweb=\"input\"] {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+
+        [data-testid=\"stNumberInputContainer\"] button,
+        [data-testid=\"stNumberInputContainer\"] button svg {
+            color: var(--input-text) !important;
+            fill: currentColor !important;
+        }
+
+        [data-testid=\"stNumberInputContainer\"] button {
+            background: var(--input-bg) !important;
+            border-left: 1px solid var(--line) !important;
+        }
+
+        [data-testid=\"stNumberInputContainer\"] button:hover:enabled,
+        [data-testid=\"stNumberInputContainer\"] button:focus:enabled {
+            background: var(--surface-soft) !important;
+            color: var(--ink) !important;
         }
 
         [data-testid=\"stTextArea\"] textarea,
@@ -459,22 +501,30 @@ def streamlit_component_overrides() -> str:
         .stButton > button,
         .stDownloadButton > button,
         [data-testid=\"stBaseButton-secondary\"],
-        [data-testid=\"stBaseButton-primary\"] {
+        [data-testid=\"stBaseButton-secondary\"] > button,
+        [data-testid=\"stBaseButton-primary\"],
+        [data-testid=\"stBaseButton-primary\"] > button {
             background: linear-gradient(180deg, var(--button-secondary-start) 0%, var(--button-secondary-end) 100%) !important;
+            background-color: var(--button-secondary-start) !important;
             border-color: var(--line-strong) !important;
             color: var(--ink) !important;
             box-shadow: none !important;
         }
 
-        [data-testid=\"stBaseButton-primary\"] {
+        [data-testid=\"stBaseButton-primary\"],
+        [data-testid=\"stBaseButton-primary\"] > button {
             background: linear-gradient(135deg, var(--button-primary-start) 0%, var(--button-primary-end) 100%) !important;
+            background-color: var(--button-primary-start) !important;
             color: var(--on-primary) !important;
-            border-color: var(--button-primary-start) !important;
+            border-color: var(--accent-soft) !important;
         }
 
         [data-testid=\"stBaseButton-primary\"] *,
         [data-testid=\"stBaseButton-primary\"] p,
-        [data-testid=\"stBaseButton-primary\"] span {
+        [data-testid=\"stBaseButton-primary\"] span,
+        [data-testid=\"stBaseButton-primary\"] > button *,
+        [data-testid=\"stBaseButton-primary\"] > button p,
+        [data-testid=\"stBaseButton-primary\"] > button span {
             color: var(--on-primary) !important;
         }
 
@@ -539,6 +589,24 @@ def streamlit_component_overrides() -> str:
             background: linear-gradient(180deg, var(--plot-start) 0%, var(--plot-end) 100%) !important;
             border-color: var(--line) !important;
             box-shadow: var(--shadow) !important;
+        }
+
+        div[data-testid=\"stPlotlyChart\"],
+        div[data-testid=\"stPlotlyChart\"] > div,
+        div[data-testid=\"stPlotlyChart\"] .js-plotly-plot,
+        div[data-testid=\"stPlotlyChart\"] .plot-container,
+        div[data-testid=\"stPlotlyChart\"] .svg-container,
+        div[data-testid=\"stPlotlyChart\"] .gl-container,
+        div[data-testid=\"stPlotlyChart\"] canvas {
+            transition: background-color 0.18s ease, border-color 0.18s ease;
+        }
+
+        div[data-testid=\"stPlotlyChart\"] .js-plotly-plot,
+        div[data-testid=\"stPlotlyChart\"] .plot-container,
+        div[data-testid=\"stPlotlyChart\"] .svg-container,
+        div[data-testid=\"stPlotlyChart\"] .gl-container,
+        div[data-testid=\"stPlotlyChart\"] canvas {
+            background: var(--chart-paper-bg) !important;
         }
 
         .premium-pill {
