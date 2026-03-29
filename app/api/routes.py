@@ -28,6 +28,7 @@ from app.services.analysis_depth_manager import AnalysisDepthManager
 from app.services.task_queue import queue
 from app.services.task_state_cache import task_state_cache
 from app.services.feedback_service import FeedbackService
+from app.services.env_file_service import EnvFileService
 from app.parsers.unknown_log_handler import UnknownLogHandler
 
 router = APIRouter()
@@ -427,6 +428,37 @@ def get_config():
 @router.put('/config/thresholds')
 def update_thresholds(payload: dict):
     return ConfigService().update_thresholds(payload)
+
+
+@router.get('/config/env')
+def get_env_items():
+    return {"items": EnvFileService().list_items()}
+
+
+@router.get('/config/env/{key}')
+def get_env_item(key: str):
+    try:
+        return EnvFileService().get_item(key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail='env key not found')
+
+
+@router.put('/config/env/{key}')
+def update_env_item(key: str, payload: dict):
+    if "value" not in payload:
+        raise HTTPException(status_code=400, detail='missing value')
+    try:
+        return EnvFileService().update_item(key, str(payload.get("value") or ""))
+    except KeyError:
+        raise HTTPException(status_code=404, detail='env key not found')
+
+
+@router.post('/config/env/{key}/reset')
+def reset_env_item(key: str):
+    try:
+        return EnvFileService().reset_item(key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail='env key not found or default missing')
 
 
 @router.get('/config/prompt-templates')

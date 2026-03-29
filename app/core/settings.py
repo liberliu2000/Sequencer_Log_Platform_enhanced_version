@@ -6,9 +6,9 @@ from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.core.runtime import ensure_runtime_layout
 
-
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = ensure_runtime_layout()
 
 
 class Settings(BaseSettings):

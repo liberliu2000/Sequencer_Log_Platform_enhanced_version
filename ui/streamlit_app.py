@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yaml
+from ui.shared.design_system import get_design_tokens, streamlit_component_overrides, streamlit_root_vars
 
 st.set_page_config(page_title="测序仪日志整理及问题反馈系统", layout="wide")
 
@@ -250,7 +251,8 @@ def _html_block(markup: str) -> str:
     return textwrap.dedent(markup).strip()
 
 
-def inject_design_system():
+def inject_design_system(mode: str = "light"):
+    theme = get_design_tokens(mode)
     st.markdown(
         """
         <style>
@@ -991,61 +993,12 @@ def inject_design_system():
             border-radius: 999px;
         }
 
-        .diagnosis-card-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 0.9rem;
-            margin: 0.85rem 0 1.15rem;
-        }
-
-        .diagnosis-card {
-            min-width: 0;
-            overflow: hidden;
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(236, 247, 255, 0.95) 100%);
-            border: 1px solid rgba(84, 131, 179, 0.2);
-            border-radius: 24px;
-            padding: 1rem 1.05rem;
-            box-shadow: 0 18px 42px rgba(2, 16, 36, 0.08);
-        }
-
-        .diagnosis-card.full-span {
-            grid-column: 1 / -1;
-        }
-
-        .diagnosis-card-label {
-            color: var(--muted);
-            font-size: 0.76rem;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            font-weight: 700;
-            line-height: 1.4;
-        }
-
-        .diagnosis-card-value {
-            margin-top: 0.45rem;
-            color: var(--ink);
-            font-size: 1rem;
-            line-height: 1.78;
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-            word-break: break-word;
-            min-width: 0;
-        }
-
-        .diagnosis-card-value strong {
-            color: var(--ink);
-        }
-
         @media (max-width: 1100px) {
             .premium-stat-grid {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
             .dashboard-snapshot {
-                grid-template-columns: 1fr;
-            }
-
-            .diagnosis-card-grid {
                 grid-template-columns: 1fr;
             }
         }
@@ -1082,6 +1035,15 @@ def inject_design_system():
                 justify-content: flex-start;
             }
         }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <style>
+        {streamlit_root_vars(theme)}
+        {streamlit_component_overrides()}
         </style>
         """,
         unsafe_allow_html=True,
@@ -1577,62 +1539,6 @@ def render_text_panels(items: list[dict[str, Any]], *, columns: int = 2):
     )
 
 
-def _detail_text(value: Any, *, empty_text: str = "未提供") -> str:
-    if not _has_display_value(value):
-        return empty_text
-    if isinstance(value, bool):
-        return "是" if value else "否"
-    if isinstance(value, (int, float)):
-        return _format_metric_value(value)
-    if isinstance(value, dict):
-        lines = [f"{key}: {_detail_text(item, empty_text='-')}" for key, item in value.items() if _has_display_value(item)]
-        return "\n".join(lines) if lines else empty_text
-    if isinstance(value, (list, tuple, set)):
-        lines = [_detail_text(item, empty_text="-") for item in value if _has_display_value(item)]
-        return "\n".join(f"{index + 1}. {line}" for index, line in enumerate(lines)) if lines else empty_text
-    return str(value).strip() or empty_text
-
-
-def render_diagnosis_detail_cards(summary_text: Any, structured_result: Any):
-    structured = structured_result if isinstance(structured_result, dict) else {}
-    probable_module = structured.get("probable_module")
-    affected_modules = list(structured.get("affected_modules") or []) if isinstance(structured.get("affected_modules"), list) else []
-    if probable_module and probable_module not in affected_modules:
-        affected_modules = [probable_module] + affected_modules
-
-    sections = [
-        {"label": "诊断摘要", "value": summary_text or structured.get("root_cause_summary"), "full_span": True},
-        {"label": "根因摘要", "value": structured.get("root_cause_summary")},
-        {"label": "可能原因", "value": structured.get("possible_causes")},
-        {"label": "影响模块", "value": affected_modules},
-        {"label": "建议检查", "value": structured.get("recommended_checks")},
-        {"label": "排查步骤", "value": structured.get("troubleshooting_steps")},
-        {"label": "修复方向", "value": structured.get("possible_fix_paths")},
-        {"label": "责任部门", "value": structured.get("owner_departments")},
-        {"label": "严重级别 / 置信度", "value": f"严重级别: {_detail_text(structured.get('severity'), empty_text='未评估')}\n置信度: {_detail_text(structured.get('confidence'), empty_text='未评估')}"},
-        {"label": "风险提示", "value": structured.get("risk_warnings")},
-    ]
-    visible_sections = [section for section in sections if _has_display_value(section.get("value"))]
-    if not visible_sections:
-        return
-
-    cards: list[str] = []
-    for section in visible_sections:
-        full_span_class = " full-span" if section.get("full_span") else ""
-        body_html = escape(_detail_text(section.get("value"))).replace("\n", "<br>")
-        cards.append(
-            _html_block(
-                f"""
-                <article class="diagnosis-card{full_span_class}">
-                    <div class="diagnosis-card-label">{escape(str(section.get("label", "")))}</div>
-                    <div class="diagnosis-card-value">{body_html}</div>
-                </article>
-                """
-            )
-        )
-    st.markdown(f'<div class="diagnosis-card-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
-
-
 def enrich_error_family_frame(data) -> pd.DataFrame:
     try:
         df = data.copy() if isinstance(data, pd.DataFrame) else pd.DataFrame(data).copy()
@@ -1661,6 +1567,7 @@ def render_fig(
     title_x: float = 0,
     title_y: float = 0.98,
 ):
+    theme = get_design_tokens(st.session_state.get("theme_mode", "light"))
     title_text = _clean_chart_title(title if title is not None else getattr(getattr(fig.layout, "title", None), "text", None))
     wrapped_title_lines = _wrap_chart_title(title_text) if title_text else []
     if wrapped_title_lines and title_outside:
@@ -1691,18 +1598,18 @@ def render_fig(
         height=height,
         template="plotly_white",
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(255,255,255,0.94)",
+        plot_bgcolor=theme.surface_strong,
         colorway=PLOTLY_COLOR_SEQUENCE,
-        font=dict(family='"Avenir Next", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif', color="#021024", size=13),
-        title=dict(text="<br>".join(wrapped_title_lines) if wrapped_title_lines and not title_outside else "", font=dict(family='"Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif', size=22, color="#052659"), x=title_x, xanchor="left", y=title_y, yanchor="top", pad=dict(b=18)),
+        font=dict(family='"Avenir Next", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif', color=theme.ink, size=13),
+        title=dict(text="<br>".join(wrapped_title_lines) if wrapped_title_lines and not title_outside else "", font=dict(family='"Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif', size=22, color=theme.accent), x=title_x, xanchor="left", y=title_y, yanchor="top", pad=dict(b=18)),
         title_automargin=True,
         margin=dict(l=12, r=18, t=top_margin, b=28),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)", title_text=""),
         uniformtext=dict(minsize=10, mode="hide"),
-        hoverlabel=dict(bgcolor="#f4fbff", bordercolor="#7DA0CA", font=dict(color="#021024")),
+        hoverlabel=dict(bgcolor=theme.surface_solid, bordercolor=theme.accent_soft, font=dict(color=theme.ink)),
     )
-    fig.update_xaxes(automargin=True, title_standoff=14, gridcolor="rgba(84,131,179,0.12)", linecolor="rgba(84,131,179,0.18)", zeroline=False)
-    fig.update_yaxes(automargin=True, title_standoff=14, gridcolor="rgba(84,131,179,0.12)", linecolor="rgba(84,131,179,0.18)", zeroline=False)
+    fig.update_xaxes(automargin=True, title_standoff=14, gridcolor=theme.line, linecolor=theme.line_strong, zeroline=False)
+    fig.update_yaxes(automargin=True, title_standoff=14, gridcolor=theme.line, linecolor=theme.line_strong, zeroline=False)
     st.plotly_chart(fig, use_container_width=True, key=key, config={"responsive": True, "displayModeBar": False, "displaylogo": False, "scrollZoom": False})
 
 
@@ -1752,10 +1659,16 @@ def load_tasks_page(page: int = 1, page_size: int = 50) -> JsonDict:
     return cast(JsonDict, data) if ok and isinstance(data, dict) else {"items": [], "total": 0}
 
 
-inject_design_system()
+st.session_state.setdefault("theme_mode", "light")
+inject_design_system(str(st.session_state.get("theme_mode", "light")))
 st.session_state.setdefault("api_base", DEFAULT_API_BASE)
 API_BASE = st.sidebar.text_input("FastAPI 地址", value=st.session_state["api_base"])
 st.session_state["api_base"] = API_BASE
+theme_is_dark = st.sidebar.toggle("暗色主题", value=str(st.session_state.get("theme_mode", "light")) == "dark")
+next_theme_mode = "dark" if theme_is_dark else "light"
+if next_theme_mode != st.session_state.get("theme_mode", "light"):
+    st.session_state["theme_mode"] = next_theme_mode
+    st.rerun()
 api_ok, api_msg = check_api_health()
 
 tasks_page = load_tasks_page()
@@ -2119,8 +2032,7 @@ elif page == "LLM 诊断":
                     picked = st.selectbox("选择历史结果", labels, key="llm_hist_pick")
                     idx = labels.index(picked)
                     selected_hist = filtered_rows[idx]
-                    selected_hist_structured = (selected_hist.get("response_payload") or {}).get("structured_result", selected_hist.get("response_payload", {}))
-                    render_diagnosis_detail_cards(selected_hist.get("chinese_summary", ""), selected_hist_structured)
+                    st.text(str(selected_hist.get("chinese_summary", "")))
                     token_summary = selected_hist.get("token_summary", {}) or {}
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("分析深度", selected_hist.get("analysis_stage", "-"))
@@ -2129,7 +2041,7 @@ elif page == "LLM 诊断":
                     c4.metric("总 Token", token_summary.get("final_total_tokens") or "-")
                     tab1, tab2, tab3, tab4, tab5 = st.tabs(["结构化结果", "上下文摘要", "源码片段", "相似案例", "完整片段"])
                     with tab1:
-                        safe_json(selected_hist_structured)
+                        safe_json((selected_hist.get("response_payload") or {}).get("structured_result", selected_hist.get("response_payload", {})))
                     with tab2:
                         safe_json(selected_hist.get("context_summary", {}))
                     with tab3:
@@ -2250,7 +2162,7 @@ elif page == "LLM 诊断":
                 result = st.session_state.get("latest_diag_result") if st.session_state.get("latest_diag_signature") == signature else None
                 if result:
                     st.markdown("### 诊断结论")
-                    render_diagnosis_detail_cards(result.get("chinese_summary", ""), result.get("structured_result", {}))
+                    st.text(str(result.get("chinese_summary", "")))
                     token_summary = result.get("token_summary", {}) or {}
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("分析深度", result.get("analysis_stage", "-"))

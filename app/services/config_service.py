@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.core.settings import get_settings
 from app.utils.rules import load_yaml, save_yaml
 from app.services.analysis_depth_manager import AnalysisDepthManager
+from app.services.env_file_service import EnvFileService
 from app.services.prompt_template_service import PromptTemplateService
 from app.services.solution_repository import MODULE_PREFIXES, MODULE_TREE
 
@@ -17,6 +18,9 @@ class ConfigService:
             "parser_rules": load_yaml(self.settings.parser_rules_path),
             "error_rules": load_yaml(self.settings.error_rules_path),
             "prompt_templates": PromptTemplateService().get_templates(),
+            "env_file": {
+                "items": EnvFileService().list_items(),
+            },
             "llm": {
                 "enabled": self.settings.llm_enabled,
                 "base_url": self.settings.llm_base_url,

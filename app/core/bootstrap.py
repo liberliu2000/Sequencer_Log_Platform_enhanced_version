@@ -4,8 +4,9 @@ import os
 import sys
 from pathlib import Path
 
+from app.core.runtime import ensure_runtime_layout, runtime_root
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = runtime_root()
 
 
 def ensure_project_root_on_path() -> Path:
@@ -23,6 +24,7 @@ def ensure_working_directory(project_root: Path | None = None) -> Path:
 
 
 def bootstrap_for_local_run() -> Path:
-    root = ensure_project_root_on_path()
+    root = ensure_runtime_layout()
+    ensure_project_root_on_path()
     ensure_working_directory(root)
     return root
