@@ -114,6 +114,23 @@ def _rgb_to_hex(rgb: tuple[float, float, float] | tuple[int, int, int]) -> str:
     return "#{:02X}{:02X}{:02X}".format(*clipped)
 
 
+def _normalize_color_hex(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("#"):
+        try:
+            _hex_to_rgb(text)
+            return text.upper()
+        except ValueError:
+            return None
+    match = re.fullmatch(r"rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)", text, re.IGNORECASE)
+    if not match:
+        return None
+    rgb = tuple(max(0, min(255, int(channel))) for channel in match.groups())
+    return _rgb_to_hex(cast(tuple[int, int, int], rgb))
+
+
 def _mix_hex(source: str, target: str, ratio: float) -> str:
     start_rgb = _hex_to_rgb(source)
     end_rgb = _hex_to_rgb(target)
@@ -131,7 +148,10 @@ def _relative_luminance(color: str) -> float:
         srgb = channel / 255
         return srgb / 12.92 if srgb <= 0.04045 else ((srgb + 0.055) / 1.055) ** 2.4
 
-    red, green, blue = _hex_to_rgb(color)
+    normalized = _normalize_color_hex(color)
+    if normalized is None:
+        return 0.5
+    red, green, blue = _hex_to_rgb(normalized)
     return 0.2126 * _channel_luminance(red) + 0.7152 * _channel_luminance(green) + 0.0722 * _channel_luminance(blue)
 
 
@@ -1568,6 +1588,7 @@ def render_fig(
     title_y: float = 0.98,
 ):
     theme = get_design_tokens(st.session_state.get("theme_mode", "light"))
+    plotly_template = "plotly_dark" if theme.name == "dark" else "plotly_white"
     title_text = _clean_chart_title(title if title is not None else getattr(getattr(fig.layout, "title", None), "text", None))
     wrapped_title_lines = _wrap_chart_title(title_text) if title_text else []
     if wrapped_title_lines and title_outside:
@@ -1596,7 +1617,7 @@ def render_fig(
     fig.update_layout(
         autosize=True,
         height=height,
-        template="plotly_white",
+        template=plotly_template,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor=theme.surface_strong,
         colorway=PLOTLY_COLOR_SEQUENCE,
@@ -1604,12 +1625,55 @@ def render_fig(
         title=dict(text="<br>".join(wrapped_title_lines) if wrapped_title_lines and not title_outside else "", font=dict(family='"Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif', size=22, color=theme.accent), x=title_x, xanchor="left", y=title_y, yanchor="top", pad=dict(b=18)),
         title_automargin=True,
         margin=dict(l=12, r=18, t=top_margin, b=28),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)", title_text=""),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(0,0,0,0)",
+            title_text="",
+            font=dict(color=theme.ink),
+        ),
         uniformtext=dict(minsize=10, mode="hide"),
         hoverlabel=dict(bgcolor=theme.surface_solid, bordercolor=theme.accent_soft, font=dict(color=theme.ink)),
     )
-    fig.update_xaxes(automargin=True, title_standoff=14, gridcolor=theme.line, linecolor=theme.line_strong, zeroline=False)
-    fig.update_yaxes(automargin=True, title_standoff=14, gridcolor=theme.line, linecolor=theme.line_strong, zeroline=False)
+    fig.update_annotations(font=dict(color=theme.ink))
+    fig.update_xaxes(
+        automargin=True,
+        title_standoff=14,
+        gridcolor=theme.line,
+        linecolor=theme.line_strong,
+        zeroline=False,
+        tickfont=dict(color=theme.ink),
+        title_font=dict(color=theme.ink),
+    )
+    fig.update_yaxes(
+        automargin=True,
+        title_standoff=14,
+        gridcolor=theme.line,
+        linecolor=theme.line_strong,
+        zeroline=False,
+        tickfont=dict(color=theme.ink),
+        title_font=dict(color=theme.ink),
+    )
+    for trace in fig.data:
+        trace_type = str(getattr(trace, "type", "") or "")
+        if trace_type in {"pie", "sunburst", "treemap", "funnelarea"}:
+            marker_colors = getattr(getattr(trace, "marker", None), "colors", None)
+            color_values = list(marker_colors) if marker_colors is not None and not isinstance(marker_colors, str) else []
+            if not color_values:
+                labels = getattr(trace, "labels", None)
+                label_count = len(labels) if labels is not None else 1
+                color_values = [PLOTLY_COLOR_SEQUENCE[index % len(PLOTLY_COLOR_SEQUENCE)] for index in range(max(1, label_count))]
+            inside_text_colors = [_pick_contrast_text(_normalize_color_hex(color) or theme.accent) for color in color_values]
+            trace.update(
+                textfont=dict(color=theme.ink),
+                insidetextfont=dict(color=inside_text_colors),
+                outsidetextfont=dict(color=theme.ink),
+            )
+        else:
+            trace.update(textfont=dict(color=theme.ink))
     st.plotly_chart(fig, use_container_width=True, key=key, config={"responsive": True, "displayModeBar": False, "displaylogo": False, "scrollZoom": False})
 
 
