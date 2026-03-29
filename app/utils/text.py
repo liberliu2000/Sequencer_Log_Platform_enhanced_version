@@ -82,7 +82,7 @@ def infer_cycle_from_text(*texts: str) -> int | None:
     patterns = [
         r"\bCycle\s*(\d+)\b",
         r"\bcycle\s*[=:]?\s*(\d+)\b",
-        r"\bcycle(\d{1,4})\b",
+        r"\bcycle(\d{1,4})(?=[_.\-\s]|$)",
         r"\bposition\s+(\d{1,4})\b",
         r"\bS(\d{3,4})\b",
         r"\bCycle(\d{1,4})\b",
@@ -111,7 +111,10 @@ def infer_chip_name(*texts: str) -> str | None:
         for p in patterns:
             m = re.search(p, text, re.IGNORECASE)
             if m:
-                return m.group(1)
+                value = m.group(1).strip()
+                if "." in value:
+                    value = value.split(".", 1)[0]
+                return value or None
     return None
 
 
