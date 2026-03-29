@@ -27,9 +27,15 @@ function Invoke-ExternalCommand {
     )
 
     Write-Host ("> " + ($CommandParts -join " "))
-    & $CommandParts[0] @CommandParts[1..($CommandParts.Length - 1)]
+    $Command = $CommandParts[0]
+    $Arguments = @()
+    if ($CommandParts.Length -gt 1) {
+        $Arguments = $CommandParts[1..($CommandParts.Length - 1)]
+    }
+
+    & $Command @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code $LASTEXITCODE: $($CommandParts -join ' ')"
+        throw "Command failed with exit code ${LASTEXITCODE}: $($CommandParts -join ' ')"
     }
 }
 
