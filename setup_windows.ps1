@@ -110,7 +110,7 @@ Set-Location $ProjectRoot
 Write-Host "CycleDash Windows setup"
 Write-Host "Project root: $ProjectRoot"
 
-$PythonCmd = Get-PythonCommand
+[string[]]$PythonCmd = @(Get-PythonCommand)
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $VenvActivate = Join-Path $ProjectRoot ".venv\Scripts\Activate.ps1"
 
