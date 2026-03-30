@@ -26,6 +26,7 @@ def _maybe_reexec_in_venv() -> None:
     subprocess.run([str(venv_python), "-m", "scripts.run_api"], check=True, env=env)
     raise SystemExit(0)
 
+
 _maybe_reexec_in_venv()
 
 import uvicorn

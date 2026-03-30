@@ -78,11 +78,9 @@
 ### 本地快速开始
 
 ```powershell
-
 py -3.12 -m venv .venv
-.venv\Scripts\activate
-python -m pip install -U pip setuptools wheel
-
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 python -m scripts.init_db
@@ -109,7 +107,7 @@ python -m scripts.run_ui
 启动后可访问：
 
 ```text
-http://localhost:8501
+http://127.0.0.1:8501
 ```
 
 ### 本地一键启动
@@ -274,7 +272,7 @@ python scripts/release_sync.py --patch
 ## 当前默认访问地址
 
 - FastAPI 文档：`http://127.0.0.1:8000/docs`
-- Streamlit 页面：`http://localhost:8501`
+- Streamlit 页面：`http://127.0.0.1:8501`
 
 ## 注意事项
 

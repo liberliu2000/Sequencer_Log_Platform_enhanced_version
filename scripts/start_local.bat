@@ -17,8 +17,9 @@ if exist "%ENV_FILE%" (
     )
 )
 
+set "API_DOCS_URL=http://127.0.0.1:%APP_PORT%/docs"
 set "API_HEALTH_URL=http://127.0.0.1:%APP_PORT%/api/v1/health"
-set "STREAMLIT_URL=http://localhost:8501"
+set "STREAMLIT_URL=http://127.0.0.1:8501"
 
 echo [1/3] Install requirements
 "%PYTHON_CMD%" -m pip install -r requirements.txt
@@ -33,11 +34,11 @@ start "Sequencer API" powershell -NoExit -Command "& '%PYTHON_CMD%' '%PROJECT_RO
 start "Sequencer UI" powershell -NoExit -Command "& '%PYTHON_CMD%' '%PROJECT_ROOT%\scripts\run_ui.py'"
 
 echo Waiting for FastAPI: %API_HEALTH_URL%
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(60); $ready=$false; while((Get-Date)-lt $deadline){ try { $resp=Invoke-WebRequest -Uri '%API_HEALTH_URL%' -UseBasicParsing -TimeoutSec 5; if($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500){ $ready=$true; break } } catch {} Start-Sleep -Seconds 2 }; if($ready){ exit 0 } else { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$deadline=(Get-Date).AddSeconds(60); $ready=$false; while((Get-Date)-lt $deadline){ try { $resp=Invoke-WebRequest -Uri '%API_HEALTH_URL%' -UseBasicParsing -TimeoutSec 5; if($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500){ $ready=$true; break } } catch {} Start-Sleep -Seconds 2 }; if($ready){ Start-Process '%API_DOCS_URL%'; exit 0 } else { exit 1 }"
 if errorlevel 1 (
-    echo FastAPI did not become ready within 60 seconds. API health endpoint: %API_HEALTH_URL%
+    echo FastAPI did not become ready within 60 seconds. Open manually if needed: %API_DOCS_URL%
 ) else (
-    echo FastAPI is ready: %API_HEALTH_URL%
+    echo Opened FastAPI docs: %API_DOCS_URL%
 )
 
 echo Waiting for Streamlit: %STREAMLIT_URL%

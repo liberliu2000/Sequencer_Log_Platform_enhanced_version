@@ -108,8 +108,9 @@ $PythonCommandParts = Get-PythonCommandParts -ProjectRoot $ProjectRoot
 $PythonExecutable = $PythonCommandParts[0]
 $EnvFile = Join-Path $ProjectRoot ".env"
 $ApiPort = Get-DotEnvValue -Path $EnvFile -Key "APP_PORT" -DefaultValue "8000"
+$ApiDocsUrl = "http://127.0.0.1:${ApiPort}/docs"
 $ApiHealthUrl = "http://127.0.0.1:${ApiPort}/api/v1/health"
-$StreamlitUrl = "http://localhost:8501"
+$StreamlitUrl = "http://127.0.0.1:8501"
 
 Write-Host "[1/3] Install requirements"
 Invoke-ExternalCommand -CommandParts ($PythonCommandParts + @("-m", "pip", "install", "-r", "requirements.txt"))
@@ -123,9 +124,10 @@ Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", "& '$PythonExe
 
 Write-Host "Waiting for FastAPI: $ApiHealthUrl"
 if (Wait-HttpReady -Url $ApiHealthUrl -TimeoutSeconds 60) {
-    Write-Host "FastAPI is ready: $ApiHealthUrl"
+    Start-Process $ApiDocsUrl | Out-Null
+    Write-Host "Opened FastAPI docs: $ApiDocsUrl"
 } else {
-    Write-Host "FastAPI did not become ready within 60 seconds. API health endpoint: $ApiHealthUrl" -ForegroundColor Yellow
+    Write-Host "FastAPI did not become ready within 60 seconds. Open manually if needed: $ApiDocsUrl" -ForegroundColor Yellow
 }
 
 Write-Host "Waiting for Streamlit: $StreamlitUrl"

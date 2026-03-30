@@ -26,6 +26,7 @@ def _maybe_reexec_in_venv() -> None:
     subprocess.run([str(venv_python), "-m", "scripts.run_ui"], check=True, env=env)
     raise SystemExit(0)
 
+
 from app.core.bootstrap import bootstrap_for_local_run
 
 _maybe_reexec_in_venv()
@@ -37,4 +38,19 @@ if __name__ == "__main__":
     env = os.environ.copy()
     env.setdefault("PYTHONPATH", str(PROJECT_ROOT))
     print(f"Starting Streamlit from project_root={PROJECT_ROOT}")
-    subprocess.run([sys.executable, "-m", "streamlit", "run", str(target)], check=True, env=env)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(target),
+            "--server.address=127.0.0.1",
+            "--server.port=8501",
+            "--server.headless=true",
+            "--browser.serverAddress=127.0.0.1",
+            "--browser.serverPort=8501",
+        ],
+        check=True,
+        env=env,
+    )

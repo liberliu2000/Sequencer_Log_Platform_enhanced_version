@@ -202,17 +202,19 @@ try {
     $EnvFile = Join-Path $ProjectRoot ".env"
     $ApiPort = Get-DotEnvValue -Path $EnvFile -Key "APP_PORT" -DefaultValue "8000"
     $ApiHost = "127.0.0.1"
+    $ApiDocsUrl = "http://${ApiHost}:${ApiPort}/docs"
     $ApiHealthUrl = "http://${ApiHost}:${ApiPort}/api/v1/health"
-    $StreamlitUrl = "http://localhost:8501"
+    $StreamlitUrl = "http://127.0.0.1:8501"
 
     Start-ServiceWindow -Title "FastAPI" -Command "& '$VenvPython' '$ProjectRoot\scripts\run_api.py'"
     Start-ServiceWindow -Title "Streamlit" -Command "& '$VenvPython' '$ProjectRoot\scripts\run_ui.py'"
 
     Write-Host "Waiting for FastAPI to become ready: $ApiHealthUrl"
     if (Wait-HttpReady -Url $ApiHealthUrl -TimeoutSeconds 60) {
-        Write-Host "FastAPI is ready: $ApiHealthUrl"
+        Start-Process $ApiDocsUrl | Out-Null
+        Write-Host "Opened FastAPI docs: $ApiDocsUrl"
     } else {
-        Write-Host "FastAPI did not become ready within 60 seconds. API health endpoint: $ApiHealthUrl" -ForegroundColor Yellow
+        Write-Host "FastAPI did not become ready within 60 seconds. You can open it manually later: $ApiDocsUrl" -ForegroundColor Yellow
     }
 
     Write-Host "Waiting for Streamlit to become ready: $StreamlitUrl"
