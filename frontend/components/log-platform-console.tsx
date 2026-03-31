@@ -767,6 +767,97 @@ export function LogPlatformConsole() {
     }
   }
 
+  async function handleRunDiagnosis() {
+    if (!selectedTaskUuid || !selectedErrorSignature) {
+      setNotice({ tone: "error", text: "请先选择任务和错误签名。" });
+      return;
+    }
+    try {
+      const formData = new FormData();
+      formData.append("analysis_depth", llmForm.analysisDepth);
+      formData.append("module", llmForm.module);
+      formData.append("submodule", llmForm.submodule);
+      formData.append("trigger_scenario", llmForm.triggerScenario);
+      formData.append("operation_path", llmForm.operationPath);
+      formData.append("customer_symptom", llmForm.customerSymptom);
+      formData.append("environment_info", llmForm.environmentInfo);
+      formData.append("reproduction_steps", llmForm.reproductionSteps);
+      formData.append("source_notes", llmForm.sourceNotes);
+      formData.append("existing_solution_json", JSON.stringify(reviewDraft));
+      llmSourceFiles.forEach((file) => formData.append("source_files", file));
+      const result = await withBusy("正在执行综合诊断", () =>
+        request<AnyRecord>(`/tasks/${selectedTaskUuid}/errors/${selectedErrorSignature}/analyze`, {
+          method: "POST",
+          query: { force: llmForm.force },
+          formData,
+        }),
+      );
+      setLlmBundle((current) => ({ ...current, latestDiagnosis: result }));
+      setNotice({ tone: "success", text: "综合诊断已完成。" });
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleSubmitSolutionHub() {
+    if (!hubForm.module || !hubForm.error_name) {
+      setNotice({ tone: "error", text: "请至少填写模块和错误名称。" });
+      return;
+    }
+    try {
+      const payload = {
+        module: hubForm.module,
+        error_name: hubForm.error_name,
+        message: hubForm.message,
+        message_keywords: hubForm.message_keywords.split(",").map((item) => item.trim()).filter(Boolean),
+        tags: hubForm.tags.split(",").map((item) => item.trim()).filter(Boolean),
+        task_clusters: hubSelectedClusters,
+        root_cause_analysis: hubForm.root_cause_analysis,
+        verified_solution: hubForm.verified_solution,
+        workaround: hubForm.workaround,
+        trigger_scenario: hubForm.trigger_scenario,
+        task_uuid: hubForm.task_uuid || undefined,
+        normalized_signature: hubForm.normalized_signature || undefined,
+        reusable: true,
+        source: "next_frontend_solution_hub",
+      };
+      const endpoint = isReviewer ? "/solution-repository/records" : "/solution-reviews";
+      await withBusy("正在提交方案", () =>
+        request(endpoint, {
+          method: "POST",
+          body: payload,
+        }),
+      );
+      setNotice({ tone: "success", text: isReviewer ? "方案已写入方案库。" : "方案已提交审核。" });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleUnknownReview(status: string) {
+    if (!selectedUnknownSignature) {
+      setNotice({ tone: "error", text: "请先选择一个未知日志簇。" });
+      return;
+    }
+    try {
+      await withBusy("正在提交未知日志审核", () =>
+        request(`/active-learning/unknown-clusters/${selectedUnknownSignature}/review`, {
+          method: "POST",
+          body: {
+            review_status: status,
+            reviewer: unknownReviewer || user?.username,
+            notes: unknownReviewNotes || undefined,
+          },
+        }),
+      );
+      setNotice({ tone: "success", text: `未知日志簇已更新为 ${status}。` });
+      await loadUnknown();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
   useEffect(() => {
     const storedBase = typeof window !== "undefined" ? window.localStorage.getItem(API_BASE_STORAGE_KEY) || normalizeApiBaseUrl("") : normalizeApiBaseUrl("");
     const storedToken = typeof window !== "undefined" ? window.localStorage.getItem(TOKEN_STORAGE_KEY) || "" : "";
@@ -956,13 +1047,13 @@ export function LogPlatformConsole() {
     ) : page === "parameters" ? (
       <div className="space-y-8"><SectionTitle title="参数趋势分析" description="按参数和单位查看趋势、子步骤聚合和 Row Scan 指标。" actions={<Button variant="secondary" onClick={() => void loadParameters()}><RefreshCcw className="h-4 w-4" />刷新参数趋势</Button>} /><Card><CardContent className="space-y-4 pt-6"><Field label="参数列表"><ChipToggleGroup options={safeArray(parameterBundle.definitions).map((item) => String(item.parameter_name))} selected={selectedParameters} onToggle={toggleParameter} /></Field><Field label="趋势单位"><Select value={parameterUnit} onChange={(event) => setParameterUnit(event.target.value)}>{durationUnits.map((unit) => <option key={unit.value} value={unit.value}>{unit.label}</option>)}</Select></Field></CardContent></Card>{selectedParameters.map((name) => <DataTable key={name} title={`参数趋势: ${name}`} rows={safeArray(safeObject(parameterBundle.parameterSeries)[name])} />)}<DataTable title="Sub-step Cycle Series" rows={safeArray(parameterBundle.substepSeries)} /><DataTable title="Row Scan Metric Series" rows={safeArray(parameterBundle.rowScanMetrics)} /></div>
     ) : page === "llm" ? (
-      <div className="space-y-8"><SectionTitle title="LLM 诊断" description="结合日志、上下文、源代码片段和历史案例执行综合诊断。" actions={<Button variant="secondary" onClick={() => void loadLlm()}><RefreshCcw className="h-4 w-4" />刷新诊断数据</Button>} /><TabBar tabs={[{ key: "history", label: "历史诊断" }, { key: "diagnose", label: "综合诊断" }]} active={llmTab} onChange={setLlmTab} />{llmTab === "history" ? <DataTable title="历史诊断列表" rows={safeArray(llmBundle.history)} /> : <Card><CardContent className="grid gap-4 pt-6 lg:grid-cols-2"><Field label="错误签名"><Select value={selectedErrorSignature} onChange={(event) => setSelectedErrorSignature(event.target.value)}><option value="">请选择错误</option>{safeArray(llmBundle.errors).map((row) => <option key={String(row.normalized_signature)} value={String(row.normalized_signature)}>{shortText(row.display_signature || row.normalized_signature, 70)}</option>)}</Select></Field><Field label="分析深度"><Select value={llmForm.analysisDepth} onChange={(event) => setLlmForm((current) => ({ ...current, analysisDepth: event.target.value }))}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></Select></Field><div className="lg:col-span-2"><Field label="触发场景"><Textarea value={llmForm.triggerScenario} onChange={(event) => setLlmForm((current) => ({ ...current, triggerScenario: event.target.value }))} /></Field></div><div className="lg:col-span-2"><Field label="上传相关源文件"><Input type="file" multiple onChange={(event) => setLlmSourceFiles(Array.from(event.target.files || []))} /></Field></div></CardContent></Card>}<JsonPreview title="LLM 配置快照" value={llmBundle.config} /></div>
+      <div className="space-y-8"><SectionTitle title="LLM 诊断" description="结合日志、上下文、源代码片段和历史案例执行综合诊断。" actions={<Button variant="secondary" onClick={() => void loadLlm()}><RefreshCcw className="h-4 w-4" />刷新诊断数据</Button>} /><TabBar tabs={[{ key: "history", label: "历史诊断" }, { key: "diagnose", label: "综合诊断" }]} active={llmTab} onChange={setLlmTab} />{llmTab === "history" ? <DataTable title="历史诊断列表" rows={safeArray(llmBundle.history)} /> : <><Card><CardContent className="grid gap-4 pt-6 lg:grid-cols-2"><Field label="错误签名"><Select value={selectedErrorSignature} onChange={(event) => setSelectedErrorSignature(event.target.value)}><option value="">请选择错误</option>{safeArray(llmBundle.errors).map((row) => <option key={String(row.normalized_signature)} value={String(row.normalized_signature)}>{shortText(row.display_signature || row.normalized_signature, 70)}</option>)}</Select></Field><Field label="分析深度"><Select value={llmForm.analysisDepth} onChange={(event) => setLlmForm((current) => ({ ...current, analysisDepth: event.target.value }))}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></Select></Field><Field label="模块"><Input value={llmForm.module} onChange={(event) => setLlmForm((current) => ({ ...current, module: event.target.value }))} /></Field><Field label="子模块"><Input value={llmForm.submodule} onChange={(event) => setLlmForm((current) => ({ ...current, submodule: event.target.value }))} /></Field><div className="lg:col-span-2"><Field label="触发场景"><Textarea value={llmForm.triggerScenario} onChange={(event) => setLlmForm((current) => ({ ...current, triggerScenario: event.target.value }))} /></Field></div><div className="lg:col-span-2"><Field label="上传相关源文件"><Input type="file" multiple onChange={(event) => setLlmSourceFiles(Array.from(event.target.files || []))} /></Field></div></CardContent></Card><div className="flex flex-wrap gap-3"><Button onClick={() => void handleRunDiagnosis()}><Send className="h-4 w-4" />开始综合诊断</Button></div>{llmBundle.latestDiagnosis ? <JsonPreview title="最新诊断结果" value={llmBundle.latestDiagnosis} /> : null}</>}<JsonPreview title="LLM 配置快照" value={llmBundle.config} /></div>
     ) : page === "solutionHub" ? (
-      <div className="space-y-8"><SectionTitle title="方案库中心" description="围绕全局可复用方案、任务簇、模块前缀和审核流的统一入口。" actions={<Button variant="secondary" onClick={() => void loadSolutionHub()}><RefreshCcw className="h-4 w-4" />刷新方案中心</Button>} /><TabBar tabs={[{ key: "submit", label: "方案提交" }, { key: "query", label: "方案检索" }, { key: "review", label: "方案审核" }, { key: "taxonomy", label: "任务簇与模块" }]} active={solutionTab} onChange={setSolutionTab} />{solutionTab === "submit" ? <Card><CardContent className="grid gap-4 pt-6 lg:grid-cols-2"><Field label="模块"><Select value={hubForm.module} onChange={(event) => setHubForm((current) => ({ ...current, module: event.target.value }))}><option value="">请选择模块</option>{modules.map((module) => <option key={String(module.id)} value={String(module.module_key)}>{module.display_name} / {module.prefix}</option>)}</Select></Field><Field label="错误名称"><Input value={hubForm.error_name} onChange={(event) => setHubForm((current) => ({ ...current, error_name: event.target.value }))} /></Field><div className="lg:col-span-2"><Field label="任务簇"><ChipToggleGroup options={taskClusters.map((item) => String(item.display_name || item.cluster_key))} selected={hubSelectedClusters} onToggle={toggleTaskCluster} /></Field></div><div className="lg:col-span-2"><Field label="message / 现象描述"><Textarea value={hubForm.message} onChange={(event) => setHubForm((current) => ({ ...current, message: event.target.value }))} /></Field></div></CardContent></Card> : solutionTab === "query" ? <DataTable title="方案记录" rows={safeArray(hubBundle.records?.items)} /> : solutionTab === "review" ? <DataTable title="审核中心" rows={safeArray(hubBundle.reviews?.items)} /> : <><DataTable title="任务簇" rows={safeArray(hubBundle.taskClusters)} /><DataTable title="模块配置" rows={safeArray(hubBundle.modules)} /></>}</div>
+      <div className="space-y-8"><SectionTitle title="方案库中心" description="围绕全局可复用方案、任务簇、模块前缀和审核流的统一入口。" actions={<Button variant="secondary" onClick={() => void loadSolutionHub()}><RefreshCcw className="h-4 w-4" />刷新方案中心</Button>} /><TabBar tabs={[{ key: "submit", label: "方案提交" }, { key: "query", label: "方案检索" }, { key: "review", label: "方案审核" }, { key: "taxonomy", label: "任务簇与模块" }]} active={solutionTab} onChange={setSolutionTab} />{solutionTab === "submit" ? <><Card><CardContent className="grid gap-4 pt-6 lg:grid-cols-2"><Field label="模块"><Select value={hubForm.module} onChange={(event) => setHubForm((current) => ({ ...current, module: event.target.value }))}><option value="">请选择模块</option>{modules.map((module) => <option key={String(module.id)} value={String(module.module_key)}>{module.display_name} / {module.prefix}</option>)}</Select></Field><Field label="错误名称"><Input value={hubForm.error_name} onChange={(event) => setHubForm((current) => ({ ...current, error_name: event.target.value }))} /></Field><div className="lg:col-span-2"><Field label="任务簇"><ChipToggleGroup options={taskClusters.map((item) => String(item.display_name || item.cluster_key))} selected={hubSelectedClusters} onToggle={toggleTaskCluster} /></Field></div><div className="lg:col-span-2"><Field label="message / 现象描述"><Textarea value={hubForm.message} onChange={(event) => setHubForm((current) => ({ ...current, message: event.target.value }))} /></Field></div><div className="lg:col-span-2"><Field label="根因分析"><Textarea value={hubForm.root_cause_analysis} onChange={(event) => setHubForm((current) => ({ ...current, root_cause_analysis: event.target.value }))} /></Field></div><div className="lg:col-span-2"><Field label="已验证解决方案"><Textarea value={hubForm.verified_solution} onChange={(event) => setHubForm((current) => ({ ...current, verified_solution: event.target.value }))} /></Field></div></CardContent></Card><Button onClick={() => void handleSubmitSolutionHub()}><Send className="h-4 w-4" />提交方案</Button></> : solutionTab === "query" ? <DataTable title="方案记录" rows={safeArray(hubBundle.records?.items)} /> : solutionTab === "review" ? <DataTable title="审核中心" rows={safeArray(hubBundle.reviews?.items)} /> : <><DataTable title="任务簇" rows={safeArray(hubBundle.taskClusters)} /><DataTable title="模块配置" rows={safeArray(hubBundle.modules)} /></>}</div>
     ) : page === "files" ? (
       <div className="space-y-8"><SectionTitle title="原始文件预览" description="查看任务中收录的原始文件和预览片段。" actions={<Button variant="secondary" onClick={() => void loadFiles()}><RefreshCcw className="h-4 w-4" />刷新文件列表</Button>} /><DataTable title="原始文件列表" rows={safeArray(filesBundle.list?.items)} /><JsonPreview title="文件预览" value={filesBundle.preview || {}} /></div>
     ) : page === "unknown" ? (
-      <div className="space-y-8"><SectionTitle title="未知日志待标注池" description="收集尚未命中 parser 或规则的日志簇，支持审核。" actions={<Button variant="secondary" onClick={() => void loadUnknown()}><RefreshCcw className="h-4 w-4" />刷新未知日志池</Button>} /><DataTable title="未知日志簇" rows={safeArray(unknownBundle.items)} />{selectedUnknownCluster ? <JsonPreview title="未知日志详情" value={selectedUnknownCluster} /> : null}</div>
+      <div className="space-y-8"><SectionTitle title="未知日志待标注池" description="收集尚未命中 parser 或规则的日志簇，支持审核。" actions={<Button variant="secondary" onClick={() => void loadUnknown()}><RefreshCcw className="h-4 w-4" />刷新未知日志池</Button>} /><DataTable title="未知日志簇" rows={safeArray(unknownBundle.items)} />{selectedUnknownCluster ? <><Card><CardContent className="grid gap-4 pt-6 lg:grid-cols-2"><Field label="审核人"><Input value={unknownReviewer} onChange={(event) => setUnknownReviewer(event.target.value)} /></Field><Field label="审核备注"><Textarea value={unknownReviewNotes} onChange={(event) => setUnknownReviewNotes(event.target.value)} /></Field></CardContent></Card><div className="flex flex-wrap gap-3"><Button onClick={() => void handleUnknownReview("approved")}>通过</Button><Button variant="secondary" onClick={() => void handleUnknownReview("ignored")}>忽略</Button><Button variant="danger" onClick={() => void handleUnknownReview("rejected")}>拒绝</Button></div><JsonPreview title="未知日志详情" value={selectedUnknownCluster} /></> : null}</div>
     ) : page === "rules" ? (
       <div className="space-y-8"><SectionTitle title="规则建议审核视图" description="先看本地规则建议，再按需触发 LLM 规则建议。" actions={<div className="flex flex-wrap gap-3"><Button variant="secondary" onClick={() => void loadRules(false)}><RefreshCcw className="h-4 w-4" />刷新本地建议</Button><Button onClick={() => void loadRules(true)}><WandSparkles className="h-4 w-4" />生成 / 刷新 LLM 建议</Button></div>} /><Card><CardContent className="space-y-4 pt-6"><label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={ruleLlmEnabled} onChange={(event) => setRuleLlmEnabled(event.target.checked)} />启用 LLM 规则建议</label><Field label="送入 LLM 的未知日志簇"><ChipToggleGroup options={safeArray(rulesBundle.unknownPool?.items).map((item) => String(item.signature))} selected={selectedRuleSignatures} onToggle={toggleRuleSignature} /></Field></CardContent></Card><DataTable title="本地新规则建议" rows={localNewSuggestions} />{ruleLlmEnabled ? <DataTable title="LLM 新规则建议" rows={llmNewSuggestions} /> : null}<DataTable title="建议文件" rows={ruleFiles} />{ruleFiles.length ? <Card><CardContent className="space-y-4 pt-6"><Field label="选择建议文件"><Select value={selectedRuleFile} onChange={(event) => { const filename = event.target.value; setSelectedRuleFile(filename); void loadRuleFile(filename); }}><option value="">请选择文件</option>{ruleFiles.map((file) => <option key={String(file.filename)} value={String(file.filename)}>{file.filename}</option>)}</Select></Field><JsonPreview value={ruleFileContent || {}} /></CardContent></Card> : null}</div>
     ) : page === "config" ? (
