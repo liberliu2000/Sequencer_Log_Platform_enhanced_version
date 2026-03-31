@@ -14,4 +14,13 @@ from app.main import app
 
 @pytest.fixture()
 def client():
-    return TestClient(app)
+    client = TestClient(app)
+    login_resp = client.post(
+        "/api/v1/auth/login",
+        json={"login_name": "Yanbo", "password": "MGItech_2026"},
+    )
+    if login_resp.status_code == 200:
+        token = login_resp.json().get("token")
+        if token:
+            client.headers.update({"Authorization": f"Bearer {token}"})
+    return client

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import get_current_user, require_reviewer_user
 from app.core.settings import get_settings
 from app.db.session import get_db
 from app.repositories.task_repository import TaskRepository
@@ -25,6 +26,7 @@ from app.services.solution_repository import SolutionRepositoryService
 from app.services.solution_review_service import SolutionReviewService
 from app.services.case_retriever import CaseRetriever
 from app.services.analysis_depth_manager import AnalysisDepthManager
+from app.services.solution_catalog_service import SolutionCatalogService
 from app.services.task_queue import queue
 from app.services.task_state_cache import task_state_cache
 from app.services.feedback_service import FeedbackService
@@ -758,11 +760,15 @@ def active_learning_rule_suggestion_file(filename: str):
     return {'filename': path.name, 'content': path.read_text(encoding='utf-8')}
 
 @router.get('/solution-repository/config')
-def solution_repository_config():
+def solution_repository_config(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    catalog = SolutionCatalogService(db)
     repo = ConfigService().get_all().get('solution_repository', {})
     return {
         'module_tree': repo.get('module_tree', []),
         'module_prefixes': repo.get('module_prefixes', {}),
+        'modules': catalog.list_modules(active_only=True),
+        'task_clusters': catalog.list_task_clusters(include_pending=bool(current_user.get("is_reviewer") or current_user.get("is_admin"))),
+        'fts_enabled': SolutionRepositoryService(db).fts_enabled(),
         'analysis_depths': AnalysisDepthManager().list_strategies(),
     }
 
@@ -772,43 +778,65 @@ def list_solution_records(
     module: str | None = None,
     submodule: str | None = None,
     error_code: str | None = None,
+    error_name: str | None = None,
     message: str | None = None,
+    message_keyword: str | None = None,
     normalized_signature: str | None = None,
     trigger_scenario: str | None = None,
+    task_cluster: str | None = None,
+    submitter: str | None = None,
     reusable: bool | None = None,
     review_status: str | None = None,
     search: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     items = SolutionRepositoryService(db).list_records(
         module=module,
         submodule=submodule,
         error_code=error_code,
+        error_name=error_name,
         message=message,
+        message_keyword=message_keyword,
         normalized_signature=normalized_signature,
         trigger_scenario=trigger_scenario,
+        task_cluster=task_cluster,
+        submitter=submitter,
         reusable=reusable,
         review_status=review_status,
         search=search,
+        created_from=created_from,
+        created_to=created_to,
+        updated_from=updated_from,
+        updated_to=updated_to,
+        viewer_username=str(current_user.get("username") or ""),
+        viewer_is_reviewer=bool(current_user.get("is_reviewer") or current_user.get("is_admin")),
         limit=limit,
     )
     return {'items': items, 'total': len(items)}
 
 
 @router.post('/solution-repository/records')
-def create_solution_record(payload: dict, db: Session = Depends(get_db)):
+def create_solution_record(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_reviewer_user)):
     try:
-        item = SolutionRepositoryService(db).create_record(payload)
+        item = SolutionRepositoryService(db).create_record(
+            {**payload, 'submitter': payload.get('submitter') or current_user.get('username'), 'review_status': 'approved'},
+            actor=str(current_user.get("username") or "reviewer"),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {'status': 'ok', 'item': item}
 
 
 @router.put('/solution-repository/records/{record_id}')
-def update_solution_record(record_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_solution_record(record_id: int, payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_reviewer_user)):
     try:
-        item = SolutionRepositoryService(db).update_record(record_id, payload)
+        item = SolutionRepositoryService(db).update_record(record_id, payload, actor=str(current_user.get("username") or "reviewer"))
     except KeyError:
         raise HTTPException(status_code=404, detail='solution record not found')
     except ValueError as exc:
@@ -817,19 +845,27 @@ def update_solution_record(record_id: int, payload: dict, db: Session = Depends(
 
 
 @router.get('/solution-reviews')
-def list_solution_reviews(status: str | None = None, limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
-    items = SolutionReviewService(db).list_reviews(status=status, limit=limit)
+def list_solution_reviews(status: str | None = None, limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    items = SolutionReviewService(db).list_reviews(
+        status=status,
+        limit=limit,
+        viewer_username=str(current_user.get("username") or ""),
+        viewer_is_reviewer=bool(current_user.get("is_reviewer") or current_user.get("is_admin")),
+    )
     return {'items': items, 'total': len(items)}
 
 
 @router.post('/solution-reviews')
-def create_solution_review(payload: dict, db: Session = Depends(get_db)):
-    item = SolutionReviewService(db).submit_for_review(payload, attachments=payload.get('attachments') or [])
+def create_solution_review(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    item = SolutionReviewService(db).submit_for_review(
+        {**payload, 'submitter': payload.get('submitter') or current_user.get('username'), 'created_by': current_user.get('username')},
+        attachments=payload.get('attachments') or [],
+    )
     return {'status': 'ok', 'item': item}
 
 
 @router.post('/solution-reviews/{review_id}/manual-review')
-def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(get_db)):
+def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_reviewer_user)):
     review_status = str(payload.get('review_status') or '').strip()
     if not review_status:
         raise HTTPException(status_code=400, detail='missing review_status')
@@ -837,7 +873,7 @@ def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(
         item = SolutionReviewService(db).manually_review(
             review_id,
             review_status=review_status,
-            reviewer=payload.get('reviewer'),
+            reviewer=payload.get('reviewer') or current_user.get('username'),
             notes=payload.get('notes'),
         )
     except KeyError:
@@ -848,7 +884,7 @@ def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(
 
 
 @router.get('/solution-repository/export')
-def export_solution_repository(format: str = Query(default='json'), db: Session = Depends(get_db)):
+def export_solution_repository(format: str = Query(default='json'), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     path = ExportService(db).export_solution_repository(export_format=format)
     return FileResponse(path=path, filename=Path(path).name)
 

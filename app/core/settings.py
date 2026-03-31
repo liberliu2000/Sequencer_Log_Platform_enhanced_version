@@ -94,6 +94,25 @@ class Settings(BaseSettings):
     cors_allow_origins: str = "*"
     task_queue_workers: int = 2
 
+    auth_session_hours: int = 12
+    auth_max_failed_logins: int = 5
+    auth_lock_minutes: int = 15
+    auth_verification_code_minutes: int = 10
+    auth_verification_resend_seconds: int = 60
+    auth_verification_max_daily_sends: int = 10
+    auth_default_admin_username: str = "Yanbo"
+    auth_default_admin_password: str = "MGItech_2026"
+
+    mail_delivery_mode: Literal["smtp", "console"] = "console"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = "noreply@example.com"
+    smtp_from_name: str = "Sequencer Log Platform"
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
     @field_validator("debug", mode="before")
     @classmethod
     def _coerce_debug(cls, value):

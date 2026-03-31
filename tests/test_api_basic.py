@@ -1,7 +1,17 @@
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from app.db.session import SessionLocal
-from app.models.db_models import NormalizedEventModel, SolutionRecordModel, SolutionReviewRecordModel, StepSummaryModel, UploadTaskModel
+from app.models.db_models import (
+    NormalizedEventModel,
+    RegistrationChallengeModel,
+    SolutionRecordModel,
+    SolutionReviewRecordModel,
+    StepSummaryModel,
+    UploadTaskModel,
+    UserModel,
+)
 
 
 def test_health(client: TestClient):
@@ -11,41 +21,53 @@ def test_health(client: TestClient):
 
 
 def test_solution_review_api_flow(client: TestClient):
-    seed = __import__("uuid").uuid4().hex[:8]
+    seed = uuid4().hex[:8]
     payload = {
         "task_uuid": f"task_{seed}",
         "submission_type": "solution_record",
         "error_name": f"Software alarm {seed}",
         "error_category": "logic_exception",
-        "module": "软件控制",
-        "submodule": "异常处理",
-        "error_code": "SW-2001",
-        "message": f"Unexpected transition {seed} while scheduler was switching from prepare to running and received duplicated callback events",
+        "module": "scheduler",
+        "submodule": "state_machine",
+        "message": f"Unexpected transition {seed} while scheduler switched states and received duplicated callback events",
         "normalized_signature": f"sw_sig_{seed}",
-        "trigger_scenario": "切换运行态时状态机收到重复触发，调度线程和设备回调同时写入状态，导致异常路径被持续复现。",
+        "trigger_scenario": "状态机在切换运行态时收到了重复回调，导致异常路径持续复现。",
         "impact_scope": "单次流程失败",
-        "root_cause_analysis": "状态机缺少幂等保护，重复触发后进入非法状态，异常分支还会再次回推调度事件，最终形成连锁失败。",
-        "verified_solution": "增加状态判重、重复触发忽略逻辑，并在进入 running 前补充一次状态一致性检查。",
-        "workaround": "重试前先复位任务状态并清理上一轮缓存事件。",
-        "owner_department": "软件控制",
+        "root_cause_analysis": "状态机缺少幂等保护，重复触发后进入非法状态。",
+        "verified_solution": "增加状态判重逻辑，并在进入 running 前补充一致性检查。",
+        "workaround": "重试前先复位任务状态并清理缓存事件。",
+        "owner_department": "scheduler",
         "submitter": "pytest_api",
         "source": "api_test",
+        "task_clusters": ["流程执行"],
+        "message_keywords": ["scheduler", "transition", "callback"],
         "reusable": True,
     }
     review_resp = client.post("/api/v1/solution-reviews", json=payload)
     assert review_resp.status_code == 200
     review_item = review_resp.json()["item"]
-    assert review_item["review_status"] == "approved"
+    assert review_item["review_status"] == "pending_review"
 
-    list_resp = client.get("/api/v1/solution-repository/records", params={"normalized_signature": payload["normalized_signature"]})
+    manual_resp = client.post(
+        f"/api/v1/solution-reviews/{review_item['id']}/manual-review",
+        json={"review_status": "approved", "notes": "pytest approve"},
+    )
+    assert manual_resp.status_code == 200
+    manual_item = manual_resp.json()["item"]
+    assert manual_item["linked_solution_id"] is not None
+
+    list_resp = client.get(
+        "/api/v1/solution-repository/records",
+        params={"normalized_signature": payload["normalized_signature"]},
+    )
     assert list_resp.status_code == 200
     items = list_resp.json()["items"]
     assert any(row["normalized_signature"] == payload["normalized_signature"] for row in items)
 
     db = SessionLocal()
     try:
-        if review_item.get("linked_solution_id"):
-            solution_row = db.get(SolutionRecordModel, review_item["linked_solution_id"])
+        if manual_item.get("linked_solution_id"):
+            solution_row = db.get(SolutionRecordModel, manual_item["linked_solution_id"])
             if solution_row:
                 db.delete(solution_row)
         review_row = db.get(SolutionReviewRecordModel, review_item["id"])
@@ -56,8 +78,49 @@ def test_solution_review_api_flow(client: TestClient):
         db.close()
 
 
+def test_register_verify_and_admin_review_flow(client: TestClient):
+    seed = uuid4().hex[:8]
+    username = f"user_{seed}"
+    email = f"{username}@example.com"
+
+    request_code_resp = client.post(
+        "/api/v1/auth/register/request-code",
+        json={"username": username, "email": email, "password": "Password_123", "registration_note": "pytest"},
+    )
+    assert request_code_resp.status_code == 200
+    assert request_code_resp.json()["status"] == "verification_sent"
+
+    db = SessionLocal()
+    try:
+        challenge = db.query(RegistrationChallengeModel).filter(RegistrationChallengeModel.username == username).one()
+        challenge.code_hash = __import__("hashlib").sha256(f"{challenge.id}:123456".encode("utf-8")).hexdigest()
+        db.commit()
+    finally:
+        db.close()
+
+    verify_resp = client.post("/api/v1/auth/register/verify-email", json={"login_name": username, "code": "123456"})
+    assert verify_resp.status_code == 200
+    assert verify_resp.json()["next_status"] == "verified_can_submit"
+    verification_token = verify_resp.json()["verification_token"]
+
+    register_resp = client.post("/api/v1/auth/register", json={"verification_token": verification_token})
+    assert register_resp.status_code == 200
+    assert register_resp.json()["next_status"] == "pending_admin_approval"
+
+    db = SessionLocal()
+    try:
+        user = db.query(UserModel).filter(UserModel.username == username).one()
+        user_id = user.id
+    finally:
+        db.close()
+
+    approve_resp = client.post(f"/api/v1/admin/users/{user_id}/status", json={"action": "approve"})
+    assert approve_resp.status_code == 200
+    assert approve_resp.json()["item"]["status"] == "approved"
+
+
 def test_movement_timeline_error_points_api(client: TestClient):
-    seed = __import__("uuid").uuid4().hex[:8]
+    seed = uuid4().hex[:8]
     task_uuid = f"timeline_{seed}"
     db = SessionLocal()
     try:
