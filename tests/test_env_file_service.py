@@ -80,7 +80,7 @@ def test_env_file_service_reset_uses_example_value_and_preserves_quotes():
         service = EnvFileService(env_path=env_path, example_path=example_path)
         reset_item = service.reset_item("LLM_MODEL")
 
-        assert reset_item["value"] == '"ep-default"'
+        assert reset_item["value"] == "ep-default"
         assert env_path.read_text(encoding="utf-8") == 'LLM_MODEL="ep-default"\n'
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
@@ -101,5 +101,40 @@ def test_env_file_service_can_append_missing_key_from_example():
         updated = service.update_item("SYSTEM_MEMORY_SOFT_LIMIT_PERCENT", "90")
         assert updated["value"] == "90"
         assert "SYSTEM_MEMORY_SOFT_LIMIT_PERCENT=90" in env_path.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(base_dir, ignore_errors=True)
+
+
+def test_env_file_service_quotes_special_values_and_returns_plain_text():
+    base_dir = _make_work_dir()
+    try:
+        env_path = base_dir / ".env"
+        example_path = base_dir / ".env.example"
+        env_path.write_text(
+            "SMTP_PASSWORD=oldpass\n"
+            "SMTP_FROM_NAME=Sequencer Log Platform\n",
+            encoding="utf-8",
+        )
+        example_path.write_text(
+            "SMTP_PASSWORD=\n"
+            "SMTP_FROM_NAME=Sequencer Log Platform\n"
+            "CUSTOM_ALERT_MESSAGE=\n",
+            encoding="utf-8",
+        )
+
+        service = EnvFileService(env_path=env_path, example_path=example_path)
+
+        password_item = service.update_item("SMTP_PASSWORD", "abc#123")
+        sender_item = service.update_item("SMTP_FROM_NAME", "Sequencer Ops #1")
+        appended_item = service.update_item("CUSTOM_ALERT_MESSAGE", "line #1 ready")
+
+        assert password_item["value"] == "abc#123"
+        assert sender_item["value"] == "Sequencer Ops #1"
+        assert appended_item["value"] == "line #1 ready"
+        assert env_path.read_text(encoding="utf-8").splitlines() == [
+            'SMTP_PASSWORD="abc#123"',
+            'SMTP_FROM_NAME="Sequencer Ops #1"',
+            'CUSTOM_ALERT_MESSAGE="line #1 ready"',
+        ]
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)

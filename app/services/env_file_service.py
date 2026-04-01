@@ -65,16 +65,58 @@ def _mask_value(value: str) -> str:
     return f"{text[:2]}{'*' * max(4, len(text) - 4)}{text[-2:]}"
 
 
-def _preserve_quote_style(source_value: str, new_value: str) -> str:
+def _unescape_quoted_value(text: str, quote: str) -> str:
+    result: list[str] = []
+    escaped = False
+    for char in text:
+        if escaped:
+            if char in {"\\", quote}:
+                result.append(char)
+            else:
+                result.extend(["\\", char])
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        result.append(char)
+    if escaped:
+        result.append("\\")
+    return "".join(result)
+
+
+def _decode_env_value(raw_value: str) -> str:
+    stripped = raw_value.strip()
+    if len(stripped) < 2 or stripped[0] != stripped[-1] or stripped[0] not in {"'", '"'}:
+        return raw_value
+    return _unescape_quoted_value(stripped[1:-1], stripped[0])
+
+
+def _quote_value(value: str, quote: str) -> str:
+    escaped = value.replace("\\", "\\\\")
+    if quote == '"':
+        escaped = escaped.replace('"', '\\"')
+    else:
+        escaped = escaped.replace("'", "\\'")
+    return f"{quote}{escaped}{quote}"
+
+
+def _should_quote_value(value: str) -> bool:
+    if value == "":
+        return False
+    return (
+        value != value.strip()
+        or any(char.isspace() for char in value)
+        or any(char in value for char in ("#", "\n", "\r", '"', "'"))
+    )
+
+
+def _render_env_value(source_value: str, new_value: str) -> str:
     stripped = source_value.strip()
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
-        quote = stripped[0]
-        escaped = new_value.replace("\\", "\\\\")
-        if quote == '"':
-            escaped = escaped.replace('"', '\\"')
-        else:
-            escaped = escaped.replace("'", "\\'")
-        return f"{quote}{escaped}{quote}"
+        return _quote_value(new_value, stripped[0])
+    if _should_quote_value(new_value):
+        return _quote_value(new_value, '"')
     return new_value
 
 
@@ -117,7 +159,7 @@ class EnvFileService:
                 export_prefix = f"{match.group('export')}{match.group('export_ws') or ' '}"
             entries[key] = EnvEntry(
                 key=key,
-                value=value,
+                value=_decode_env_value(value),
                 original_value=value,
                 line_index=index,
                 line=line,
@@ -153,7 +195,7 @@ class EnvFileService:
 
     @staticmethod
     def _render_new_entry_line(key: str, value: str) -> str:
-        return f"{key}={value}\n"
+        return f"{key}={_render_env_value('', value)}\n"
 
     def list_items(self) -> list[dict]:
         _lines, entries = self._read_entries()
@@ -185,7 +227,7 @@ class EnvFileService:
                 lines[-1] = f"{lines[-1]}\n"
             lines.append(new_line)
         else:
-            rendered_value = _preserve_quote_style(entry.original_value, str(value))
+            rendered_value = _render_env_value(entry.original_value, str(value))
             lines[entry.line_index] = (
                 f"{entry.leading}{entry.export_prefix}{entry.key}{entry.separator}{entry.value_prefix}"
                 f"{rendered_value}{entry.value_suffix}{entry.inline_comment}{entry.newline}"

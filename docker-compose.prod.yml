@@ -4,11 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile.api
     container_name: sequencer-log-platform-api
-    env_file:
-      - .env
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
+      - ./.env:/app/.env
+      - ./.env.example:/app/.env.example:ro
       - ./data:/app/data
       - ./config:/app/config
     restart: unless-stopped
