@@ -220,8 +220,104 @@ export function MetricCard({
   );
 }
 
+function flattenDetailRows(
+  value: unknown,
+  prefix = "",
+  depth = 0,
+): Array<{ label: string; value: string; note?: string }> {
+  const label = prefix || "value";
+  if (value === null || value === undefined || typeof value !== "object") {
+    return [{ label, value: toDisplayValue(value) }];
+  }
+
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      return [{ label, value: "-" }];
+    }
+    if (value.every((item) => item === null || typeof item !== "object")) {
+      return [{ label, value: value.map((item) => toDisplayValue(item)).join(" / ") }];
+    }
+    if (depth >= 1) {
+      return [
+        {
+          label,
+          value: `${value.length} 项`,
+          note: `示例: ${shortText(stringifyJson(value[0]), 120)}`,
+        },
+      ];
+    }
+    return value.slice(0, 6).flatMap((item, index) =>
+      flattenDetailRows(item, `${label}[${index + 1}]`, depth + 1),
+    );
+  }
+
+  const entries = Object.entries(safeObject(value));
+  if (!entries.length) {
+    return [{ label, value: "-" }];
+  }
+  if (depth >= 2) {
+    return [{ label, value: shortText(stringifyJson(value), 180) }];
+  }
+  return entries.flatMap(([key, item]) =>
+    flattenDetailRows(item, prefix ? `${prefix}.${key}` : key, depth + 1),
+  );
+}
+
 export function StatusBadge({ status }: { status: unknown }) {
   return <Badge className={statusBadgeTone(String(status ?? ""))}>{String(status ?? "-")}</Badge>;
+}
+
+export function DetailListCard({
+  value,
+  title,
+  description,
+  maxHeight = 420,
+}: {
+  value: unknown;
+  title?: string;
+  description?: string;
+  maxHeight?: number;
+}) {
+  const rows = flattenDetailRows(value).slice(0, 80);
+  return (
+    <Card>
+      {title ? (
+        <CardHeader>
+          <CardTitle className="text-base">{title}</CardTitle>
+          {description ? <CardDescription>{description}</CardDescription> : null}
+        </CardHeader>
+      ) : null}
+      <CardContent className={title ? "pt-0" : "pt-6"}>
+        {rows.length ? (
+          <div
+            className="overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--card)]"
+            style={{ maxHeight }}
+          >
+            {rows.map((row, index) => (
+              <div
+                key={`${row.label}-${index}`}
+                className="grid gap-2 border-b border-[var(--border)] px-4 py-3 last:border-b-0 lg:grid-cols-[220px_minmax(0,1fr)]"
+              >
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                    {row.label}
+                  </p>
+                  {row.note ? (
+                    <p className="text-xs leading-5 text-[var(--muted-foreground)]">{row.note}</p>
+                  ) : null}
+                </div>
+                <p className="text-sm leading-6 whitespace-pre-wrap break-all text-[var(--foreground)]">
+                  {row.value}
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--muted-foreground)]">当前没有可展示的数据。</p>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 export function JsonPreview({
@@ -255,6 +351,38 @@ export function JsonPreview({
   );
 }
 
+export function UsageGuideCard({
+  title = "本页使用逻辑",
+  description,
+  steps,
+}: {
+  title?: string;
+  description?: string;
+  steps: string[];
+}) {
+  return (
+    <Card className="border-dashed">
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+        {description ? <CardDescription>{description}</CardDescription> : null}
+      </CardHeader>
+      <CardContent className="grid gap-3 pt-0 lg:grid-cols-3">
+        {steps.map((step, index) => (
+          <div
+            key={`${title}-${index + 1}`}
+            className="rounded-2xl border border-[var(--border)] bg-[var(--muted)]/35 p-4"
+          >
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+              Step {index + 1}
+            </p>
+            <p className="mt-2 text-sm leading-6 text-[var(--foreground)]">{step}</p>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function CodePreview({
   code,
   title,
@@ -281,6 +409,52 @@ export function CodePreview({
         >
           {code || "暂无内容"}
         </pre>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function LinePreviewCard({
+  text,
+  title,
+  description,
+  maxHeight = 420,
+}: {
+  text: string;
+  title?: string;
+  description?: string;
+  maxHeight?: number;
+}) {
+  const rows = (text || "").split(/\r?\n/);
+  return (
+    <Card>
+      {title ? (
+        <CardHeader>
+          <CardTitle className="text-base">{title}</CardTitle>
+          {description ? <CardDescription>{description}</CardDescription> : null}
+        </CardHeader>
+      ) : null}
+      <CardContent className={title ? "pt-0" : "pt-6"}>
+        {text ? (
+          <div
+            className="overflow-auto rounded-2xl border border-[var(--border)] bg-[#0b1625] text-slate-100"
+            style={{ maxHeight }}
+          >
+            <div className="min-w-full divide-y divide-slate-800/70 font-mono text-xs leading-6">
+              {rows.map((line, index) => (
+                <div
+                  key={`${title || "line"}-${index + 1}`}
+                  className="grid grid-cols-[72px_minmax(0,1fr)] gap-4 px-4 py-2"
+                >
+                  <span className="select-none text-right text-slate-500">{index + 1}</span>
+                  <span className="whitespace-pre-wrap break-all">{line || " "}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--muted-foreground)]">暂无内容</p>
+        )}
       </CardContent>
     </Card>
   );
