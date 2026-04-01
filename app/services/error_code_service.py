@@ -27,7 +27,7 @@ class ErrorCodeService:
                 sequence.next_value = number + 1
                 sequence.updated_at = utcnow()
 
-            candidate = f"{normalized}-{number:06d}"
+            candidate = f"{normalized}{number:04d}"
             exists = self.db.scalar(select(SolutionRecordModel.id).where(SolutionRecordModel.error_code == candidate))
             if exists:
                 self.db.flush()

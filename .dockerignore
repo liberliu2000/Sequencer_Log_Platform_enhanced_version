@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+.pytest_cache
+.pytest_tmp_run
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+build
+dist
+data
+frontend
+installer
+docs
+recovered_ui
+.vercel

@@ -62,7 +62,7 @@
 
 - 系统自动生成错误码
 - 按模块前缀 + 自增流水号格式生成
-- 示例：`MC-000001`
+- 示例：`MC0001`
 - 当前默认模块前缀：
   - `OP` optics
   - `FL` fluidics
@@ -78,7 +78,7 @@
 首次初始化数据库时会自动创建默认管理员：
 
 - `username = Yanbo`
-- `password = MGItech_2026`
+- `password = MGItech2026`
 
 说明：
 

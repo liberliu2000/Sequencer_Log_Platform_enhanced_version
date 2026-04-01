@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
 from app.api.dependencies import PUBLIC_API_PREFIXES, authenticate_request
@@ -16,6 +19,7 @@ from app.db.migrations import migrate_sqlite_schema
 from app.db.session import engine
 from app.models import db_models  # noqa: F401
 from app.services.task_queue import queue
+from app.web.landing import render_root_console
 
 settings = get_settings()
 configure_logging()
@@ -35,6 +39,17 @@ app.add_middleware(
 app.include_router(router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(solution_meta_router, prefix=settings.api_prefix)
+app.mount("/web-assets", StaticFiles(directory=Path(__file__).resolve().parent / "web" / "static"), name="web-assets")
+
+
+@app.get("/")
+def root():
+    return HTMLResponse(render_root_console(settings))
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 
 @app.middleware("http")

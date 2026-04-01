@@ -416,6 +416,9 @@ class AuthService:
         existing = self.find_user(username)
         if existing:
             changed = False
+            if existing.force_password_change and not verify_password(password, existing.password_hash):
+                existing.password_hash = hash_password(password)
+                changed = True
             if existing.status != USER_STATUS_APPROVED:
                 existing.status = USER_STATUS_APPROVED
                 changed = True

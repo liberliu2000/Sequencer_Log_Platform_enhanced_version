@@ -67,10 +67,19 @@ def _create_indexes_if_possible(engine: Engine) -> None:
                 pass
 
 
-def _create_solution_search_fts(engine: Engine) -> None:
+def _table_row_count(conn, table_name: str) -> int:
+    try:
+        return int(conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0)
+    except Exception:
+        return 0
+
+
+def _create_solution_search_fts(engine: Engine) -> dict[str, Any]:
     if engine.dialect.name.lower() != "sqlite":
-        return
+        return {"exists": False, "reindexed": False, "solution_count": 0, "fts_count": 0}
     with engine.begin() as conn:
+        inspector = inspect(conn)
+        existed_before = _has_table(inspector, "solution_search_fts")
         try:
             conn.execute(
                 text(
@@ -80,30 +89,45 @@ def _create_solution_search_fts(engine: Engine) -> None:
                     """
                 )
             )
-            conn.execute(text("DELETE FROM solution_search_fts"))
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO solution_search_fts(solution_id, search_text)
-                    SELECT
-                        id,
-                        trim(
-                            coalesce(error_name, '') || ' ' ||
-                            coalesce(error_code, '') || ' ' ||
-                            coalesce(module, '') || ' ' ||
-                            coalesce(message, '') || ' ' ||
-                            coalesce(trigger_scenario, '') || ' ' ||
-                            coalesce(root_cause_analysis, '') || ' ' ||
-                            coalesce(verified_solution, '') || ' ' ||
-                            coalesce(submitter, '') || ' ' ||
-                            coalesce(review_status, '')
-                        )
-                    FROM solution_records
-                    """
-                )
-            )
         except Exception:
-            pass
+            return {"exists": False, "reindexed": False, "solution_count": 0, "fts_count": 0}
+
+        solution_count = _table_row_count(conn, "solution_records")
+        fts_count = _table_row_count(conn, "solution_search_fts")
+        should_reindex = (not existed_before) or (solution_count != fts_count)
+
+        if should_reindex:
+            conn.execute(text("DELETE FROM solution_search_fts"))
+            if solution_count > 0:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO solution_search_fts(solution_id, search_text)
+                        SELECT
+                            id,
+                            trim(
+                                coalesce(error_name, '') || ' ' ||
+                                coalesce(error_code, '') || ' ' ||
+                                coalesce(module, '') || ' ' ||
+                                coalesce(message, '') || ' ' ||
+                                coalesce(trigger_scenario, '') || ' ' ||
+                                coalesce(root_cause_analysis, '') || ' ' ||
+                                coalesce(verified_solution, '') || ' ' ||
+                                coalesce(submitter, '') || ' ' ||
+                                coalesce(review_status, '')
+                            )
+                        FROM solution_records
+                        """
+                    )
+                )
+            fts_count = _table_row_count(conn, "solution_search_fts")
+
+        return {
+            "exists": True,
+            "reindexed": should_reindex,
+            "solution_count": solution_count,
+            "fts_count": fts_count,
+        }
 
 
 def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
@@ -163,6 +187,10 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
             result["migrated"] = True
 
     _create_indexes_if_possible(engine)
-    _create_solution_search_fts(engine)
+    fts_status = _create_solution_search_fts(engine)
+    if fts_status.get("exists"):
+        result["fts"] = fts_status
+        if fts_status.get("reindexed"):
+            result["migrated"] = True
     result["notes"].append("SQLite 轻量迁移已检查完成。")
     return result
