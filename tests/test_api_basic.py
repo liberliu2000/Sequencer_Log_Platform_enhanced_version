@@ -1,3 +1,4 @@
+import json
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -6,8 +7,13 @@ from app.db.session import SessionLocal
 from app.models.db_models import (
     NormalizedEventModel,
     RegistrationChallengeModel,
+    SolutionMessageKeywordModel,
+    SolutionModuleLinkModel,
     SolutionRecordModel,
     SolutionReviewRecordModel,
+    SolutionTagLinkModel,
+    SolutionTaskClusterLinkModel,
+    SolutionTaskLinkModel,
     StepSummaryModel,
     UploadTaskModel,
     UserModel,
@@ -18,6 +24,45 @@ def test_health(client: TestClient):
     resp = client.get("/api/v1/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_root_endpoint(client: TestClient):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Streamlit Parity Console" in resp.text
+    assert "web-assets/app.js" in resp.text
+    assert "/api/v1/health" in resp.text
+    assert "LLM 诊断" in resp.text
+
+
+def test_web_assets_js_route(client: TestClient):
+    resp = client.get("/web-assets/app.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.headers["content-type"]
+    assert "renderCurrentPage" in resp.text
+
+
+def test_favicon_endpoint(client: TestClient):
+    resp = client.get("/favicon.ico")
+    assert resp.status_code == 204
+
+
+def test_module_prefixes_and_error_code_generation(client: TestClient):
+    prefixes_resp = client.get("/api/v1/module-prefixes")
+    assert prefixes_resp.status_code == 200
+    payload = prefixes_resp.json()
+    assert payload["items"]
+    optics_prefix = payload["module_prefixes"].get("optics")
+    assert optics_prefix == "OP"
+
+    generate_resp = client.post("/api/v1/error-code/generate", json={"module": "optics"})
+    assert generate_resp.status_code == 200
+    generated = generate_resp.json()
+    assert generated["module"] == "optics"
+    assert generated["prefix"] == "OP"
+    assert generated["error_code"].startswith("OP")
+    assert len(generated["error_code"]) == 6
 
 
 def test_solution_review_api_flow(client: TestClient):
@@ -74,6 +119,75 @@ def test_solution_review_api_flow(client: TestClient):
         if review_row:
             db.delete(review_row)
         db.commit()
+    finally:
+        db.close()
+
+
+def test_system_runtime_endpoint(client: TestClient):
+    resp = client.get("/api/v1/system/runtime")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "cpu" in payload
+    assert "memory" in payload
+    assert "disk" in payload
+    assert "policy" in payload
+    assert "guard" in payload
+    assert payload["current_user"]["is_admin"] is True
+
+
+def test_solution_repository_import_and_ask(client: TestClient):
+    seed = uuid4().hex[:8]
+    error_name = f"Imported solution {seed}"
+    file_payload = [
+        {
+            "module": "scheduler",
+            "error_name": error_name,
+            "message": f"Scheduler transition failure {seed}",
+            "normalized_signature": f"import_sig_{seed}",
+            "trigger_scenario": f"Scheduler received duplicated callback {seed}",
+            "root_cause_analysis": "状态机缺少幂等保护，重复触发后进入非法状态。",
+            "verified_solution": "增加状态判重逻辑，并在进入 running 前补充一致性检查。",
+            "workaround": "清理重复事件后重试任务。",
+            "task_clusters": ["流程执行"],
+            "message_keywords": ["scheduler", seed],
+        }
+    ]
+
+    import_resp = client.post(
+        "/api/v1/solution-repository/import",
+        data={"preserve_error_codes": "true"},
+        files={
+            "file": (
+                "solutions.json",
+                json.dumps(file_payload, ensure_ascii=False).encode("utf-8"),
+                "application/json",
+            )
+        },
+    )
+    assert import_resp.status_code == 200
+    import_item = import_resp.json()["item"]
+    assert import_item["created"] == 1
+    assert import_item["failed"] == 0
+    assert import_item["items"][0]["error_code"].startswith("SC")
+
+    ask_resp = client.post("/api/v1/solution-repository/ask", json={"question": f"{seed} 这个问题应该怎么处理？"})
+    assert ask_resp.status_code == 200
+    ask_item = ask_resp.json()["item"]
+    assert ask_item["candidate_count"] >= 1
+    assert ask_item["matches"]
+    assert any(row["error_name"] == error_name for row in ask_item["matches"])
+
+    db = SessionLocal()
+    try:
+        row = db.query(SolutionRecordModel).filter(SolutionRecordModel.error_name == error_name).one_or_none()
+        if row is not None:
+            db.query(SolutionTaskLinkModel).filter(SolutionTaskLinkModel.solution_id == row.id).delete()
+            db.query(SolutionModuleLinkModel).filter(SolutionModuleLinkModel.solution_id == row.id).delete()
+            db.query(SolutionTaskClusterLinkModel).filter(SolutionTaskClusterLinkModel.solution_id == row.id).delete()
+            db.query(SolutionTagLinkModel).filter(SolutionTagLinkModel.solution_id == row.id).delete()
+            db.query(SolutionMessageKeywordModel).filter(SolutionMessageKeywordModel.solution_id == row.id).delete()
+            db.delete(row)
+            db.commit()
     finally:
         db.close()
 

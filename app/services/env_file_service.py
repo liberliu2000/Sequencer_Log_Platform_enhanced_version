@@ -138,57 +138,58 @@ class EnvFileService:
         _lines, entries = self._parse_entries(self._read_text(self.example_path))
         return {key: entry.value for key, entry in entries.items()}
 
+    def _build_item(self, key: str, current_value: str, default_value: str | None) -> dict:
+        is_sensitive = _is_sensitive_key(key)
+        return {
+            "key": key,
+            "value": current_value,
+            "display_value": _mask_value(current_value) if is_sensitive else current_value,
+            "default_value": default_value,
+            "default_display_value": _mask_value(default_value) if is_sensitive and default_value is not None else default_value,
+            "is_sensitive": is_sensitive,
+            "has_default": default_value is not None,
+            "is_modified": default_value is not None and current_value != default_value,
+        }
+
+    @staticmethod
+    def _render_new_entry_line(key: str, value: str) -> str:
+        return f"{key}={value}\n"
+
     def list_items(self) -> list[dict]:
         _lines, entries = self._read_entries()
         defaults = self._read_example_defaults()
         items: list[dict] = []
-        for key, entry in entries.items():
-            is_sensitive = _is_sensitive_key(key)
-            current_value = entry.value
-            default_value = defaults.get(key)
-            items.append(
-                {
-                    "key": key,
-                    "value": current_value,
-                    "display_value": _mask_value(current_value) if is_sensitive else current_value,
-                    "default_value": default_value,
-                    "default_display_value": _mask_value(default_value) if is_sensitive and default_value is not None else default_value,
-                    "is_sensitive": is_sensitive,
-                    "has_default": key in defaults,
-                    "is_modified": default_value is not None and current_value != default_value,
-                }
-            )
+        ordered_keys = list(dict.fromkeys([*entries.keys(), *defaults.keys()]))
+        for key in ordered_keys:
+            entry = entries.get(key)
+            current_value = entry.value if entry is not None else str(defaults.get(key) or "")
+            items.append(self._build_item(key, current_value, defaults.get(key)))
         return items
 
     def get_item(self, key: str) -> dict:
         _lines, entries = self._read_entries()
         defaults = self._read_example_defaults()
         entry = entries.get(key)
-        if entry is None:
+        if entry is None and key not in defaults:
             raise KeyError(key)
-        is_sensitive = _is_sensitive_key(key)
         default_value = defaults.get(key)
-        return {
-            "key": key,
-            "value": entry.value,
-            "display_value": _mask_value(entry.value) if is_sensitive else entry.value,
-            "default_value": default_value,
-            "default_display_value": _mask_value(default_value) if is_sensitive and default_value is not None else default_value,
-            "is_sensitive": is_sensitive,
-            "has_default": key in defaults,
-            "is_modified": default_value is not None and entry.value != default_value,
-        }
+        current_value = entry.value if entry is not None else str(default_value or "")
+        return self._build_item(key, current_value, default_value)
 
     def update_item(self, key: str, value: str) -> dict:
         lines, entries = self._read_entries()
         entry = entries.get(key)
         if entry is None:
-            raise KeyError(key)
-        rendered_value = _preserve_quote_style(entry.original_value, str(value))
-        lines[entry.line_index] = (
-            f"{entry.leading}{entry.export_prefix}{entry.key}{entry.separator}{entry.value_prefix}"
-            f"{rendered_value}{entry.value_suffix}{entry.inline_comment}{entry.newline}"
-        )
+            new_line = self._render_new_entry_line(key, str(value))
+            if lines and not lines[-1].endswith(("\n", "\r\n")):
+                lines[-1] = f"{lines[-1]}\n"
+            lines.append(new_line)
+        else:
+            rendered_value = _preserve_quote_style(entry.original_value, str(value))
+            lines[entry.line_index] = (
+                f"{entry.leading}{entry.export_prefix}{entry.key}{entry.separator}{entry.value_prefix}"
+                f"{rendered_value}{entry.value_suffix}{entry.inline_comment}{entry.newline}"
+            )
         self._write_text(self.env_path, "".join(lines))
         get_settings.cache_clear()
         return self.get_item(key)

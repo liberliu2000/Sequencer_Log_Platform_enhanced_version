@@ -84,3 +84,22 @@ def test_env_file_service_reset_uses_example_value_and_preserves_quotes():
         assert env_path.read_text(encoding="utf-8") == 'LLM_MODEL="ep-default"\n'
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
+
+
+def test_env_file_service_can_append_missing_key_from_example():
+    base_dir = _make_work_dir()
+    try:
+        env_path = base_dir / ".env"
+        example_path = base_dir / ".env.example"
+        env_path.write_text("APP_ENV=dev\n", encoding="utf-8")
+        example_path.write_text("APP_ENV=dev\nSYSTEM_MEMORY_SOFT_LIMIT_PERCENT=88\n", encoding="utf-8")
+
+        service = EnvFileService(env_path=env_path, example_path=example_path)
+        item = service.get_item("SYSTEM_MEMORY_SOFT_LIMIT_PERCENT")
+        assert item["value"] == "88"
+
+        updated = service.update_item("SYSTEM_MEMORY_SOFT_LIMIT_PERCENT", "90")
+        assert updated["value"] == "90"
+        assert "SYSTEM_MEMORY_SOFT_LIMIT_PERCENT=90" in env_path.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(base_dir, ignore_errors=True)

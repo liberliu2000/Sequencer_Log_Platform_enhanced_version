@@ -3,9 +3,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 from threading import Lock, Thread
+import time
 from typing import Callable
 
 from app.core.settings import get_settings
+from app.services.system_runtime_service import SystemRuntimeService
+from app.services.task_state_cache import task_state_cache
 
 
 class TaskQueue:
@@ -15,6 +18,7 @@ class TaskQueue:
         self.executor = ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="sequencer-worker")
         self.queue: Queue[tuple[str, Callable[[], None]]] = Queue()
         self.pending: list[str] = []
+        self.cancelled: set[str] = set()
         self.lock = Lock()
         self._started = False
 
@@ -28,19 +32,49 @@ class TaskQueue:
     def _consume(self) -> None:
         while True:
             task_uuid, func = self.queue.get()
-            with self.lock:
-                if task_uuid in self.pending:
-                    self.pending.remove(task_uuid)
-            self.executor.submit(func)
-            self.queue.task_done()
+            try:
+                while True:
+                    with self.lock:
+                        if task_uuid in self.cancelled:
+                            self.cancelled.discard(task_uuid)
+                            if task_uuid in self.pending:
+                                self.pending.remove(task_uuid)
+                            break
+
+                    guard = SystemRuntimeService().dispatch_guard()
+                    if guard.get("dispatch_allowed"):
+                        with self.lock:
+                            if task_uuid in self.pending:
+                                self.pending.remove(task_uuid)
+                            self.cancelled.discard(task_uuid)
+                        self.executor.submit(func)
+                        break
+
+                    task_state_cache.update(
+                        task_uuid,
+                        status="queued",
+                        current_stage="等待内存窗口",
+                        queue_position=self.queue_position(task_uuid),
+                        message=f"{guard.get('summary')}；运行中的分析任务不会被中断。",
+                    )
+                    time.sleep(max(2, int(guard.get("guard_wait_seconds") or 5)))
+            finally:
+                self.queue.task_done()
 
     def submit(self, task_uuid: str, func: Callable[[], None]) -> int:
         self.start()
         with self.lock:
+            self.cancelled.discard(task_uuid)
             self.pending.append(task_uuid)
             position = len(self.pending)
         self.queue.put((task_uuid, func))
         return position
+
+    def cancel(self, task_uuid: str) -> None:
+        with self.lock:
+            self.cancelled.add(task_uuid)
+            if task_uuid in self.pending:
+                self.pending.remove(task_uuid)
 
     def queue_position(self, task_uuid: str) -> int | None:
         with self.lock:

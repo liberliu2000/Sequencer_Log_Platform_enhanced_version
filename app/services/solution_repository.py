@@ -5,12 +5,14 @@ import json
 import re
 import sqlite3
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
+from app.llm.client import LLMClient
 from app.core.security import utcnow
 from app.core.settings import get_settings
 from app.models.db_models import (
@@ -73,6 +75,15 @@ def _tokenize_keywords(*values: Any) -> list[str]:
     return list(dict.fromkeys(tokens))
 
 
+def _error_code_prefix_matches(expected_prefix: str, error_code: str) -> bool:
+    compact = str(error_code or "").strip().upper().replace("-", "")
+    expected = str(expected_prefix or "").strip().upper()
+    if not compact.startswith(expected):
+        return False
+    suffix = compact[len(expected) :]
+    return suffix.isdigit() and len(suffix) in {4, 6}
+
+
 class SolutionRepositoryService:
     def __init__(self, db: Session):
         self.db = db
@@ -95,7 +106,12 @@ class SolutionRepositoryService:
         except Exception:
             return False
 
-    def validate_case_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def validate_case_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        allow_manual_error_code: bool = False,
+    ) -> dict[str, Any]:
         data = dict(payload or {})
         module_value = str(data.get("module") or data.get("module_key") or data.get("module_prefix") or "").strip()
         if not module_value:
@@ -116,9 +132,11 @@ class SolutionRepositoryService:
             reusable = reusable.strip().lower() not in {"false", "0", "no", "n"}
 
         existing_error_code = str(data.get("error_code") or "").strip() or None
+        if not allow_manual_error_code:
+            existing_error_code = None
         if existing_error_code:
             expected_prefix = module_row.prefix.upper()
-            if not existing_error_code.upper().startswith(f"{expected_prefix}-"):
+            if not _error_code_prefix_matches(expected_prefix, existing_error_code):
                 raise ValueError(f"错误码 {existing_error_code} 与模块前缀 {expected_prefix} 不匹配")
             duplicate = self.db.scalar(
                 select(SolutionRecordModel.id).where(
@@ -179,8 +197,14 @@ class SolutionRepositoryService:
             "additional_modules": additional_modules,
         }
 
-    def create_record(self, payload: dict[str, Any], *, actor: str | None = None) -> dict[str, Any]:
-        data = self.validate_case_payload(payload)
+    def create_record(
+        self,
+        payload: dict[str, Any],
+        *,
+        actor: str | None = None,
+        allow_manual_error_code: bool = False,
+    ) -> dict[str, Any]:
+        data = self.validate_case_payload(payload, allow_manual_error_code=allow_manual_error_code)
         now = utcnow()
         error_code = data["error_code"] or self.error_code_service.allocate(data["error_code_prefix"])
         row = SolutionRecordModel(
@@ -223,7 +247,7 @@ class SolutionRepositoryService:
         row = self.db.get(SolutionRecordModel, record_id)
         if not row:
             raise KeyError("solution record not found")
-        base_payload = {**self.serialize(row), **payload, "id": record_id, "error_code": payload.get("error_code", row.error_code)}
+        base_payload = {**self.serialize(row), **payload, "id": record_id, "error_code": row.error_code}
         data = self.validate_case_payload(base_payload)
         for field_name in [
             "error_name",
@@ -433,6 +457,142 @@ class SolutionRepositoryService:
             return str(path)
 
         raise ValueError(f"unsupported export format: {export_format}")
+
+    def import_records(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        actor: str | None = None,
+        preserve_error_codes: bool = True,
+    ) -> dict[str, Any]:
+        rows = self._parse_import_rows(filename, content)
+        created = 0
+        updated = 0
+        failed = 0
+        imported_items: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        for index, raw_row in enumerate(rows, start=1):
+            try:
+                payload = self._normalize_import_payload(raw_row)
+                existing_row = self._find_existing_record_for_import(payload, preserve_error_codes=preserve_error_codes)
+                if existing_row is not None:
+                    item = self.update_record(existing_row.id, payload, actor=actor)
+                    updated += 1
+                else:
+                    item = self.create_record(
+                        payload,
+                        actor=actor,
+                        allow_manual_error_code=preserve_error_codes,
+                    )
+                    created += 1
+                imported_items.append(
+                    {
+                        "row_number": index,
+                        "id": item.get("id"),
+                        "error_code": item.get("error_code"),
+                        "error_name": item.get("error_name"),
+                        "module": item.get("module"),
+                    }
+                )
+            except Exception as exc:
+                failed += 1
+                errors.append(
+                    {
+                        "row_number": index,
+                        "error": str(exc),
+                        "error_name": str(raw_row.get("error_name") or raw_row.get("title") or ""),
+                        "module": str(raw_row.get("module") or raw_row.get("module_key") or ""),
+                    }
+                )
+
+        return {
+            "filename": filename,
+            "total_rows": len(rows),
+            "created": created,
+            "updated": updated,
+            "failed": failed,
+            "preserve_error_codes": bool(preserve_error_codes),
+            "items": imported_items[:100],
+            "errors": errors[:100],
+        }
+
+    def answer_question(
+        self,
+        *,
+        question: str,
+        viewer_username: str | None = None,
+        viewer_is_reviewer: bool = False,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        text_value = str(question or "").strip()
+        if len(text_value) < 4:
+            raise ValueError("问题至少需要 4 个字符。")
+
+        matches = self.list_records(
+            search=text_value,
+            viewer_username=viewer_username,
+            viewer_is_reviewer=viewer_is_reviewer,
+            limit=max(3, min(limit, 12)),
+        )
+        answer = self._fallback_answer(text_value, matches)
+        cited_solution_ids = [row.get("id") for row in matches[:5] if row.get("id") is not None]
+        llm_meta: dict[str, Any] = {"fallback": True, "reason": "disabled_or_no_matches"}
+        used_llm = False
+
+        if matches:
+            client = LLMClient()
+            if client.enabled():
+                evidence = [
+                    {
+                        "id": row.get("id"),
+                        "error_code": row.get("error_code"),
+                        "error_name": row.get("error_name"),
+                        "module": row.get("module"),
+                        "trigger_scenario": row.get("trigger_scenario"),
+                        "root_cause_analysis": row.get("root_cause_analysis"),
+                        "verified_solution": row.get("verified_solution"),
+                        "workaround": row.get("workaround"),
+                    }
+                    for row in matches[:5]
+                ]
+                llm_result, _request_payload, llm_meta = client.request_json(
+                    system_prompt=(
+                        "你是方案库问答助手。请严格基于候选解决方案回答，"
+                        '只返回 JSON，字段包括 {"answer":"","confidence":0.0,"cited_solution_ids":[],"need_more_context":false}。'
+                    ),
+                    user_prompt=(
+                        f"用户问题: {text_value}\n"
+                        f"候选解决方案: {json.dumps(evidence, ensure_ascii=False)}"
+                    ),
+                    fallback={
+                        "answer": answer,
+                        "confidence": 0.35 if matches else 0.0,
+                        "cited_solution_ids": cited_solution_ids,
+                        "need_more_context": False if matches else True,
+                    },
+                    temperature=0.0,
+                    timeout_seconds=min(client.settings.llm_timeout_seconds, 30),
+                    max_retries=1,
+                )
+                answer = str(llm_result.get("answer") or answer)
+                cited_solution_ids = [
+                    int(item)
+                    for item in (llm_result.get("cited_solution_ids") or cited_solution_ids)
+                    if str(item).isdigit()
+                ] or cited_solution_ids
+                used_llm = not bool(llm_meta.get("fallback"))
+
+        return {
+            "question": text_value,
+            "answer": answer,
+            "matches": matches[:5],
+            "candidate_count": len(matches),
+            "used_llm": used_llm,
+            "cited_solution_ids": cited_solution_ids,
+            "llm_meta": llm_meta,
+        }
 
     def _sync_relations(self, solution_id: int, *, data: dict[str, Any], actor: str) -> None:
         self.db.query(SolutionModuleLinkModel).filter(SolutionModuleLinkModel.solution_id == solution_id).delete()
@@ -672,6 +832,186 @@ class SolutionRepositoryService:
         if not tokens:
             return ""
         return " OR ".join(tokens[:8])
+
+    def _parse_import_rows(self, filename: str, content: bytes) -> list[dict[str, Any]]:
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".json":
+            payload = json.loads(content.decode("utf-8-sig"))
+            if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+                return [item for item in payload.get("items", []) if isinstance(item, dict)]
+            if isinstance(payload, list):
+                return [item for item in payload if isinstance(item, dict)]
+            raise ValueError("JSON 导入文件必须是对象数组，或包含 items 数组。")
+
+        if suffix == ".csv":
+            text_value = content.decode("utf-8-sig")
+            reader = csv.DictReader(text_value.splitlines())
+            return [dict(row) for row in reader]
+
+        if suffix in {".xlsx", ".xlsm"}:
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
+            worksheet = workbook.active
+            rows = list(worksheet.iter_rows(values_only=True))
+            if not rows:
+                return []
+            headers = [str(item or "").strip() for item in rows[0]]
+            out: list[dict[str, Any]] = []
+            for values in rows[1:]:
+                row = {
+                    headers[index]: values[index]
+                    for index in range(min(len(headers), len(values)))
+                    if headers[index]
+                }
+                if any(value not in (None, "") for value in row.values()):
+                    out.append(row)
+            return out
+
+        raise ValueError("当前仅支持导入 JSON、CSV 和 XLSX 文件。")
+
+    def _normalize_import_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = dict(payload or {})
+        module_links = row.get("module_links") or []
+        additional_modules = row.get("additional_modules")
+        if not additional_modules and isinstance(module_links, list):
+            additional_modules = [
+                str(item.get("module_key") or "").strip()
+                for item in module_links
+                if isinstance(item, dict) and not bool(item.get("is_primary")) and str(item.get("module_key") or "").strip()
+            ]
+
+        return {
+            "id": row.get("id"),
+            "module": row.get("module") or row.get("module_key"),
+            "submodule": row.get("submodule"),
+            "error_name": row.get("error_name"),
+            "error_category": row.get("error_category"),
+            "error_code": row.get("error_code"),
+            "message": self._coerce_import_value(row.get("message")),
+            "message_keywords": self._coerce_import_list(row.get("message_keywords")),
+            "tags": self._coerce_import_list(row.get("tags")),
+            "task_clusters": self._coerce_import_list(row.get("task_clusters")),
+            "task_links": self._coerce_import_list(row.get("task_links"), expect_dict_items=True),
+            "additional_modules": self._coerce_import_list(additional_modules),
+            "normalized_signature": row.get("normalized_signature"),
+            "exception_description": self._coerce_import_value(row.get("exception_description")),
+            "trigger_scenario": self._coerce_import_value(row.get("trigger_scenario")),
+            "impact_scope": self._coerce_import_value(row.get("impact_scope")),
+            "report_source": self._coerce_import_value(row.get("report_source")),
+            "related_logs": self._coerce_import_json(row.get("related_logs")),
+            "related_source_files": self._coerce_import_json(row.get("related_source_files")),
+            "root_cause_analysis": self._coerce_import_value(row.get("root_cause_analysis")),
+            "verified_solution": self._coerce_import_value(row.get("verified_solution")),
+            "workaround": self._coerce_import_value(row.get("workaround")),
+            "owner_department": self._coerce_import_value(row.get("owner_department")),
+            "submitter": self._coerce_import_value(row.get("submitter")),
+            "source": self._coerce_import_value(row.get("source")) or "solution_repository_import",
+            "review_status": self._coerce_import_value(row.get("review_status")) or "approved",
+            "reusable": self._coerce_import_bool(row.get("reusable"), default=True),
+            "similar_case_refs": self._coerce_import_json(row.get("similar_case_refs")),
+            "metadata": self._coerce_import_json(row.get("metadata")),
+            "task_uuid": self._coerce_import_value(row.get("task_uuid")),
+        }
+
+    def _find_existing_record_for_import(
+        self,
+        payload: dict[str, Any],
+        *,
+        preserve_error_codes: bool,
+    ) -> SolutionRecordModel | None:
+        record_id = int(payload.get("id") or 0)
+        if record_id:
+            row = self.db.get(SolutionRecordModel, record_id)
+            if row is not None:
+                return row
+
+        error_code = str(payload.get("error_code") or "").strip()
+        if preserve_error_codes and error_code:
+            row = self.db.scalar(select(SolutionRecordModel).where(SolutionRecordModel.error_code == error_code))
+            if row is not None:
+                return row
+
+        normalized_signature = str(payload.get("normalized_signature") or "").strip()
+        module = str(payload.get("module") or "").strip()
+        error_name = str(payload.get("error_name") or "").strip()
+        if normalized_signature and module:
+            row = self.db.scalar(
+                select(SolutionRecordModel).where(
+                    SolutionRecordModel.normalized_signature == normalized_signature,
+                    SolutionRecordModel.module == module,
+                )
+            )
+            if row is not None:
+                return row
+
+        if error_name and module:
+            row = self.db.scalar(
+                select(SolutionRecordModel).where(
+                    SolutionRecordModel.error_name == error_name,
+                    SolutionRecordModel.module == module,
+                )
+            )
+            if row is not None:
+                return row
+        return None
+
+    @staticmethod
+    def _coerce_import_value(value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, str):
+            return value.strip() or None
+        return str(value).strip() or None
+
+    @staticmethod
+    def _coerce_import_json(value: Any) -> Any:
+        if value in (None, "", [], {}):
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        text_value = str(value).strip()
+        if not text_value:
+            return None
+        try:
+            return json.loads(text_value)
+        except Exception:
+            return text_value
+
+    @staticmethod
+    def _coerce_import_list(value: Any, *, expect_dict_items: bool = False) -> list[Any]:
+        parsed = SolutionRepositoryService._coerce_import_json(value)
+        if parsed in (None, ""):
+            return []
+        if isinstance(parsed, list):
+            if expect_dict_items:
+                return [item for item in parsed if isinstance(item, dict)]
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        if isinstance(parsed, str):
+            return [item.strip() for item in parsed.split(",") if item and item.strip()]
+        return []
+
+    @staticmethod
+    def _coerce_import_bool(value: Any, *, default: bool) -> bool:
+        if value in (None, ""):
+            return default
+        if isinstance(value, bool):
+            return value
+        text_value = str(value).strip().lower()
+        return text_value not in {"0", "false", "no", "n"}
+
+    @staticmethod
+    def _fallback_answer(question: str, matches: list[dict[str, Any]]) -> str:
+        if not matches:
+            return f"方案库中暂未检索到与“{question}”直接匹配的记录，建议换用错误码、模块名或更具体的现象关键词重试。"
+
+        lines = []
+        for row in matches[:3]:
+            identifier = row.get("error_code") or f"ID {row.get('id')}"
+            root_cause = str(row.get("root_cause_analysis") or "暂无明确根因")
+            solution = str(row.get("verified_solution") or row.get("workaround") or "暂无可执行方案")
+            lines.append(f"{identifier}：根因 {root_cause}；建议 {solution}")
+        return "根据方案库检索结果，优先参考以下记录：" + " ".join(lines)
 
     @staticmethod
     def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

@@ -130,7 +130,6 @@ const durationUnits = [
 const defaultReviewDraft = {
   error_name: "",
   error_category: "",
-  error_code: "",
   impact_scope: "",
   owner_department: "",
   root_cause_analysis: "",
@@ -146,7 +145,7 @@ const pageUsageGuides: Record<PageKey, { title: string; description: string; ste
     description: "先确认服务健康和入口，再进入登录或注册流程。",
     steps: [
       "先看页面顶部的接口健康状态，确认后端服务可以正常响应。",
-      "确认左侧 API 地址无误后，进入登录或注册流程。",
+      "确认服务健康后，进入登录或注册流程。",
       "登录成功后，再依次进入上传、分析、诊断和方案管理页面。",
     ],
   },
@@ -179,10 +178,10 @@ const pageUsageGuides: Record<PageKey, { title: string; description: string; ste
   },
   history: {
     title: "历史项目中心使用逻辑",
-    description: "历史页负责切换任务，不负责详细诊断。",
+    description: "历史页负责选择任务、切换上下文以及执行删除管理。",
     steps: [
       "按分页浏览历史任务记录，先找到目标任务。",
-      "点击任务行切换当前任务上下文。",
+      "点击任务行后先决定是设为当前任务，还是在这里直接删除历史任务。",
       "切换完成后再去首页、错误分析或参数页查看详情。",
     ],
   },
@@ -251,10 +250,10 @@ const pageUsageGuides: Record<PageKey, { title: string; description: string; ste
   },
   solutionHub: {
     title: "方案库中心使用逻辑",
-    description: "方案库中心负责提交、检索、审核和维护可复用解决方案。",
+    description: "方案库中心负责统一提交、检索、审核、导入导出和智能问答。",
     steps: [
-      "在方案提交标签录入根因、解决方案、任务簇和模块信息。",
-      "在方案检索标签按全文、模块或审核状态筛选现有记录。",
+      "在方案提交标签录入根因、解决方案、任务簇和模块信息，错误码由系统自动分配。",
+      "在方案检索标签按全文、模块或审核状态筛选现有记录，并可直接向方案库提问。",
       "在审核和任务簇标签维护审核流、任务簇与模块配置。",
     ],
   },
@@ -415,6 +414,9 @@ function envGroupFromKey(key: string) {
   ) {
     return "前端与性能";
   }
+  if (key.startsWith("SYSTEM_")) {
+    return "系统资源";
+  }
   if (key.startsWith("LLM_")) {
     return "LLM 配置";
   }
@@ -431,6 +433,78 @@ function envGroupFromKey(key: string) {
     return "上传与读取";
   }
   return "其他";
+}
+
+function formatRuntimeNumber(value: unknown, digits = 1) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "-";
+  }
+  const fixed = numeric.toFixed(digits);
+  return fixed.endsWith(".0") ? fixed.slice(0, -2) : fixed;
+}
+
+function formatPercentLabel(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "-";
+  }
+  return `${formatRuntimeNumber(numeric)}%`;
+}
+
+function formatStorageLabel(value: unknown, unit: "MB" | "GB") {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "-";
+  }
+  return `${formatRuntimeNumber(numeric, unit === "GB" ? 2 : 1)} ${unit}`;
+}
+
+function UsageStatusCard({
+  label,
+  percent,
+  primary,
+  secondary,
+  helper,
+}: {
+  label: string;
+  percent: number | null;
+  primary: string;
+  secondary: string;
+  helper: string;
+}) {
+  const progress = percent === null ? 0 : Math.max(0, Math.min(percent, 100));
+  const toneClass =
+    percent === null
+      ? "bg-slate-300"
+      : progress >= 90
+        ? "bg-rose-500"
+        : progress >= 75
+          ? "bg-amber-500"
+          : "bg-emerald-500";
+
+  return (
+    <Card>
+      <CardContent className="space-y-4 pt-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">{label}</p>
+            <p className="mt-2 text-2xl font-semibold text-[var(--foreground)]">{primary}</p>
+          </div>
+          <div className="rounded-full border border-[var(--border)] bg-[var(--muted)]/50 px-3 py-1 text-xs text-[var(--muted-foreground)]">
+            {percent === null ? "unknown" : formatPercentLabel(progress)}
+          </div>
+        </div>
+        <div className="h-2 rounded-full bg-[var(--muted)]">
+          <div className={cn("h-2 rounded-full transition-all", toneClass)} style={{ width: `${progress}%` }} />
+        </div>
+        <div className="space-y-1">
+          <p className="text-sm text-[var(--foreground)]">{secondary}</p>
+          <p className="text-xs leading-5 text-[var(--muted-foreground)]">{helper}</p>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function LogPlatformConsole() {
@@ -466,6 +540,7 @@ export function LogPlatformConsole() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [nextPasswordConfirm, setNextPasswordConfirm] = useState("");
+  const [passwordEditorOpen, setPasswordEditorOpen] = useState(false);
 
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploadCpuCores, setUploadCpuCores] = useState("4");
@@ -564,6 +639,10 @@ export function LogPlatformConsole() {
   const [hubReviewNotes, setHubReviewNotes] = useState("");
   const [newClusterDraft, setNewClusterDraft] = useState({ name: "", description: "" });
   const [newModuleDraft, setNewModuleDraft] = useState({ module_key: "", display_name: "", prefix: "", description: "" });
+  const [hubImportFile, setHubImportFile] = useState<File | null>(null);
+  const [hubImportResult, setHubImportResult] = useState<AnyRecord | null>(null);
+  const [hubAssistantQuestion, setHubAssistantQuestion] = useState("");
+  const [hubAssistantResult, setHubAssistantResult] = useState<AnyRecord | null>(null);
 
   const [filesBundle, setFilesBundle] = useState<AnyRecord>({ list: { items: [], total: 0 }, preview: null });
   const [selectedFilePath, setSelectedFilePath] = useState("");
@@ -616,10 +695,14 @@ export function LogPlatformConsole() {
     status: null,
     performance: null,
   });
+  const [systemRuntimeBundle, setSystemRuntimeBundle] = useState<AnyRecord>({});
+  const [memoryLimitPercentDraft, setMemoryLimitPercentDraft] = useState("");
+  const [memoryReserveDraft, setMemoryReserveDraft] = useState("");
 
   const [historyPage, setHistoryPage] = useState(1);
   const [historyPageSize, setHistoryPageSize] = useState(50);
   const [historyBundle, setHistoryBundle] = useState<AnyRecord>({ items: [], total: 0, page: 1, page_size: 50 });
+  const [selectedHistoryTaskUuid, setSelectedHistoryTaskUuid] = useState("");
 
   const [eventsPage, setEventsPage] = useState(1);
   const [eventsPageSize, setEventsPageSize] = useState(100);
@@ -661,6 +744,7 @@ export function LogPlatformConsole() {
 
   const [selectedUserId, setSelectedUserId] = useState("");
   const [selectedUserRoles, setSelectedUserRoles] = useState({ is_reviewer: false, is_admin: false });
+  const [refreshingKeys, setRefreshingKeys] = useState<string[]>([]);
 
   const isAuthenticated = Boolean(token && user);
   const isReviewer = Boolean(user?.is_reviewer || user?.is_admin);
@@ -673,6 +757,27 @@ export function LogPlatformConsole() {
       return await action();
     } finally {
       setBusyLabel("");
+    }
+  }
+
+  function isRefreshing(key: string) {
+    return refreshingKeys.includes(key);
+  }
+
+  async function withRefresh<T>(key: string, action: () => Promise<T>) {
+    setRefreshingKeys((current) => (current.includes(key) ? current : [...current, key]));
+    try {
+      return await action();
+    } finally {
+      setRefreshingKeys((current) => current.filter((item) => item !== key));
+    }
+  }
+
+  async function runRefreshAction(key: string, action: () => Promise<unknown>) {
+    try {
+      await withRefresh(key, action);
+    } catch (error) {
+      showError(error);
     }
   }
 
@@ -744,6 +849,13 @@ export function LogPlatformConsole() {
       query: { page: historyPage, page_size: historyPageSize },
     });
     setHistoryBundle(result);
+    const nextItems = safeArray(result.items);
+    const preferredTask =
+      nextItems.find((item) => String(item.task_uuid) === selectedHistoryTaskUuid) ||
+      nextItems.find((item) => String(item.task_uuid) === selectedTaskUuid) ||
+      nextItems[0] ||
+      null;
+    setSelectedHistoryTaskUuid(String(preferredTask?.task_uuid || ""));
   }
 
   async function loadDashboard() {
@@ -757,6 +869,14 @@ export function LogPlatformConsole() {
       request<AnyRecord>(`/tasks/${selectedTaskUuid}/performance-summary`),
     ]);
     setDashboardBundle({ dashboard, status, performance });
+  }
+
+  async function loadSystemRuntime() {
+    const result = await request<AnyRecord>("/system/runtime");
+    setSystemRuntimeBundle(result);
+    const policy = safeObject(result.policy);
+    setMemoryLimitPercentDraft(String(policy.memory_soft_limit_percent ?? ""));
+    setMemoryReserveDraft(String(policy.memory_soft_reserve_mb ?? ""));
   }
 
   async function loadEvents() {
@@ -1110,6 +1230,14 @@ export function LogPlatformConsole() {
       setNotice({ tone: "error", text: "两次输入的新密码不一致。" });
       return;
     }
+    if (nextPassword.length < 8) {
+      setNotice({ tone: "error", text: "新密码至少需要 8 个字符。" });
+      return;
+    }
+    if (currentPassword === nextPassword) {
+      setNotice({ tone: "error", text: "新密码不能与当前密码相同。" });
+      return;
+    }
     try {
       const response = await withBusy("正在修改密码", () =>
         request<AnyRecord>("/auth/change-password", {
@@ -1121,6 +1249,7 @@ export function LogPlatformConsole() {
       setCurrentPassword("");
       setNextPassword("");
       setNextPasswordConfirm("");
+      setPasswordEditorOpen(false);
       setNotice({ tone: "success", text: "密码已更新。" });
     } catch (error) {
       showError(error);
@@ -1153,7 +1282,42 @@ export function LogPlatformConsole() {
     try {
       await withBusy("正在删除任务", () => request(`/tasks/${taskUuid}`, { method: "DELETE" }));
       await refreshShell();
+      if (String(selectedHistoryTaskUuid) === taskUuid) {
+        setSelectedHistoryTaskUuid("");
+      }
       setNotice({ tone: "success", text: `任务 ${taskUuid} 已删除。` });
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleApplyHistoryTask() {
+    if (!selectedHistoryTaskUuid) {
+      setNotice({ tone: "error", text: "请先在历史任务表中选择一个任务。" });
+      return;
+    }
+    setSelectedTaskUuid(selectedHistoryTaskUuid);
+    setPage("dashboard");
+    setNotice({ tone: "success", text: `已将任务 ${selectedHistoryTaskUuid} 设为当前任务。` });
+  }
+
+  async function handleUpdateMemoryPolicy() {
+    try {
+      const response = await withBusy("正在更新内存软限额", () =>
+        request<AnyRecord>("/admin/system/runtime-policy", {
+          method: "POST",
+          body: {
+            memory_soft_limit_percent: Number(memoryLimitPercentDraft || 0),
+            memory_soft_reserve_mb: Number(memoryReserveDraft || 0),
+          },
+        }),
+      );
+      const item = safeObject(response.item);
+      const policy = safeObject(item.policy);
+      setSystemRuntimeBundle(item);
+      setMemoryLimitPercentDraft(String(policy.memory_soft_limit_percent ?? memoryLimitPercentDraft));
+      setMemoryReserveDraft(String(policy.memory_soft_reserve_mb ?? memoryReserveDraft));
+      setNotice({ tone: "success", text: "内存软限额已更新，新任务会按新阈值调度。" });
     } catch (error) {
       showError(error);
     }
@@ -1286,10 +1450,12 @@ export function LogPlatformConsole() {
         verified_solution: hubForm.verified_solution,
         workaround: hubForm.workaround,
         trigger_scenario: hubForm.trigger_scenario,
-        task_uuid: hubForm.task_uuid || undefined,
-        normalized_signature: hubForm.normalized_signature || undefined,
+        task_uuid: hubForm.task_uuid || selectedTaskUuid || undefined,
+        normalized_signature: hubForm.normalized_signature || selectedErrorSignature || undefined,
+        submitter: String(user?.username || ""),
+        submission_type: "solution_record",
         reusable: true,
-        source: "next_frontend_solution_hub",
+        source: "next_frontend_solution_center",
       };
       const endpoint = isReviewer ? "/solution-repository/records" : "/solution-reviews";
       await withBusy("正在提交方案", () =>
@@ -1315,6 +1481,74 @@ export function LogPlatformConsole() {
       setHubSelectedClusters([]);
       setNotice({ tone: "success", text: isReviewer ? "方案已写入方案库。" : "方案已提交审核。" });
       await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function handlePrefillSolutionEntry() {
+    const diagnosis = safeObject(llmBundle.latestDiagnosis);
+    const structuredResult = safeObject(diagnosis.structured_result);
+    const currentError =
+      errorItems.find((item) => String(item.normalized_signature) === selectedErrorSignature) || null;
+    setHubForm((current) => ({
+      ...current,
+      module: current.module || llmForm.module || "",
+      error_name:
+        current.error_name ||
+        reviewDraft.error_name ||
+        String(currentError?.display_signature || currentError?.normalized_signature || ""),
+      message: current.message || String(currentError?.representative_message || ""),
+      root_cause_analysis:
+        current.root_cause_analysis ||
+        reviewDraft.root_cause_analysis ||
+        String(structuredResult.root_cause_summary || ""),
+      verified_solution: current.verified_solution || reviewDraft.verified_solution,
+      workaround: current.workaround || reviewDraft.workaround,
+      trigger_scenario: current.trigger_scenario || llmForm.triggerScenario || "",
+      task_uuid: current.task_uuid || selectedTaskUuid || "",
+      normalized_signature: current.normalized_signature || selectedErrorSignature || "",
+    }));
+    setNotice({ tone: "info", text: "已尝试带入当前错误簇和诊断上下文，请继续补充后提交。" });
+  }
+
+  async function handleImportSolutionRepository() {
+    if (!hubImportFile) {
+      setNotice({ tone: "error", text: "请先选择要导入的方案库文件。" });
+      return;
+    }
+    try {
+      const formData = new FormData();
+      formData.append("file", hubImportFile);
+      formData.append("preserve_error_codes", "true");
+      const response = await withBusy("正在导入方案库文件", () =>
+        request<AnyRecord>("/solution-repository/import", {
+          method: "POST",
+          formData,
+        }),
+      );
+      setHubImportResult(safeObject(response.item));
+      setNotice({ tone: "success", text: "方案库导入已完成，请查看导入摘要。" });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleAskSolutionRepository() {
+    if (!hubAssistantQuestion.trim()) {
+      setNotice({ tone: "error", text: "请先输入问题或现象描述。" });
+      return;
+    }
+    try {
+      const response = await withBusy("正在基于方案库生成回答", () =>
+        request<AnyRecord>("/solution-repository/ask", {
+          method: "POST",
+          body: { question: hubAssistantQuestion.trim(), limit: 8 },
+        }),
+      );
+      setHubAssistantResult(safeObject(response.item));
+      setNotice({ tone: "success", text: "方案库问答已生成。" });
     } catch (error) {
       showError(error);
     }
@@ -1397,7 +1631,6 @@ export function LogPlatformConsole() {
         error_category: reviewDraft.error_category,
         module: llmForm.module,
         submodule: llmForm.submodule,
-        error_code: reviewDraft.error_code,
         message: String(
           selectedError.representative_message || selectedError.display_signature || "",
         ),
@@ -1669,8 +1902,12 @@ export function LogPlatformConsole() {
   }, [apiBase]);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && selectedTaskUuid) {
-      window.localStorage.setItem(TASK_STORAGE_KEY, selectedTaskUuid);
+    if (typeof window !== "undefined") {
+      if (selectedTaskUuid) {
+        window.localStorage.setItem(TASK_STORAGE_KEY, selectedTaskUuid);
+      } else {
+        window.localStorage.removeItem(TASK_STORAGE_KEY);
+      }
     }
   }, [selectedTaskUuid]);
 
@@ -1681,7 +1918,13 @@ export function LogPlatformConsole() {
   }, [apiBase, token, user]);
 
   useEffect(() => {
-    if (isAuthenticated && (page === "dashboard" || page === "upload")) {
+    if (isAuthenticated && page === "dashboard") {
+      void Promise.all([loadDashboard(), loadSystemRuntime()]).catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "upload") {
       void loadDashboard().catch(showError);
     }
   }, [isAuthenticated, page, selectedTaskUuid]);
@@ -1801,7 +2044,6 @@ export function LogPlatformConsole() {
     });
   }, [selectedUserId, userList]);
 
-  const selectedTask = tasks.find((task) => String(task.task_uuid) === selectedTaskUuid) || null;
   const errorItems = safeArray(errorsResponse.items);
   const topErrorDistribution = useMemo(
     () =>
@@ -1913,6 +2155,24 @@ export function LogPlatformConsole() {
   const selectedUserRecord = userList.find((item) => String(item.id) === selectedUserId) || null;
   const llmLatestDiagnosis = safeObject(llmBundle.latestDiagnosis);
   const llmLatestReview = safeObject(llmBundle.latestReview);
+  const selectedHistoryTask =
+    historyItems.find((item) => String(item.task_uuid) === selectedHistoryTaskUuid) || null;
+  const runtimeData = safeObject(systemRuntimeBundle);
+  const runtimeCpu = safeObject(runtimeData.cpu);
+  const runtimeMemory = safeObject(runtimeData.memory);
+  const runtimeDisk = safeObject(runtimeData.disk);
+  const runtimePolicy = safeObject(runtimeData.policy);
+  const runtimeGuard = safeObject(runtimeData.guard);
+  const passwordChecks = useMemo(
+    () => [
+      { label: "当前密码已填写", passed: Boolean(currentPassword.trim()) },
+      { label: "新密码至少 8 位", passed: nextPassword.length >= 8 },
+      { label: "新旧密码不能相同", passed: Boolean(nextPassword) && currentPassword !== nextPassword },
+      { label: "两次输入保持一致", passed: Boolean(nextPassword) && nextPassword === nextPasswordConfirm },
+    ],
+    [currentPassword, nextPassword, nextPasswordConfirm],
+  );
+  const canSubmitPasswordChange = passwordChecks.every((item) => item.passed);
 
   useEffect(() => {
     if (!filteredHistoryRows.length) {
@@ -1964,6 +2224,21 @@ export function LogPlatformConsole() {
     ...(isAdmin ? [{ key: "users" as const, label: "用户管理", icon: Users }] : []),
   ];
 
+  function renderRefreshButton(
+    key: string,
+    label: string,
+    action: () => Promise<unknown>,
+    variant: "default" | "secondary" | "ghost" | "danger" = "secondary",
+  ) {
+    const refreshing = isRefreshing(key);
+    return (
+      <Button variant={variant} disabled={refreshing} onClick={() => void runRefreshAction(key, action)}>
+        <RefreshCcw className={cn("h-4 w-4", refreshing ? "animate-spin" : "")} />
+        {label}
+      </Button>
+    );
+  }
+
   function renderWelcome() {
     return (
       <div className="space-y-6">
@@ -1978,9 +2253,9 @@ export function LogPlatformConsole() {
             helper="实时探测后端 /health 状态。"
           />
           <MetricCard
-            label="当前 API"
-            value={apiBase.replace(/^https?:\/\//, "")}
-            helper="可以在左侧随时切换后端地址。"
+            label="队列待处理"
+            value={Number(health?.queue_pending || 0)}
+            helper="反映当前正在等待调度的任务数量。"
           />
           <MetricCard
             label="前端模式"
@@ -2093,17 +2368,17 @@ export function LogPlatformConsole() {
   }
 
   function renderDashboardPage() {
+    const cpuPercent = Number.isFinite(Number(runtimeCpu.percent)) ? Number(runtimeCpu.percent) : null;
+    const memoryPercent = Number.isFinite(Number(runtimeMemory.percent)) ? Number(runtimeMemory.percent) : null;
+    const diskPercent = Number.isFinite(Number(runtimeDisk.percent)) ? Number(runtimeDisk.percent) : null;
+    const loadAvg = safeObject(runtimeCpu.load_avg);
+
     return (
       <div className="space-y-8">
         <SectionTitle
           title="首页 / 仪表盘"
           description="优先回答当前任务是否异常、问题集中在哪里、是否值得继续深挖。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadDashboard()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新仪表盘
-            </Button>
-          }
+          actions={renderRefreshButton("dashboard", "刷新仪表盘", () => Promise.all([loadDashboard(), loadSystemRuntime()]))}
         />
         <div className="grid gap-4 lg:grid-cols-4">
           <MetricCard label="文件数" value={dashboardData.file_count || 0} helper="纳入本次分析的原始文件数量。" />
@@ -2111,6 +2386,77 @@ export function LogPlatformConsole() {
           <MetricCard label="总错误数" value={dashboardData.total_errors || 0} helper="任务中识别到的错误总数。" />
           <MetricCard label="唯一错误簇" value={dashboardData.unique_error_count || 0} helper="按签名去重后的错误簇数量。" />
         </div>
+        <div className="grid gap-4 xl:grid-cols-3">
+          <UsageStatusCard
+            label="CPU 使用状态"
+            percent={cpuPercent}
+            primary={formatPercentLabel(runtimeCpu.percent)}
+            secondary={`${runtimeCpu.logical_cores || "-"} 逻辑核 | load1 ${formatRuntimeNumber(loadAvg.load_1m, 2)}`}
+            helper="用于观察服务当前计算压力。"
+          />
+          <UsageStatusCard
+            label="内存使用状态"
+            percent={memoryPercent}
+            primary={`${formatStorageLabel(runtimeMemory.used_mb, "MB")} / ${formatStorageLabel(runtimeMemory.total_mb, "MB")}`}
+            secondary={`可用 ${formatStorageLabel(runtimeMemory.available_mb, "MB")} | 软上限 ${runtimePolicy.memory_soft_limit_percent || "-"}%`}
+            helper="达到软限额后只会延迟新任务调度，不会中断正在进行的分析。"
+          />
+          <UsageStatusCard
+            label="存储使用状态"
+            percent={diskPercent}
+            primary={`${formatStorageLabel(runtimeDisk.used_gb, "GB")} / ${formatStorageLabel(runtimeDisk.total_gb, "GB")}`}
+            secondary={`剩余 ${formatStorageLabel(runtimeDisk.free_gb, "GB")} | ${runtimeDisk.path || "data"}`}
+            helper="基于服务数据目录所在磁盘统计当前占用。"
+          />
+        </div>
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-[var(--foreground)]">服务器资源守护</p>
+                <p className="text-sm leading-6 text-[var(--muted-foreground)]">
+                  {runtimeGuard.summary || "当前尚未获取到资源守护状态。"}
+                </p>
+              </div>
+              <StatusBadge status={runtimeGuard.blocked ? "queued" : "completed"} />
+            </div>
+            <InfoTileGrid
+              columns={4}
+              items={[
+                { label: "新任务调度", value: runtimeGuard.dispatch_allowed ? "允许" : "延迟", note: "只影响新任务，不影响运行中任务" },
+                { label: "内存软上限", value: runtimePolicy.memory_soft_limit_percent || "-", note: "单位为 %" },
+                { label: "保留内存", value: runtimePolicy.memory_soft_reserve_mb || "-", note: "单位为 MB" },
+                { label: "守护检查间隔", value: runtimePolicy.guard_wait_seconds || "-", note: "单位为秒" },
+              ]}
+            />
+            {isAdmin ? (
+              <div className="grid gap-4 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/25 p-4 lg:grid-cols-[1fr_1fr_auto]">
+                <Field label="内存软上限 (%)" hint="建议保留一定冗余，避免新任务挤占分析进程资源。">
+                  <Input
+                    type="number"
+                    min="50"
+                    max="98"
+                    value={memoryLimitPercentDraft}
+                    onChange={(event) => setMemoryLimitPercentDraft(event.target.value)}
+                  />
+                </Field>
+                <Field label="保留内存 (MB)" hint="当可用内存低于该值时，新任务会继续排队等待。">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={memoryReserveDraft}
+                    onChange={(event) => setMemoryReserveDraft(event.target.value)}
+                  />
+                </Field>
+                <div className="flex items-end">
+                  <Button className="w-full" onClick={() => void handleUpdateMemoryPolicy()}>
+                    保存限额
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
         <InfoTileGrid
           items={[
             { label: "当前状态", value: statusData.status || "-", note: statusData.current_stage || "等待状态同步" },
@@ -2150,12 +2496,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="历史项目中心"
           description="浏览已有任务记录，快速切换任务并回看分析结果。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadHistory()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新任务列表
-            </Button>
-          }
+          actions={renderRefreshButton("history", "刷新任务列表", () => loadHistory())}
         />
         <PaginationBar
           page={historyPage}
@@ -2170,13 +2511,35 @@ export function LogPlatformConsole() {
         <DataTable
           title={`任务列表 (${Number(historyBundle.total || 0)})`}
           rows={historyItems}
-          selectedRowIndex={historyItems.findIndex((item) => String(item.task_uuid) === selectedTaskUuid)}
-          onRowClick={(row) => {
-            setSelectedTaskUuid(String(row.task_uuid || ""));
-            setPage("dashboard");
-          }}
+          selectedRowIndex={historyItems.findIndex((item) => String(item.task_uuid) === selectedHistoryTaskUuid)}
+          onRowClick={(row) => setSelectedHistoryTaskUuid(String(row.task_uuid || ""))}
           maxHeight={520}
         />
+        {selectedHistoryTask ? (
+          <>
+            <DetailListCard
+              title="历史任务详情"
+              description="在这里先确认任务是否需要继续查看，或直接执行删除。"
+              value={selectedHistoryTask}
+            />
+            <div className="flex flex-wrap gap-3">
+              <Button onClick={() => void handleApplyHistoryTask()}>设为当前任务</Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  if (
+                    typeof window === "undefined" ||
+                    window.confirm(`确定要删除任务 ${selectedHistoryTask.task_uuid} 吗？该操作不可恢复。`)
+                  ) {
+                    void handleDeleteTask(String(selectedHistoryTask.task_uuid));
+                  }
+                }}
+              >
+                删除选中任务
+              </Button>
+            </div>
+          </>
+        ) : null}
       </div>
     );
   }
@@ -2224,12 +2587,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="统一事件流"
           description="按组件、级别、Cycle、芯片名和关键词检索统一归档后的事件流。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadEvents()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新事件流
-            </Button>
-          }
+          actions={renderRefreshButton("events", "刷新事件流", () => loadEvents())}
         />
         <Card>
           <CardContent className="grid gap-4 pt-6 lg:grid-cols-5">
@@ -2277,12 +2635,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="耗时分析"
           description="查看 Cycle 总耗时趋势、Sub-step 表现和操作指标摘要。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadPerformance()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新耗时分析
-            </Button>
-          }
+          actions={renderRefreshButton("performance", "刷新耗时分析", () => loadPerformance())}
         />
         <Card>
           <CardContent className="pt-6">
@@ -2327,12 +2680,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="事件流时间轴"
           description="从时间维度观察各组件动作顺序和错误点，并支持按错误家族与严重级别筛选。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadTimeline()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新时间轴
-            </Button>
-          }
+          actions={renderRefreshButton("timeline", "刷新时间轴", () => loadTimeline())}
         />
         <Card>
           <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
@@ -2408,12 +2756,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="错误分析"
           description="保留 Streamlit 的错误簇表、Top N 分布、错误家族分布和家族说明。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadErrors()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新错误分析
-            </Button>
-          }
+          actions={renderRefreshButton("errors", "刷新错误分析", () => loadErrors())}
         />
         <PaginationBar
           page={errorsPage}
@@ -2469,12 +2812,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="参数趋势分析"
           description="按参数与单位查看趋势曲线、Sub-step 聚合以及 Row Scan Metrics。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadParameters()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新参数趋势
-            </Button>
-          }
+          actions={renderRefreshButton("parameters", "刷新参数趋势", () => loadParameters())}
         />
         <Card>
           <CardContent className="space-y-4 pt-6">
@@ -2524,6 +2862,110 @@ export function LogPlatformConsole() {
     );
   }
 
+  function renderUnifiedSolutionSubmissionForm({
+    title,
+    description,
+    showPrefillButton = false,
+    submitLabel,
+  }: {
+    title: string;
+    description: string;
+    showPrefillButton?: boolean;
+    submitLabel: string;
+  }) {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-[var(--foreground)]">{title}</p>
+              <p className="text-sm leading-6 text-[var(--muted-foreground)]">{description}</p>
+            </div>
+            <InfoTileGrid
+              columns={4}
+              items={[
+                { label: "错误码分配", value: "系统自动分配", note: "不再允许手动填写错误码" },
+                { label: "统一落库", value: "solution_records", note: "与综合诊断审核、方案中心共用同一数据库" },
+                { label: "当前任务", value: selectedTaskUuid || "-", note: "可为空，支持纯经验方案录入" },
+                { label: "当前签名", value: selectedErrorSignature || "-", note: "如已选错误簇，可用于补全上下文" },
+              ]}
+            />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+            <Field label="模块">
+              <Select value={hubForm.module} onChange={(event) => setHubForm((current) => ({ ...current, module: event.target.value }))}>
+                <option value="">请选择模块</option>
+                {modules.map((module) => (
+                  <option key={String(module.id)} value={String(module.module_key)}>
+                    {`${module.display_name} | ${module.prefix}`}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="错误名">
+              <Input value={hubForm.error_name} onChange={(event) => setHubForm((current) => ({ ...current, error_name: event.target.value }))} />
+            </Field>
+            <div className="lg:col-span-2">
+              <Field label="任务簇">
+                <ChipToggleGroup options={taskClusters.map((item) => String(item.display_name || item.cluster_key))} selected={hubSelectedClusters} onToggle={toggleTaskCluster} />
+              </Field>
+            </div>
+            <Field label="新增任务簇候选">
+              <Input value={hubForm.new_cluster} onChange={(event) => setHubForm((current) => ({ ...current, new_cluster: event.target.value }))} />
+            </Field>
+            <Field label="关联 task_uuid">
+              <Input value={hubForm.task_uuid} onChange={(event) => setHubForm((current) => ({ ...current, task_uuid: event.target.value }))} />
+            </Field>
+            <div className="lg:col-span-2">
+              <Field label="现象描述 / message">
+                <Textarea value={hubForm.message} onChange={(event) => setHubForm((current) => ({ ...current, message: event.target.value }))} />
+              </Field>
+            </div>
+            <Field label="message 关键词">
+              <Input value={hubForm.message_keywords} onChange={(event) => setHubForm((current) => ({ ...current, message_keywords: event.target.value }))} />
+            </Field>
+            <Field label="标签">
+              <Input value={hubForm.tags} onChange={(event) => setHubForm((current) => ({ ...current, tags: event.target.value }))} />
+            </Field>
+            <div className="lg:col-span-2">
+              <Field label="根因分析">
+                <Textarea value={hubForm.root_cause_analysis} onChange={(event) => setHubForm((current) => ({ ...current, root_cause_analysis: event.target.value }))} />
+              </Field>
+            </div>
+            <div className="lg:col-span-2">
+              <Field label="已验证解决方案">
+                <Textarea value={hubForm.verified_solution} onChange={(event) => setHubForm((current) => ({ ...current, verified_solution: event.target.value }))} />
+              </Field>
+            </div>
+            <div className="lg:col-span-2">
+              <Field label="临时绕过方案">
+                <Textarea value={hubForm.workaround} onChange={(event) => setHubForm((current) => ({ ...current, workaround: event.target.value }))} />
+              </Field>
+            </div>
+            <div className="lg:col-span-2">
+              <Field label="触发场景 / 问题簇">
+                <Textarea value={hubForm.trigger_scenario} onChange={(event) => setHubForm((current) => ({ ...current, trigger_scenario: event.target.value }))} />
+              </Field>
+            </div>
+            <Field label="关联 normalized_signature">
+              <Input value={hubForm.normalized_signature} onChange={(event) => setHubForm((current) => ({ ...current, normalized_signature: event.target.value }))} />
+            </Field>
+          </CardContent>
+        </Card>
+        <div className="flex flex-wrap gap-3">
+          {showPrefillButton ? (
+            <Button variant="secondary" onClick={handlePrefillSolutionEntry}>
+              从当前诊断带入
+            </Button>
+          ) : null}
+          <Button onClick={() => void handleSubmitSolutionHub()}>{submitLabel}</Button>
+        </div>
+      </div>
+    );
+  }
+
   function renderLlmPage() {
     const historyTokenSummary = safeObject(selectedHistoryRow?.token_summary);
 
@@ -2532,12 +2974,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="LLM 诊断"
           description="结合日志、上下文、源码片段、历史案例和分析深度策略执行综合诊断。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadLlm()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新诊断数据
-            </Button>
-          }
+          actions={renderRefreshButton("llm", "刷新诊断数据", () => loadLlm())}
         />
         <details className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4">
           <summary className="cursor-pointer text-sm font-medium text-[var(--foreground)]">
@@ -2774,23 +3211,12 @@ export function LogPlatformConsole() {
             {Object.keys(llmLatestReview).length ? <DetailListCard title="最新审核提交结果" value={llmLatestReview} /> : null}
           </div>
         ) : llmTab === "solutionEntry" ? (
-          <Card>
-            <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
-              <Field label="错误名"><Input value={reviewDraft.error_name} onChange={(event) => setReviewDraft((current) => ({ ...current, error_name: event.target.value }))} /></Field>
-              <Field label="错误类别"><Input value={reviewDraft.error_category} onChange={(event) => setReviewDraft((current) => ({ ...current, error_category: event.target.value }))} /></Field>
-              <Field label="错误码"><Input value={reviewDraft.error_code} onChange={(event) => setReviewDraft((current) => ({ ...current, error_code: event.target.value }))} /></Field>
-              <div className="lg:col-span-2"><Field label="影响范围"><Textarea value={reviewDraft.impact_scope} onChange={(event) => setReviewDraft((current) => ({ ...current, impact_scope: event.target.value }))} /></Field></div>
-              <Field label="责任部门"><Input value={reviewDraft.owner_department} onChange={(event) => setReviewDraft((current) => ({ ...current, owner_department: event.target.value }))} /></Field>
-              <div className="lg:col-span-2"><Field label="根因分析"><Textarea value={reviewDraft.root_cause_analysis} onChange={(event) => setReviewDraft((current) => ({ ...current, root_cause_analysis: event.target.value }))} /></Field></div>
-              <div className="lg:col-span-2"><Field label="已验证解决方案"><Textarea value={reviewDraft.verified_solution} onChange={(event) => setReviewDraft((current) => ({ ...current, verified_solution: event.target.value }))} /></Field></div>
-              <div className="lg:col-span-2"><Field label="临时绕过方案"><Textarea value={reviewDraft.workaround} onChange={(event) => setReviewDraft((current) => ({ ...current, workaround: event.target.value }))} /></Field></div>
-              <Field label="提交人 / 来源"><Input value={reviewDraft.submitter} onChange={(event) => setReviewDraft((current) => ({ ...current, submitter: event.target.value }))} /></Field>
-              <label className="flex items-center gap-2 pt-8 text-sm text-[var(--foreground)]">
-                <input type="checkbox" checked={reviewDraft.reusable} onChange={(event) => setReviewDraft((current) => ({ ...current, reusable: event.target.checked }))} />
-                是否可复用
-              </label>
-            </CardContent>
-          </Card>
+          renderUnifiedSolutionSubmissionForm({
+            title: "已有方案录入",
+            description: "这个入口和方案库中心使用同一套解决方案数据库与审核链，错误码会在入库时自动分配。",
+            showPrefillButton: true,
+            submitLabel: isReviewer ? "直接写入方案库" : "提交到审核流",
+          })
         ) : llmTab === "repo" ? (
           <div className="space-y-4">
             <DataTable title="解决方案库记录" rows={safeArray(hubBundle.records?.items)} maxHeight={320} />
@@ -2846,13 +3272,8 @@ export function LogPlatformConsole() {
       <div className="space-y-6">
         <SectionTitle
           title="方案库中心"
-          description="围绕全局可复用方案、检索索引、任务簇管理和审核流的统一入口。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadSolutionHub()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新方案中心
-            </Button>
-          }
+          description="围绕统一解决方案数据库，提供提交、检索、导入导出、智能问答和审核管理。"
+          actions={renderRefreshButton("solutionHub", "刷新方案中心", () => loadSolutionHub())}
         />
         <TabBar
           tabs={[
@@ -2865,45 +3286,78 @@ export function LogPlatformConsole() {
           onChange={setSolutionTab}
         />
         {solutionTab === "submit" ? (
-          <div className="space-y-4">
-            <Card>
-              <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
-                <Field label="模块前缀">
-                  <Select value={hubForm.module} onChange={(event) => setHubForm((current) => ({ ...current, module: event.target.value }))}>
-                    <option value="">请选择模块</option>
-                    {modules.map((module) => (
-                      <option key={String(module.id)} value={String(module.module_key)}>
-                        {`${module.display_name} | ${module.prefix}`}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="错误名"><Input value={hubForm.error_name} onChange={(event) => setHubForm((current) => ({ ...current, error_name: event.target.value }))} /></Field>
-                <div className="lg:col-span-2"><Field label="任务簇"><ChipToggleGroup options={taskClusters.map((item) => String(item.display_name || item.cluster_key))} selected={hubSelectedClusters} onToggle={toggleTaskCluster} /></Field></div>
-                <Field label="新增任务簇候选"><Input value={hubForm.new_cluster} onChange={(event) => setHubForm((current) => ({ ...current, new_cluster: event.target.value }))} /></Field>
-                <Field label="关联 task_uuid"><Input value={hubForm.task_uuid} onChange={(event) => setHubForm((current) => ({ ...current, task_uuid: event.target.value }))} /></Field>
-                <div className="lg:col-span-2"><Field label="message 关键词 / 现象描述"><Textarea value={hubForm.message} onChange={(event) => setHubForm((current) => ({ ...current, message: event.target.value }))} /></Field></div>
-                <Field label="message 关键词"><Input value={hubForm.message_keywords} onChange={(event) => setHubForm((current) => ({ ...current, message_keywords: event.target.value }))} /></Field>
-                <Field label="标签"><Input value={hubForm.tags} onChange={(event) => setHubForm((current) => ({ ...current, tags: event.target.value }))} /></Field>
-                <div className="lg:col-span-2"><Field label="根因分析"><Textarea value={hubForm.root_cause_analysis} onChange={(event) => setHubForm((current) => ({ ...current, root_cause_analysis: event.target.value }))} /></Field></div>
-                <div className="lg:col-span-2"><Field label="已验证解决方案"><Textarea value={hubForm.verified_solution} onChange={(event) => setHubForm((current) => ({ ...current, verified_solution: event.target.value }))} /></Field></div>
-                <div className="lg:col-span-2"><Field label="临时绕过方案"><Textarea value={hubForm.workaround} onChange={(event) => setHubForm((current) => ({ ...current, workaround: event.target.value }))} /></Field></div>
-                <div className="lg:col-span-2"><Field label="触发场景 / 问题簇"><Textarea value={hubForm.trigger_scenario} onChange={(event) => setHubForm((current) => ({ ...current, trigger_scenario: event.target.value }))} /></Field></div>
-                <Field label="关联 normalized_signature"><Input value={hubForm.normalized_signature} onChange={(event) => setHubForm((current) => ({ ...current, normalized_signature: event.target.value }))} /></Field>
-              </CardContent>
-            </Card>
-            <Button onClick={() => void handleSubmitSolutionHub()}>提交方案</Button>
-          </div>
+          renderUnifiedSolutionSubmissionForm({
+            title: "统一方案提交",
+            description: "无论来自人工经验、综合诊断还是历史问题复盘，都会汇总到同一个解决方案数据库中。",
+            submitLabel: isReviewer ? "直接写入方案库" : "提交到审核流",
+          })
         ) : solutionTab === "query" ? (
           <div className="space-y-4">
             <Card>
-              <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
+              <CardContent className="grid gap-4 pt-6 lg:grid-cols-[1fr_1fr_1fr_auto]">
                 <Field label="全文检索"><Input value={hubQuery.search} onChange={(event) => setHubQuery((current) => ({ ...current, search: event.target.value }))} /></Field>
                 <Field label="模块过滤"><Select value={hubQuery.module} onChange={(event) => setHubQuery((current) => ({ ...current, module: event.target.value }))}><option value="">全部</option>{modules.map((item) => <option key={String(item.id)} value={String(item.module_key)}>{String(item.module_key)}</option>)}</Select></Field>
                 <Field label="审核状态"><Select value={hubQuery.review_status} onChange={(event) => setHubQuery((current) => ({ ...current, review_status: event.target.value }))}><option value="">全部</option><option value="approved">approved</option><option value="pending_review">pending_review</option><option value="needs_revision">needs_revision</option><option value="rejected">rejected</option></Select></Field>
+                <div className="flex items-end">{renderRefreshButton("solutionSearch", "按条件检索", () => loadSolutionHub())}</div>
               </CardContent>
             </Card>
-            <DataTable title="方案记录" rows={safeArray(hubBundle.records?.items)} maxHeight={360} />
+            <Card>
+              <CardContent className="space-y-4 pt-6">
+                <div className="grid gap-4 lg:grid-cols-[1fr_auto]">
+                  <Field label="向方案库提问" hint="输入现象、问题或处理诉求，大模型会先检索方案库再给出回答。">
+                    <Textarea value={hubAssistantQuestion} onChange={(event) => setHubAssistantQuestion(event.target.value)} />
+                  </Field>
+                  <div className="flex items-end">
+                    <Button className="w-full" onClick={() => void handleAskSolutionRepository()}>
+                      方案库问答
+                    </Button>
+                  </div>
+                </div>
+                {hubAssistantResult ? (
+                  <>
+                    <DetailListCard title="问答结果" value={hubAssistantResult} />
+                    {safeArray(hubAssistantResult.matches).length ? (
+                      <DataTable title="命中的方案记录" rows={safeArray(hubAssistantResult.matches)} maxHeight={260} />
+                    ) : null}
+                  </>
+                ) : null}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="grid gap-4 pt-6 lg:grid-cols-[1fr_auto_auto_auto]">
+                <Field label="导入方案库" hint="支持导入 JSON、CSV、XLSX；导入时会优先匹配已有记录，新增记录可保留原错误码。">
+                  <Input type="file" accept=".json,.csv,.xlsx" onChange={(event) => setHubImportFile(event.target.files?.[0] || null)} />
+                </Field>
+                <div className="flex items-end">
+                  <Button className="w-full" onClick={() => void handleImportSolutionRepository()}>
+                    导入方案库
+                  </Button>
+                </div>
+                <div className="flex items-end">
+                  <Button variant="secondary" asChild>
+                    <a href={buildApiUrl(apiBase, "/solution-repository/export", { access_token: token, format: "json" })} target="_blank" rel="noreferrer">
+                      导出 JSON
+                    </a>
+                  </Button>
+                </div>
+                <div className="flex items-end">
+                  <Button variant="secondary" asChild>
+                    <a href={buildApiUrl(apiBase, "/solution-repository/export", { access_token: token, format: "xlsx" })} target="_blank" rel="noreferrer">
+                      导出 Excel
+                    </a>
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+            {hubImportResult ? <DetailListCard title="导入摘要" value={hubImportResult} /> : null}
+            <DataTable
+              title="方案记录"
+              rows={safeArray(hubBundle.records?.items)}
+              selectedRowIndex={safeArray(hubBundle.records?.items).findIndex((item) => String(item.id) === editingRecordId)}
+              onRowClick={(row) => setEditingRecordId(String(row.id || ""))}
+              maxHeight={360}
+            />
+            {selectedRepositoryRecord ? <DetailListCard title="当前选中方案" value={selectedRepositoryRecord} /> : null}
           </div>
         ) : solutionTab === "review" ? (
           <div className="space-y-4">
@@ -2982,12 +3436,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="原始文件预览"
           description="查看任务中收录的原始文件列表，并按预览行数查看文件内容。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadFiles()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新文件列表
-            </Button>
-          }
+          actions={renderRefreshButton("files", "刷新文件列表", () => loadFiles())}
         />
         <PaginationBar
           page={filesPage}
@@ -3049,12 +3498,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="未知日志待标注池"
           description="优先按出现次数筛选，再查看代表样本、审核历史、尝试过的解析器和上下文样本。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadUnknown()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新未知日志池
-            </Button>
-          }
+          actions={renderRefreshButton("unknown", "刷新未知日志池", () => loadUnknown())}
         />
         <Card>
           <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
@@ -3151,12 +3595,12 @@ export function LogPlatformConsole() {
           description="先看本地规则建议，再按需触发 LLM 候选建议；所有建议都只进入审核流，不会直接改生产规则。"
           actions={
             <div className="flex flex-wrap gap-3">
-              <Button variant="secondary" onClick={() => void loadRules(false)}>
-                <RefreshCcw className="h-4 w-4" />
-                刷新本地建议
-              </Button>
-              <Button onClick={() => void loadRules(true)}>
-                <WandSparkles className="h-4 w-4" />
+              {renderRefreshButton("rulesLocal", "刷新本地建议", () => loadRules(false))}
+              <Button
+                disabled={isRefreshing("rulesLLM")}
+                onClick={() => void runRefreshAction("rulesLLM", () => loadRules(true))}
+              >
+                <WandSparkles className={cn("h-4 w-4", isRefreshing("rulesLLM") ? "animate-spin" : "")} />
                 生成 / 刷新 LLM 建议
               </Button>
             </div>
@@ -3236,12 +3680,7 @@ export function LogPlatformConsole() {
         <SectionTitle
           title="配置页面"
           description="集中维护 `.env`、阈值、规则审核策略和 Prompt / 方案库知识配置。"
-          actions={
-            <Button variant="secondary" onClick={() => void loadConfig()}>
-              <RefreshCcw className="h-4 w-4" />
-              刷新配置
-            </Button>
-          }
+          actions={renderRefreshButton("config", "刷新配置", () => loadConfig())}
         />
         <TabBar
           tabs={[
@@ -3423,7 +3862,7 @@ export function LogPlatformConsole() {
   function renderUsersPage() {
     return (
       <div className="space-y-6">
-        <SectionTitle title="用户管理" description="仅管理员可见，用于处理注册审核、账号启停与角色设置。" actions={<Button variant="secondary" onClick={() => void loadUsers()}><RefreshCcw className="h-4 w-4" />刷新用户列表</Button>} />
+        <SectionTitle title="用户管理" description="仅管理员可见，用于处理注册审核、账号启停与角色设置。" actions={renderRefreshButton("users", "刷新用户列表", () => loadUsers())} />
         <DataTable title="用户列表" rows={userList} maxHeight={320} />
         <Field label="选择用户">
           <Select value={selectedUserId} onChange={(event) => setSelectedUserId(event.target.value)}>
@@ -3535,9 +3974,18 @@ export function LogPlatformConsole() {
             <CardDescription>{shellDescription}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
-            <Field label="FastAPI 地址">
-              <Input value={apiBase} onChange={(event) => setApiBase(normalizeApiBaseUrl(event.target.value))} />
-            </Field>
+            {isAdmin ? (
+              <div className="space-y-4 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/30 p-4">
+                <p className="text-sm font-medium text-[var(--foreground)]">管理员接口控制</p>
+                <Field label="FastAPI 地址">
+                  <Input value={apiBase} onChange={(event) => setApiBase(normalizeApiBaseUrl(event.target.value))} />
+                </Field>
+                <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] px-4 py-3 text-sm">
+                  <p className="text-xs uppercase tracking-[0.14em] text-[var(--muted-foreground)]">当前 API</p>
+                  <p className="mt-2 break-all text-[var(--foreground)]">{apiBase.replace(/^https?:\/\//, "")}</p>
+                </div>
+              </div>
+            ) : null}
             <div className="rounded-2xl border border-[var(--border)] bg-[var(--muted)]/55 p-4 text-sm">
               <p className="font-medium text-[var(--foreground)]">API Health</p>
               <p className="mt-2 text-[var(--muted-foreground)]">{String(health?.status || "unknown")}</p>
@@ -3583,16 +4031,51 @@ export function LogPlatformConsole() {
                     {safeArray(user.roles).map((role) => <Badge key={String(role)}>{String(role)}</Badge>)}
                   </div>
                   <div className="space-y-3 rounded-2xl border border-[var(--border)] p-4">
-                    <p className="text-sm font-medium text-[var(--foreground)]">修改密码</p>
-                    <Input type="password" placeholder="当前密码" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} />
-                    <Input type="password" placeholder="新密码" value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} />
-                    <Input type="password" placeholder="确认新密码" value={nextPasswordConfirm} onChange={(event) => setNextPasswordConfirm(event.target.value)} />
-                    <Button className="w-full" variant="secondary" onClick={() => void handleChangePassword()}>
-                      <KeyRound className="h-4 w-4" />
-                      更新密码
-                    </Button>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-medium text-[var(--foreground)]">修改密码</p>
+                      <Button variant="ghost" size="sm" onClick={() => setPasswordEditorOpen((current) => !current)}>
+                        <KeyRound className="h-4 w-4" />
+                        {passwordEditorOpen ? "收起" : "展开"}
+                      </Button>
+                    </div>
+                    {passwordEditorOpen ? (
+                      <div className="space-y-3">
+                        <Input type="password" placeholder="当前密码" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} />
+                        <Input type="password" placeholder="新密码" value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} />
+                        <Input type="password" placeholder="确认新密码" value={nextPasswordConfirm} onChange={(event) => setNextPasswordConfirm(event.target.value)} />
+                        <div className="rounded-2xl border border-[var(--border)] bg-[var(--muted)]/25 px-4 py-3">
+                          <p className="text-xs uppercase tracking-[0.14em] text-[var(--muted-foreground)]">提交前校验</p>
+                          <div className="mt-3 space-y-2">
+                            {passwordChecks.map((item) => (
+                              <p key={item.label} className={cn("text-sm", item.passed ? "text-emerald-700" : "text-[var(--muted-foreground)]")}>
+                                {item.passed ? "已满足" : "待完成"} · {item.label}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                          <Button className="flex-1" variant="secondary" disabled={!canSubmitPasswordChange} onClick={() => void handleChangePassword()}>
+                            更新密码
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            onClick={() => {
+                              setPasswordEditorOpen(false);
+                              setCurrentPassword("");
+                              setNextPassword("");
+                              setNextPasswordConfirm("");
+                            }}
+                          >
+                            取消
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm leading-6 text-[var(--muted-foreground)]">
+                        展开后填写当前密码和新密码，所有校验通过后才允许提交。
+                      </p>
+                    )}
                   </div>
-                  {selectedTask ? <Button className="w-full" variant="danger" onClick={() => void handleDeleteTask(String(selectedTask.task_uuid))}>删除当前任务</Button> : null}
                   <Button className="w-full" variant="ghost" onClick={handleLogout}>
                     <LogOut className="h-4 w-4" />
                     退出登录
