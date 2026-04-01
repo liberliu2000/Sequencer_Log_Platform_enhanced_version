@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 from pathlib import Path
 import re
 
@@ -134,7 +135,17 @@ class EnvFileService:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         tmp_path.write_text(text, encoding="utf-8")
-        tmp_path.replace(path)
+        try:
+            tmp_path.replace(path)
+        except OSError as exc:
+            if exc.errno not in {errno.EBUSY, errno.EXDEV, errno.EPERM, errno.EACCES}:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            path.write_text(text, encoding="utf-8")
+            tmp_path.unlink(missing_ok=True)
 
     def _parse_entries(self, text: str) -> tuple[list[str], dict[str, EnvEntry]]:
         lines = text.splitlines(keepends=True)

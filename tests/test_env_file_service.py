@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 import shutil
+from unittest.mock import patch
 import uuid
 
 from app.services.env_file_service import EnvFileService
@@ -136,5 +138,25 @@ def test_env_file_service_quotes_special_values_and_returns_plain_text():
             'SMTP_FROM_NAME="Sequencer Ops #1"',
             'CUSTOM_ALERT_MESSAGE="line #1 ready"',
         ]
+    finally:
+        shutil.rmtree(base_dir, ignore_errors=True)
+
+
+def test_env_file_service_falls_back_to_direct_write_when_replace_is_busy():
+    base_dir = _make_work_dir()
+    try:
+        env_path = base_dir / ".env"
+        example_path = base_dir / ".env.example"
+        env_path.write_text("UI_AUTO_REFRESH_SECONDS=5\n", encoding="utf-8")
+        example_path.write_text("UI_AUTO_REFRESH_SECONDS=5\n", encoding="utf-8")
+
+        service = EnvFileService(env_path=env_path, example_path=example_path)
+
+        with patch.object(Path, "replace", side_effect=OSError(errno.EBUSY, "busy mount")):
+            updated = service.update_item("UI_AUTO_REFRESH_SECONDS", "6")
+
+        assert updated["value"] == "6"
+        assert env_path.read_text(encoding="utf-8") == "UI_AUTO_REFRESH_SECONDS=6\n"
+        assert not (base_dir / ".env.tmp").exists()
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
