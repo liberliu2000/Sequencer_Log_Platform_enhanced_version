@@ -56,15 +56,21 @@ import {
   type AnyRecord,
   type Notice,
   ChipToggleGroup,
+  CodePreview,
   DataTable,
   DistributionList,
   Field,
+  InfoTileGrid,
   JsonPreview,
+  MappingEditorTable,
   MetricCard,
   NoticeBanner,
+  PaginationBar,
   SectionTitle,
+  SimpleLineChart,
   StatusBadge,
   TabBar,
+  TimelineChart,
   formatDate,
   parseJsonText,
   safeArray,
@@ -93,7 +99,7 @@ type PageKey =
   | "exports"
   | "users";
 
-type LlmTabKey = "history" | "diagnose";
+type LlmTabKey = "history" | "diagnose" | "solutionEntry" | "repo" | "review";
 type SolutionTabKey = "submit" | "query" | "review" | "taxonomy";
 
 const TOKEN_STORAGE_KEY = "sequencer-platform-auth-token";
@@ -119,6 +125,72 @@ const defaultReviewDraft = {
   submitter: "",
   reusable: true,
 };
+
+function splitCommaText(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatPercent(numerator: number, denominator: number, digits = 1) {
+  if (!denominator) {
+    return "0%";
+  }
+  return `${((numerator / denominator) * 100).toFixed(digits)}%`;
+}
+
+function rowsFromMapping(source: Record<string, unknown>) {
+  return Object.entries(source || {}).map(([key, value]) => ({
+    key,
+    value: String(value ?? ""),
+  }));
+}
+
+function rowsFromNestedMapping(source: Record<string, Record<string, unknown>>) {
+  const rows: Array<{ module: string; step: string; value: string }> = [];
+  Object.entries(source || {}).forEach(([moduleName, steps]) => {
+    Object.entries(steps || {}).forEach(([stepName, value]) => {
+      rows.push({
+        module: moduleName,
+        step: stepName,
+        value: String(value ?? ""),
+      });
+    });
+  });
+  return rows;
+}
+
+function mappingFromRows(rows: AnyRecord[]) {
+  const result: Record<string, number | string> = {};
+  rows.forEach((row) => {
+    const key = String(row.key || "").trim();
+    if (!key) {
+      return;
+    }
+    const rawValue = String(row.value ?? "").trim();
+    const numeric = Number(rawValue);
+    result[key] = Number.isFinite(numeric) && rawValue !== "" ? numeric : rawValue;
+  });
+  return result;
+}
+
+function nestedMappingFromRows(rows: AnyRecord[]) {
+  const result: Record<string, Record<string, number | string>> = {};
+  rows.forEach((row) => {
+    const moduleName = String(row.module || "").trim();
+    const stepName = String(row.step || "").trim();
+    if (!moduleName || !stepName) {
+      return;
+    }
+    const rawValue = String(row.value ?? "").trim();
+    const numeric = Number(rawValue);
+    result[moduleName] ??= {};
+    result[moduleName][stepName] =
+      Number.isFinite(numeric) && rawValue !== "" ? numeric : rawValue;
+  });
+  return result;
+}
 
 export function LogPlatformConsole() {
   const { resolvedTheme, setTheme } = useTheme();
@@ -182,6 +254,12 @@ export function LogPlatformConsole() {
   });
 
   const [llmTab, setLlmTab] = useState<LlmTabKey>("history");
+  const [historyDetailTab, setHistoryDetailTab] = useState<
+    "structured" | "context" | "source" | "cases" | "full"
+  >("structured");
+  const [diagnosisResultTab, setDiagnosisResultTab] = useState<
+    "structured" | "context" | "source" | "cases" | "payload"
+  >("structured");
   const [llmBundle, setLlmBundle] = useState<AnyRecord>({
     config: {},
     errors: [],
@@ -267,9 +345,16 @@ export function LogPlatformConsole() {
   const [ruleForceRefresh, setRuleForceRefresh] = useState(false);
   const [selectedRuleSignatures, setSelectedRuleSignatures] = useState<string[]>([]);
   const [selectedRuleFile, setSelectedRuleFile] = useState("");
+  const [selectedLocalNewSuggestionId, setSelectedLocalNewSuggestionId] = useState("");
+  const [selectedLocalFixSuggestionId, setSelectedLocalFixSuggestionId] = useState("");
+  const [selectedLlmNewSuggestionId, setSelectedLlmNewSuggestionId] = useState("");
+  const [selectedLlmFixSuggestionId, setSelectedLlmFixSuggestionId] = useState("");
   const [ruleFileContent, setRuleFileContent] = useState<AnyRecord | null>(null);
   const [ruleReviewer, setRuleReviewer] = useState("");
   const [ruleReviewNotes, setRuleReviewNotes] = useState("");
+  const [rulesTab, setRulesTab] = useState<
+    "localNew" | "localFix" | "llmNew" | "llmFix" | "patterns" | "yaml" | "reviews" | "files" | "payload"
+  >("localNew");
 
   const [configBundle, setConfigBundle] = useState<AnyRecord>({});
   const [thresholdEditor, setThresholdEditor] = useState({
@@ -279,12 +364,58 @@ export function LogPlatformConsole() {
     parameter_expected_seconds: "{}",
     llm_context: "{}",
   });
+  const [configTab, setConfigTab] = useState<"overview" | "thresholds" | "rules" | "knowledge">("overview");
 
   const [dashboardBundle, setDashboardBundle] = useState<AnyRecord>({
     dashboard: null,
     status: null,
     performance: null,
   });
+
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageSize, setHistoryPageSize] = useState(50);
+  const [historyBundle, setHistoryBundle] = useState<AnyRecord>({ items: [], total: 0, page: 1, page_size: 50 });
+
+  const [eventsPage, setEventsPage] = useState(1);
+  const [eventsPageSize, setEventsPageSize] = useState(100);
+
+  const [performanceStepPage, setPerformanceStepPage] = useState(1);
+  const [performanceStepPageSize, setPerformanceStepPageSize] = useState(100);
+
+  const [timelineShowErrors, setTimelineShowErrors] = useState(true);
+  const [timelineShowDetails, setTimelineShowDetails] = useState(false);
+  const [timelineSelectedFamilies, setTimelineSelectedFamilies] = useState<string[]>([]);
+  const [timelineSelectedSeverities, setTimelineSelectedSeverities] = useState<string[]>([]);
+
+  const [errorsPage, setErrorsPage] = useState(1);
+  const [errorsPageSize, setErrorsPageSize] = useState(100);
+  const [errorTab, setErrorTab] = useState<"top" | "family" | "guide">("top");
+
+  const [llmHistorySignatureFilter, setLlmHistorySignatureFilter] = useState("");
+  const [diagnoseTimeout, setDiagnoseTimeout] = useState("120");
+  const [manualReviewer, setManualReviewer] = useState("");
+  const [manualReviewNotes, setManualReviewNotes] = useState("");
+
+  const [editingRecordId, setEditingRecordId] = useState("");
+  const [editingRecordDraft, setEditingRecordDraft] = useState({
+    root_cause_analysis: "",
+    verified_solution: "",
+    workaround: "",
+    reusable: true,
+  });
+
+  const [filesPage, setFilesPage] = useState(1);
+  const [filesPageSize, setFilesPageSize] = useState(100);
+
+  const [parameterShowMetricTable, setParameterShowMetricTable] = useState(false);
+
+  const [thresholdRows, setThresholdRows] = useState<Array<{ key: string; value: string }>>([]);
+  const [expectedRows, setExpectedRows] = useState<Array<{ key: string; value: string }>>([]);
+  const [stepThresholdRows, setStepThresholdRows] = useState<Array<{ module: string; step: string; value: string }>>([]);
+  const [contextRows, setContextRows] = useState<Array<{ key: string; value: string }>>([]);
+
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [selectedUserRoles, setSelectedUserRoles] = useState({ is_reviewer: false, is_admin: false });
 
   const isAuthenticated = Boolean(token && user);
   const isReviewer = Boolean(user?.is_reviewer || user?.is_admin);
@@ -363,6 +494,13 @@ export function LogPlatformConsole() {
     }
   }
 
+  async function loadHistory() {
+    const result = await request<AnyRecord>("/tasks", {
+      query: { page: historyPage, page_size: historyPageSize },
+    });
+    setHistoryBundle(result);
+  }
+
   async function loadDashboard() {
     if (!selectedTaskUuid) {
       setDashboardBundle({ dashboard: null, status: null, performance: null });
@@ -388,8 +526,8 @@ export function LogPlatformConsole() {
         cycle_no: eventsFilter.cycleNo || undefined,
         chip_name: eventsFilter.chipName || undefined,
         search: eventsFilter.search || undefined,
-        limit: 200,
-        offset: 0,
+        limit: eventsPageSize,
+        offset: (eventsPage - 1) * eventsPageSize,
       },
     });
     setEventsResponse(result);
@@ -402,7 +540,12 @@ export function LogPlatformConsole() {
     }
     const [cycleSummary, steps, operationalMetrics] = await Promise.all([
       request<any[]>(`/tasks/${selectedTaskUuid}/cycle-summary`, { query: { unit: performanceUnit } }),
-      request<AnyRecord>(`/tasks/${selectedTaskUuid}/steps`, { query: { limit: 200, offset: 0 } }),
+      request<AnyRecord>(`/tasks/${selectedTaskUuid}/steps`, {
+        query: {
+          limit: performanceStepPageSize,
+          offset: (performanceStepPage - 1) * performanceStepPageSize,
+        },
+      }),
       request<AnyRecord>(`/tasks/${selectedTaskUuid}/operational-metrics`),
     ]);
     setPerformanceBundle({ cycleSummary: safeArray(cycleSummary), steps, operationalMetrics });
@@ -432,7 +575,7 @@ export function LogPlatformConsole() {
       return;
     }
     const result = await request<AnyRecord>(`/tasks/${selectedTaskUuid}/errors`, {
-      query: { limit: 200, offset: 0 },
+      query: { limit: errorsPageSize, offset: (errorsPage - 1) * errorsPageSize },
     });
     const items = safeArray(result.items);
     setErrorsResponse(result);
@@ -519,7 +662,9 @@ export function LogPlatformConsole() {
       setFilesBundle({ list: { items: [], total: 0 }, preview: null });
       return;
     }
-    const list = await request<AnyRecord>(`/tasks/${selectedTaskUuid}/files`, { query: { limit: 300, offset: 0 } });
+    const list = await request<AnyRecord>(`/tasks/${selectedTaskUuid}/files`, {
+      query: { limit: filesPageSize, offset: (filesPage - 1) * filesPageSize },
+    });
     const items = safeArray(list.items);
     const filePath = selectedFilePath || String(items[0]?.relative_path || "");
     setSelectedFilePath(filePath);
@@ -586,6 +731,10 @@ export function LogPlatformConsole() {
       parameter_expected_seconds: JSON.stringify(thresholds.parameter_expected_seconds ?? {}, null, 2),
       llm_context: JSON.stringify(thresholds.llm_context ?? {}, null, 2),
     });
+    setThresholdRows(rowsFromMapping(safeObject(thresholds.parameter_thresholds_seconds)));
+    setExpectedRows(rowsFromMapping(safeObject(thresholds.parameter_expected_seconds)));
+    setStepThresholdRows(rowsFromNestedMapping(safeObject(thresholds.step_thresholds_ms) as Record<string, Record<string, unknown>>));
+    setContextRows(rowsFromMapping(safeObject(thresholds.llm_context)));
   }
 
   async function loadUsers() {
@@ -594,7 +743,16 @@ export function LogPlatformConsole() {
       return;
     }
     const response = await request<AnyRecord>("/admin/users");
-    setUserList(safeArray(response.items));
+    const items = safeArray(response.items);
+    setUserList(items);
+    const selected = items.find((item) => String(item.id) === selectedUserId) || items[0];
+    if (selected) {
+      setSelectedUserId(String(selected.id));
+      setSelectedUserRoles({
+        is_reviewer: Boolean(selected.is_reviewer),
+        is_admin: Boolean(selected.is_admin),
+      });
+    }
   }
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -753,10 +911,22 @@ export function LogPlatformConsole() {
           method: "PUT",
           body: {
             default_threshold_ms: Number(thresholdEditor.default_threshold_ms || 0),
-            step_thresholds_ms: parseJsonText(thresholdEditor.step_thresholds_ms, "step_thresholds_ms"),
-            parameter_thresholds_seconds: parseJsonText(thresholdEditor.parameter_thresholds_seconds, "parameter_thresholds_seconds"),
-            parameter_expected_seconds: parseJsonText(thresholdEditor.parameter_expected_seconds, "parameter_expected_seconds"),
-            llm_context: parseJsonText(thresholdEditor.llm_context, "llm_context"),
+            step_thresholds_ms:
+              stepThresholdRows.length > 0
+                ? nestedMappingFromRows(stepThresholdRows)
+                : parseJsonText(thresholdEditor.step_thresholds_ms, "step_thresholds_ms"),
+            parameter_thresholds_seconds:
+              thresholdRows.length > 0
+                ? mappingFromRows(thresholdRows)
+                : parseJsonText(thresholdEditor.parameter_thresholds_seconds, "parameter_thresholds_seconds"),
+            parameter_expected_seconds:
+              expectedRows.length > 0
+                ? mappingFromRows(expectedRows)
+                : parseJsonText(thresholdEditor.parameter_expected_seconds, "parameter_expected_seconds"),
+            llm_context:
+              contextRows.length > 0
+                ? mappingFromRows(contextRows)
+                : parseJsonText(thresholdEditor.llm_context, "llm_context"),
           },
         }),
       );
@@ -790,6 +960,7 @@ export function LogPlatformConsole() {
           method: "POST",
           query: { force: llmForm.force },
           formData,
+          timeoutMs: Math.max(Number(diagnoseTimeout || 120), 30) * 1000,
         }),
       );
       setLlmBundle((current) => ({ ...current, latestDiagnosis: result }));
@@ -805,13 +976,27 @@ export function LogPlatformConsole() {
       return;
     }
     try {
+      let finalClusters = [...hubSelectedClusters];
+      if (hubForm.new_cluster.trim()) {
+        const clusterResponse = await request<AnyRecord>("/solution-repository/task-clusters", {
+          method: "POST",
+          body: {
+            display_name: hubForm.new_cluster.trim(),
+            description: hubForm.trigger_scenario || undefined,
+          },
+        });
+        const newClusterName = String(clusterResponse.item?.display_name || hubForm.new_cluster.trim());
+        finalClusters = finalClusters.includes(newClusterName)
+          ? finalClusters
+          : [...finalClusters, newClusterName];
+      }
       const payload = {
         module: hubForm.module,
         error_name: hubForm.error_name,
         message: hubForm.message,
-        message_keywords: hubForm.message_keywords.split(",").map((item) => item.trim()).filter(Boolean),
-        tags: hubForm.tags.split(",").map((item) => item.trim()).filter(Boolean),
-        task_clusters: hubSelectedClusters,
+        message_keywords: splitCommaText(hubForm.message_keywords),
+        tags: splitCommaText(hubForm.tags),
+        task_clusters: finalClusters,
         root_cause_analysis: hubForm.root_cause_analysis,
         verified_solution: hubForm.verified_solution,
         workaround: hubForm.workaround,
@@ -828,6 +1013,21 @@ export function LogPlatformConsole() {
           body: payload,
         }),
       );
+      setHubForm({
+        module: hubForm.module,
+        error_name: "",
+        message: "",
+        message_keywords: "",
+        tags: "",
+        root_cause_analysis: "",
+        verified_solution: "",
+        workaround: "",
+        trigger_scenario: "",
+        task_uuid: "",
+        normalized_signature: "",
+        new_cluster: "",
+      });
+      setHubSelectedClusters([]);
       setNotice({ tone: "success", text: isReviewer ? "方案已写入方案库。" : "方案已提交审核。" });
       await loadSolutionHub();
     } catch (error) {
@@ -853,6 +1053,299 @@ export function LogPlatformConsole() {
       );
       setNotice({ tone: "success", text: `未知日志簇已更新为 ${status}。` });
       await loadUnknown();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleResendCode() {
+    try {
+      await withBusy("正在重新发送验证码", () =>
+        platformRequest(apiBase, "/auth/register/resend-code", {
+          token: null,
+          method: "POST",
+          body: { login_name: registerUsername.trim() || registerEmail.trim() },
+        }),
+      );
+      setNotice({ tone: "success", text: "验证码已重新发送，请检查邮箱。" });
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleFindSimilarCases() {
+    if (!selectedTaskUuid || !selectedErrorSignature) {
+      setNotice({ tone: "error", text: "请先选择任务和错误簇。" });
+      return;
+    }
+    try {
+      const response = await withBusy("正在检索相似案例", () =>
+        request<AnyRecord>(`/tasks/${selectedTaskUuid}/errors/${selectedErrorSignature}/similar-cases`, {
+          query: {
+            module: llmForm.module || undefined,
+            trigger_scenario: llmForm.triggerScenario || undefined,
+          },
+        }),
+      );
+      setLlmBundle((current) => ({ ...current, similarCases: safeArray(response.items) }));
+      setNotice({ tone: "success", text: `已检索到 ${safeArray(response.items).length} 条相似案例。` });
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleSubmitDiagnosisReview() {
+    const selectedError =
+      safeArray(llmBundle.errors).find(
+        (item) => String(item.normalized_signature) === selectedErrorSignature,
+      ) || null;
+    const diagnosis = safeObject(llmBundle.latestDiagnosis);
+    if (!selectedTaskUuid || !selectedErrorSignature || !selectedError || !diagnosis) {
+      setNotice({ tone: "error", text: "请先完成一次综合诊断。" });
+      return;
+    }
+    try {
+      const payload = {
+        task_uuid: selectedTaskUuid,
+        submission_type: "solution_record",
+        error_name: reviewDraft.error_name || String(selectedError.display_signature || ""),
+        error_category: reviewDraft.error_category,
+        module: llmForm.module,
+        submodule: llmForm.submodule,
+        error_code: reviewDraft.error_code,
+        message: String(
+          selectedError.representative_message || selectedError.display_signature || "",
+        ),
+        normalized_signature: selectedErrorSignature,
+        exception_description: String(
+          selectedError.error_family_display || selectedError.error_family || "",
+        ),
+        trigger_scenario: llmForm.triggerScenario,
+        impact_scope: reviewDraft.impact_scope,
+        report_source: `task:${selectedTaskUuid}`,
+        related_logs: {
+          display_signature: selectedError.display_signature,
+          representative_message: selectedError.representative_message,
+          count: selectedError.count,
+        },
+        related_source_files: diagnosis.source_context_snippets || [],
+        root_cause_analysis:
+          reviewDraft.root_cause_analysis ||
+          safeObject(diagnosis.structured_result).root_cause_summary,
+        verified_solution: reviewDraft.verified_solution,
+        workaround: reviewDraft.workaround,
+        owner_department:
+          reviewDraft.owner_department ||
+          safeArray(safeObject(diagnosis.structured_result).owner_departments).join(","),
+        submitter: reviewDraft.submitter || String(user?.username || "next_frontend"),
+        source: "next_frontend_submit_review",
+        reusable: reviewDraft.reusable,
+        similar_case_refs: safeArray(diagnosis.similar_cases).map((row) => row.case_id),
+        metadata: {
+          analysis_depth: diagnosis.analysis_stage,
+          analysis_result: diagnosis.structured_result || {},
+          customer_symptom: llmForm.customerSymptom,
+          environment_info: llmForm.environmentInfo,
+          reproduction_steps: llmForm.reproductionSteps,
+          operation_path: llmForm.operationPath,
+        },
+        attachments: diagnosis.source_context_snippets || [],
+      };
+      const response = await withBusy("正在提交入库审核", () =>
+        request<AnyRecord>("/solution-reviews", {
+          method: "POST",
+          body: payload,
+        }),
+      );
+      setLlmBundle((current) => ({ ...current, latestReview: response.item || response }));
+      setNotice({ tone: "success", text: "诊断结果已提交审核。" });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleSaveRepositoryRecord() {
+    if (!editingRecordId) {
+      setNotice({ tone: "error", text: "请先选择一条方案记录。" });
+      return;
+    }
+    const record = safeArray(hubBundle.records?.items).find(
+      (item) => String(item.id) === editingRecordId,
+    );
+    if (!record) {
+      setNotice({ tone: "error", text: "未找到当前选中的方案记录。" });
+      return;
+    }
+    try {
+      await withBusy("正在保存方案记录", () =>
+        request(`/solution-repository/records/${editingRecordId}`, {
+          method: "PUT",
+          body: {
+            ...record,
+            ...editingRecordDraft,
+          },
+        }),
+      );
+      setNotice({ tone: "success", text: "方案记录已更新。" });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleManualSolutionReview(status: "approved" | "needs_revision" | "rejected") {
+    if (!selectedReviewId) {
+      setNotice({ tone: "error", text: "请先选择一条审核记录。" });
+      return;
+    }
+    try {
+      await withBusy("正在提交人工审核", () =>
+        request(`/solution-reviews/${selectedReviewId}/manual-review`, {
+          method: "POST",
+          body: {
+            review_status: status,
+            reviewer: manualReviewer || user?.username,
+            notes: hubReviewNotes || manualReviewNotes || undefined,
+          },
+        }),
+      );
+      setNotice({ tone: "success", text: `审核状态已更新为 ${status}。` });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleCreateTaskCluster() {
+    if (!newClusterDraft.name.trim()) {
+      setNotice({ tone: "error", text: "请填写任务簇名称。" });
+      return;
+    }
+    try {
+      const response = await withBusy("正在提交任务簇", () =>
+        request<AnyRecord>("/solution-repository/task-clusters", {
+          method: "POST",
+          body: {
+            display_name: newClusterDraft.name.trim(),
+            description: newClusterDraft.description.trim() || undefined,
+          },
+        }),
+      );
+      setNewClusterDraft({ name: "", description: "" });
+      const item = safeObject(response.item);
+      if (item.display_name) {
+        setHubSelectedClusters((current) =>
+          current.includes(String(item.display_name))
+            ? current
+            : [...current, String(item.display_name)],
+        );
+      }
+      setNotice({ tone: "success", text: "任务簇已提交。" });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleReviewTaskCluster(status: "approved" | "rejected" | "disabled") {
+    if (!selectedClusterId) {
+      setNotice({ tone: "error", text: "请先选择要审核的任务簇。" });
+      return;
+    }
+    try {
+      await withBusy("正在更新任务簇状态", () =>
+        request(`/solution-repository/task-clusters/${selectedClusterId}/review`, {
+          method: "POST",
+          body: { review_status: status },
+        }),
+      );
+      setNotice({ tone: "success", text: `任务簇已更新为 ${status}。` });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleSaveModuleConfig() {
+    if (!newModuleDraft.module_key.trim() || !newModuleDraft.display_name.trim()) {
+      setNotice({ tone: "error", text: "请至少填写 module_key 和 display_name。" });
+      return;
+    }
+    try {
+      await withBusy("正在保存模块配置", () =>
+        request("/solution-repository/modules", {
+          method: "POST",
+          body: {
+            ...newModuleDraft,
+            is_active: true,
+          },
+        }),
+      );
+      setNewModuleDraft({ module_key: "", display_name: "", prefix: "", description: "" });
+      setNotice({ tone: "success", text: "模块配置已保存。" });
+      await loadSolutionHub();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleRuleReview(status: string, suggestionId: string) {
+    if (!suggestionId) {
+      setNotice({ tone: "error", text: "请先选择一条规则建议。" });
+      return;
+    }
+    try {
+      await withBusy("正在提交规则建议审核", () =>
+        request(`/active-learning/rule-suggestions/${suggestionId}/review`, {
+          method: "POST",
+          body: {
+            review_status: status,
+            reviewer: ruleReviewer || user?.username,
+            notes: ruleReviewNotes || undefined,
+          },
+        }),
+      );
+      setNotice({ tone: "success", text: `规则建议已更新为 ${status}。` });
+      await loadRules(ruleLlmEnabled);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleUpdateUserStatus(action: "approve" | "reject" | "disable" | "enable") {
+    if (!selectedUserId) {
+      setNotice({ tone: "error", text: "请先选择用户。" });
+      return;
+    }
+    try {
+      await withBusy("正在更新用户状态", () =>
+        request(`/admin/users/${selectedUserId}/status`, {
+          method: "POST",
+          body: { action },
+        }),
+      );
+      setNotice({ tone: "success", text: `用户状态已更新为 ${action}。` });
+      await loadUsers();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function handleSaveUserRoles() {
+    if (!selectedUserId) {
+      setNotice({ tone: "error", text: "请先选择用户。" });
+      return;
+    }
+    try {
+      await withBusy("正在保存角色设置", () =>
+        request(`/admin/users/${selectedUserId}/roles`, {
+          method: "POST",
+          body: selectedUserRoles,
+        }),
+      );
+      setNotice({ tone: "success", text: "角色设置已保存。" });
+      await loadUsers();
     } catch (error) {
       showError(error);
     }
@@ -903,33 +1396,125 @@ export function LogPlatformConsole() {
   }, [apiBase, token, user]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      return;
-    }
-    const runners: Partial<Record<PageKey, () => Promise<void>>> = {
-      dashboard: loadDashboard,
-      upload: loadDashboard,
-      events: loadEvents,
-      performance: loadPerformance,
-      timeline: loadTimeline,
-      errors: loadErrors,
-      parameters: loadParameters,
-      llm: async () => {
-        await loadErrors();
-        await loadLlm();
-      },
-      solutionHub: loadSolutionHub,
-      files: loadFiles,
-      unknown: loadUnknown,
-      rules: async () => loadRules(false),
-      config: loadConfig,
-      users: loadUsers,
-    };
-    const runner = runners[page];
-    if (runner) {
-      void runner().catch(showError);
+    if (isAuthenticated && (page === "dashboard" || page === "upload")) {
+      void loadDashboard().catch(showError);
     }
   }, [isAuthenticated, page, selectedTaskUuid]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "history") {
+      void loadHistory().catch(showError);
+    }
+  }, [isAuthenticated, page, historyPage, historyPageSize]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "events") {
+      void loadEvents().catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid, eventsPage, eventsPageSize]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "performance") {
+      void loadPerformance().catch(showError);
+    }
+  }, [
+    isAuthenticated,
+    page,
+    selectedTaskUuid,
+    performanceUnit,
+    performanceStepPage,
+    performanceStepPageSize,
+  ]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "timeline") {
+      void loadTimeline().catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid, timelineCycleNo, timelineTrackOrder]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "errors") {
+      void loadErrors().catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid, errorsPage, errorsPageSize]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "parameters") {
+      void loadParameters().catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid, parameterUnit, selectedParameters]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "llm") {
+      void (async () => {
+        await loadErrors();
+        await loadLlm();
+        await loadSolutionHub();
+      })().catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid, errorsPage, errorsPageSize]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "solutionHub") {
+      void loadSolutionHub().catch(showError);
+    }
+  }, [isAuthenticated, page]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "files") {
+      void loadFiles().catch(showError);
+    }
+  }, [isAuthenticated, page, selectedTaskUuid, filesPage, filesPageSize]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "unknown") {
+      void loadUnknown().catch(showError);
+    }
+  }, [isAuthenticated, page]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "rules") {
+      void loadRules(false).catch(showError);
+    }
+  }, [isAuthenticated, page]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "config") {
+      void loadConfig().catch(showError);
+    }
+  }, [isAuthenticated, page]);
+
+  useEffect(() => {
+    if (isAuthenticated && page === "users" && isAdmin) {
+      void loadUsers().catch(showError);
+    }
+  }, [isAuthenticated, page, isAdmin]);
+
+  useEffect(() => {
+    const record = safeArray(hubBundle.records?.items).find(
+      (item) => String(item.id) === editingRecordId,
+    );
+    if (!record) {
+      return;
+    }
+    setEditingRecordDraft({
+      root_cause_analysis: String(record.root_cause_analysis || ""),
+      verified_solution: String(record.verified_solution || ""),
+      workaround: String(record.workaround || ""),
+      reusable: Boolean(record.reusable),
+    });
+  }, [editingRecordId, hubBundle.records]);
+
+  useEffect(() => {
+    const currentUserItem = userList.find((item) => String(item.id) === selectedUserId);
+    if (!currentUserItem) {
+      return;
+    }
+    setSelectedUserRoles({
+      is_reviewer: Boolean(currentUserItem.is_reviewer),
+      is_admin: Boolean(currentUserItem.is_admin),
+    });
+  }, [selectedUserId, userList]);
 
   const selectedTask = tasks.find((task) => String(task.task_uuid) === selectedTaskUuid) || null;
   const errorItems = safeArray(errorsResponse.items);
@@ -958,6 +1543,105 @@ export function LogPlatformConsole() {
   const localNewSuggestions = safeArray(localPreview.new_rule_suggestions);
   const llmMeta = safeObject((llmPreview || localPreview).llm_assisted);
   const llmNewSuggestions = safeArray(safeObject(llmMeta.result).new_rule_suggestions);
+  const localFixSuggestions = safeArray(localPreview.rule_fix_suggestions);
+  const llmResult = safeObject(llmMeta.result);
+  const llmFixSuggestions = safeArray(llmResult.rule_fix_suggestions);
+  const ruleReviews = safeArray(rulesBundle.reviews?.items);
+  const historyItems = safeArray(historyBundle.items);
+  const historyRows = safeArray(llmBundle.history);
+  const uniqueHistorySignatures = Array.from(
+    new Set(
+      historyRows
+        .map((row) => String(row.normalized_signature || ""))
+        .filter(Boolean),
+    ),
+  ).sort();
+  const filteredHistoryRows =
+    llmHistorySignatureFilter && llmHistorySignatureFilter !== "全部"
+      ? historyRows.filter(
+          (row) => String(row.normalized_signature || "") === llmHistorySignatureFilter,
+        )
+      : historyRows;
+  const selectedHistoryRow =
+    filteredHistoryRows[Number(selectedHistoryIndex || 0)] || filteredHistoryRows[0] || null;
+  const llmStrategyMap = safeObject(repoConfig?.analysis_depths);
+  const llmModuleTree = safeArray(repoConfig?.module_tree);
+  const llmModuleOptions = llmModuleTree
+    .map((row) => String(row.name || ""))
+    .filter(Boolean);
+  const activeStrategy = safeObject(llmStrategyMap[llmForm.analysisDepth]);
+  const dashboardData = safeObject(dashboardBundle.dashboard);
+  const statusData = safeObject(dashboardBundle.status);
+  const performanceSummaryData = safeObject(dashboardBundle.performance);
+  const cycleSummaryRows = safeArray(performanceBundle.cycleSummary);
+  const stepRows = safeArray(performanceBundle.steps?.items);
+  const photoSummaryRows = safeArray(safeObject(performanceBundle.operationalMetrics).photo_summary);
+  const timelineRows = safeArray(timelineBundle.rows);
+  const timelineErrors = safeArray(timelineBundle.errors);
+  const timelineFamilyOptions = Array.from(
+    new Set(
+      timelineErrors
+        .map((row) => String(row.error_family_display || row.error_family || ""))
+        .filter(Boolean),
+    ),
+  ).sort();
+  const timelineSeverityOptions = Array.from(
+    new Set(
+      timelineErrors
+        .map((row) => String(row.severity || "unknown"))
+        .filter(Boolean),
+    ),
+  ).sort();
+  const activeTimelineFamilies =
+    timelineSelectedFamilies.length > 0 ? timelineSelectedFamilies : timelineFamilyOptions;
+  const activeTimelineSeverities =
+    timelineSelectedSeverities.length > 0 ? timelineSelectedSeverities : timelineSeverityOptions;
+  const filteredTimelineErrors = timelineShowErrors
+    ? timelineErrors.filter((row) => {
+        const family = String(row.error_family_display || row.error_family || "");
+        const severity = String(row.severity || "unknown");
+        return activeTimelineFamilies.includes(family) && activeTimelineSeverities.includes(severity);
+      })
+    : [];
+  const errorFamilyRows = useMemo(() => {
+    const groups = new Map<string, { label: string; description: string; value: number }>();
+    errorItems.forEach((row) => {
+      const key = String(row.error_family || row.error_family_display || "unknown");
+      const current = groups.get(key) || {
+        label: String(row.error_family_display || row.error_family || "unknown"),
+        description: String(row.error_family_description || ""),
+        value: 0,
+      };
+      current.value += Number(row.count || 0);
+      groups.set(key, current);
+    });
+    return Array.from(groups.values()).sort((left, right) => right.value - left.value);
+  }, [errorItems]);
+  const selectedError =
+    errorItems.find((item) => String(item.normalized_signature) === selectedErrorSignature) || null;
+  const selectedHubReview =
+    safeArray(hubBundle.reviews?.items).find((item) => String(item.id) === selectedReviewId) || null;
+  const selectedHubCluster =
+    safeArray(hubBundle.taskClusters).find((item) => String(item.id) === selectedClusterId) || null;
+  const selectedRepositoryRecord =
+    safeArray(hubBundle.records?.items).find((item) => String(item.id) === editingRecordId) || null;
+  const selectedUserRecord = userList.find((item) => String(item.id) === selectedUserId) || null;
+  const llmLatestDiagnosis = safeObject(llmBundle.latestDiagnosis);
+  const llmLatestReview = safeObject(llmBundle.latestReview);
+
+  useEffect(() => {
+    if (!filteredHistoryRows.length) {
+      setSelectedHistoryIndex("0");
+      return;
+    }
+    const nextIndex = Math.min(
+      Math.max(Number(selectedHistoryIndex || 0), 0),
+      Math.max(filteredHistoryRows.length - 1, 0),
+    );
+    if (String(nextIndex) !== selectedHistoryIndex) {
+      setSelectedHistoryIndex(String(nextIndex));
+    }
+  }, [filteredHistoryRows.length, selectedHistoryIndex]);
 
   function toggleParameter(name: string) {
     setSelectedParameters((current) => (current.includes(name) ? current.filter((item) => item !== name) : [...current, name]));
@@ -995,6 +1679,1339 @@ export function LogPlatformConsole() {
     ...(isAdmin ? [{ key: "users" as const, label: "用户管理", icon: Users }] : []),
   ];
 
+  function renderWelcome() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="前后端分离版日志平台"
+          description="按 Streamlit 工作流重建上传、分析、诊断、主动学习与方案管理体验。"
+        />
+        <div className="grid gap-6 lg:grid-cols-3">
+          <MetricCard
+            label="接口健康"
+            value={String(health?.status || "unknown")}
+            helper="实时探测后端 /health 状态。"
+          />
+          <MetricCard
+            label="当前 API"
+            value={apiBase.replace(/^https?:\/\//, "")}
+            helper="可以在左侧随时切换后端地址。"
+          />
+          <MetricCard
+            label="前端模式"
+            value="Streamlit Mirror"
+            helper="保留 Streamlit 的使用路径，但交互与展示改为原生 Web。"
+          />
+        </div>
+        <InfoTileGrid
+          items={[
+            { label: "上传与任务队列", value: "已接入", note: "支持多文件与压缩包日志提交。" },
+            { label: "LLM 诊断", value: "已接入", note: "支持错误簇综合诊断、相似案例检索与审核提交。" },
+            { label: "主动学习", value: "已接入", note: "未知日志池、规则建议审核与 YAML 预览可直接使用。" },
+          ]}
+        />
+        <div className="flex flex-wrap gap-3">
+          <Button onClick={() => startTransition(() => setPage("login"))}>
+            <LogIn className="h-4 w-4" />
+            前往登录
+          </Button>
+          <Button variant="secondary" onClick={() => startTransition(() => setPage("register"))}>
+            申请注册
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderLogin() {
+    return (
+      <div className="mx-auto max-w-xl space-y-6">
+        <SectionTitle title="登录" description="登录后即可访问日志任务、方案库、LLM 诊断和主动学习工作台。" />
+        <Card>
+          <CardContent className="pt-6">
+            <form className="space-y-5" onSubmit={(event) => void handleLogin(event)}>
+              <Field label="用户名或邮箱">
+                <Input value={loginName} onChange={(event) => setLoginName(event.target.value)} />
+              </Field>
+              <Field label="密码">
+                <Input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                />
+              </Field>
+              <div className="flex flex-wrap gap-3">
+                <Button type="submit">登录</Button>
+                <Button type="button" variant="secondary" onClick={() => setPage("register")}>
+                  去注册
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  function renderRegister() {
+    return (
+      <div className="mx-auto max-w-3xl space-y-6">
+        <SectionTitle title="注册申请" description="保持与 Streamlit 相同的三段式流程：发送验证码、邮箱验证、提交审核。" />
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+            <Field label="用户名">
+              <Input value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} />
+            </Field>
+            <Field label="邮箱">
+              <Input value={registerEmail} onChange={(event) => setRegisterEmail(event.target.value)} />
+            </Field>
+            <Field label="密码">
+              <Input
+                type="password"
+                value={registerPassword}
+                onChange={(event) => setRegisterPassword(event.target.value)}
+              />
+            </Field>
+            <Field label="确认密码">
+              <Input
+                type="password"
+                value={registerPasswordConfirm}
+                onChange={(event) => setRegisterPasswordConfirm(event.target.value)}
+              />
+            </Field>
+            <div className="lg:col-span-2">
+              <Field label="注册备注">
+                <Textarea value={registerNote} onChange={(event) => setRegisterNote(event.target.value)} />
+              </Field>
+            </div>
+            <div className="lg:col-span-2">
+              <Field label={`验证码 / 当前状态: ${registerStep}`}>
+                <Input value={registerCode} onChange={(event) => setRegisterCode(event.target.value)} />
+              </Field>
+            </div>
+            <div className="lg:col-span-2 flex flex-wrap gap-3">
+              <Button onClick={() => void handleRequestCode()}>发送验证码</Button>
+              <Button variant="secondary" onClick={() => void handleVerifyCode()}>
+                验证邮箱
+              </Button>
+              <Button variant="secondary" onClick={() => void handleResendCode()}>
+                重发验证码
+              </Button>
+              <Button variant="secondary" onClick={() => void handleSubmitRegistration()}>
+                提交注册
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  function renderDashboardPage() {
+    return (
+      <div className="space-y-8">
+        <SectionTitle
+          title="首页 / 仪表盘"
+          description="优先回答当前任务是否异常、问题集中在哪里、是否值得继续深挖。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadDashboard()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新仪表盘
+            </Button>
+          }
+        />
+        <div className="grid gap-4 lg:grid-cols-4">
+          <MetricCard label="文件数" value={dashboardData.file_count || 0} helper="纳入本次分析的原始文件数量。" />
+          <MetricCard label="总事件数" value={dashboardData.total_events || 0} helper="统一归档后的事件总量。" />
+          <MetricCard label="总错误数" value={dashboardData.total_errors || 0} helper="任务中识别到的错误总数。" />
+          <MetricCard label="唯一错误簇" value={dashboardData.unique_error_count || 0} helper="按签名去重后的错误簇数量。" />
+        </div>
+        <InfoTileGrid
+          items={[
+            { label: "当前状态", value: statusData.status || "-", note: statusData.current_stage || "等待状态同步" },
+            { label: "任务进度", value: `${statusData.progress_percent || 0}%`, note: String(statusData.message || "暂无补充信息") },
+            {
+              label: "错误密度",
+              value: formatPercent(Number(dashboardData.total_errors || 0), Number(dashboardData.total_events || 0), 2),
+              note: "错误条目 / 总事件数",
+            },
+            {
+              label: "平均每文件事件",
+              value: dashboardData.file_count ? Math.round(Number(dashboardData.total_events || 0) / Number(dashboardData.file_count || 1)) : 0,
+              note: "总事件 / 文件数",
+            },
+          ]}
+          columns={4}
+        />
+        <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
+          <DistributionList title="高频错误簇 Top 8" items={topErrorDistribution} />
+          <DistributionList title="组件错误分布" items={componentDistribution} />
+        </div>
+        <JsonPreview title="任务状态快照" value={dashboardBundle} />
+        {safeObject(performanceSummaryData).stage_timings ? (
+          <JsonPreview
+            title="性能摘要"
+            description="保留 Streamlit 中折叠区的关键信息，便于查看后端阶段耗时。"
+            value={performanceSummaryData}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderHistoryPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="历史项目中心"
+          description="浏览已有任务记录，快速切换任务并回看分析结果。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadHistory()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新任务列表
+            </Button>
+          }
+        />
+        <PaginationBar
+          page={historyPage}
+          pageSize={historyPageSize}
+          total={Number(historyBundle.total || 0)}
+          onPageChange={setHistoryPage}
+          onPageSizeChange={(value) => {
+            setHistoryPage(1);
+            setHistoryPageSize(value);
+          }}
+        />
+        <DataTable
+          title={`任务列表 (${Number(historyBundle.total || 0)})`}
+          rows={historyItems}
+          selectedRowIndex={historyItems.findIndex((item) => String(item.task_uuid) === selectedTaskUuid)}
+          onRowClick={(row) => {
+            setSelectedTaskUuid(String(row.task_uuid || ""));
+            setPage("dashboard");
+          }}
+          maxHeight={520}
+        />
+      </div>
+    );
+  }
+
+  function renderUploadPage() {
+    return (
+      <div className="space-y-8">
+        <SectionTitle
+          title="文件上传"
+          description="支持多文件与压缩包日志上传，任务提交后进入后端队列分析。"
+          actions={
+            <Button onClick={() => void handleUploadLogs()}>
+              <Upload className="h-4 w-4" />
+              开始上传并分析
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+            <Field label="选择日志文件">
+              <Input type="file" multiple onChange={(event) => setUploadFiles(Array.from(event.target.files || []))} />
+            </Field>
+            <Field label="CPU 核心数">
+              <Input type="number" min="1" value={uploadCpuCores} onChange={(event) => setUploadCpuCores(event.target.value)} />
+            </Field>
+          </CardContent>
+        </Card>
+        <InfoTileGrid
+          columns={4}
+          items={[
+            { label: "状态", value: statusData.status || "-", note: "当前任务的处理状态。" },
+            { label: "进度", value: `${statusData.progress_percent || 0}%`, note: statusData.current_stage || "-" },
+            { label: "识别文件数", value: statusData.file_count || 0, note: "后端已登记的文件数量。" },
+            { label: "队列位置", value: statusData.queue_position || 0, note: "0 表示正在执行或无需排队。" },
+          ]}
+        />
+        <JsonPreview title="当前任务进度" value={statusData} />
+      </div>
+    );
+  }
+
+  function renderEventsPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="统一事件流"
+          description="按组件、级别、Cycle、芯片名和关键词检索统一归档后的事件流。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadEvents()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新事件流
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-5">
+            <Field label="组件">
+              <Input value={eventsFilter.component} onChange={(event) => setEventsFilter((current) => ({ ...current, component: event.target.value }))} />
+            </Field>
+            <Field label="级别">
+              <Select value={eventsFilter.level} onChange={(event) => setEventsFilter((current) => ({ ...current, level: event.target.value }))}>
+                <option value="">全部</option>
+                <option value="INFO">INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+                <option value="FATAL">FATAL</option>
+              </Select>
+            </Field>
+            <Field label="Cycle">
+              <Input value={eventsFilter.cycleNo} onChange={(event) => setEventsFilter((current) => ({ ...current, cycleNo: event.target.value }))} />
+            </Field>
+            <Field label="芯片名">
+              <Input value={eventsFilter.chipName} onChange={(event) => setEventsFilter((current) => ({ ...current, chipName: event.target.value }))} />
+            </Field>
+            <Field label="关键词">
+              <Input value={eventsFilter.search} onChange={(event) => setEventsFilter((current) => ({ ...current, search: event.target.value }))} />
+            </Field>
+          </CardContent>
+        </Card>
+        <PaginationBar
+          page={eventsPage}
+          pageSize={eventsPageSize}
+          total={Number(eventsResponse.total || 0)}
+          onPageChange={setEventsPage}
+          onPageSizeChange={(value) => {
+            setEventsPage(1);
+            setEventsPageSize(value);
+          }}
+        />
+        <DataTable title="统一事件流" rows={safeArray(eventsResponse.items)} maxHeight={560} />
+      </div>
+    );
+  }
+
+  function renderPerformancePage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="耗时分析"
+          description="查看 Cycle 总耗时趋势、Sub-step 表现和操作指标摘要。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadPerformance()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新耗时分析
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="pt-6">
+            <Field label="Cycle 总耗时单位">
+              <Select value={performanceUnit} onChange={(event) => setPerformanceUnit(event.target.value)}>
+                {durationUnits.map((unit) => (
+                  <option key={unit.value} value={unit.value}>
+                    {unit.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </CardContent>
+        </Card>
+        <SimpleLineChart
+          title={`Cycle 总耗时趋势 (${performanceUnit})`}
+          rows={cycleSummaryRows}
+          xKey="cycle_no"
+          yKey="total_duration_value"
+          seriesKey="chip_name"
+        />
+        <PaginationBar
+          page={performanceStepPage}
+          pageSize={performanceStepPageSize}
+          total={Number(performanceBundle.steps?.total || 0)}
+          onPageChange={setPerformanceStepPage}
+          onPageSizeChange={(value) => {
+            setPerformanceStepPage(1);
+            setPerformanceStepPageSize(value);
+          }}
+        />
+        <DataTable title="Sub-step 耗时表" rows={stepRows} maxHeight={520} />
+        <DataTable title="拍照时间摘要" rows={photoSummaryRows} maxHeight={320} />
+        <JsonPreview title="操作指标快照" value={performanceBundle.operationalMetrics} />
+      </div>
+    );
+  }
+
+  function renderTimelinePage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="事件流时间轴"
+          description="从时间维度观察各组件动作顺序和错误点，并支持按错误家族与严重级别筛选。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadTimeline()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新时间轴
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+            <Field label="选择 Cycle">
+              <Select value={timelineCycleNo} onChange={(event) => setTimelineCycleNo(event.target.value)}>
+                <option value="">全程</option>
+                {safeArray(timelineBundle.cycles).map((value) => (
+                  <option key={String(value)} value={String(value)}>
+                    {String(value)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="纵轴顺序">
+              <Select value={timelineTrackOrder} onChange={(event) => setTimelineTrackOrder(event.target.value)}>
+                <option value="default">默认顺序</option>
+                <option value="cycle">按 cycle 排序</option>
+              </Select>
+            </Field>
+            <div className="lg:col-span-2 flex flex-wrap gap-6">
+              <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                <input type="checkbox" checked={timelineShowErrors} onChange={(event) => setTimelineShowErrors(event.target.checked)} />
+                标记错误发生时间点
+              </label>
+              <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                <input type="checkbox" checked={timelineShowDetails} onChange={(event) => setTimelineShowDetails(event.target.checked)} />
+                显示时间轴表格明细
+              </label>
+            </div>
+            {timelineShowErrors ? (
+              <>
+                <div className="lg:col-span-2">
+                  <Field label="显示哪些错误家族">
+                    <ChipToggleGroup options={timelineFamilyOptions} selected={activeTimelineFamilies} onToggle={(value) => setTimelineSelectedFamilies((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])} />
+                  </Field>
+                </div>
+                <div className="lg:col-span-2">
+                  <Field label="显示哪些严重级别">
+                    <ChipToggleGroup options={timelineSeverityOptions} selected={activeTimelineSeverities} onToggle={(value) => setTimelineSelectedSeverities((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])} />
+                  </Field>
+                </div>
+              </>
+            ) : null}
+          </CardContent>
+        </Card>
+        <TimelineChart
+          title="按 Cycle / 全程查看各组件运动时间轴"
+          rows={timelineRows}
+          errors={filteredTimelineErrors}
+        />
+        {timelineShowDetails ? (
+          <DataTable
+            title="时间轴表格明细"
+            rows={timelineRows.map((row) => ({
+              track: row.track,
+              cycle_no: row.cycle_no,
+              component: row.component,
+              sub_step: row.sub_step,
+              start_time_sec: row.start_time_sec,
+              end_time_sec: row.end_time_sec,
+              duration_ms: row.duration_ms,
+              message: row.message,
+            }))}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderErrorsPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="错误分析"
+          description="保留 Streamlit 的错误簇表、Top N 分布、错误家族分布和家族说明。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadErrors()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新错误分析
+            </Button>
+          }
+        />
+        <PaginationBar
+          page={errorsPage}
+          pageSize={errorsPageSize}
+          total={Number(errorsResponse.total || 0)}
+          onPageChange={setErrorsPage}
+          onPageSizeChange={(value) => {
+            setErrorsPage(1);
+            setErrorsPageSize(value);
+          }}
+        />
+        <DataTable title="错误簇" rows={errorItems} maxHeight={420} />
+        <TabBar
+          tabs={[
+            { key: "top", label: "错误簇 Top N" },
+            { key: "family", label: "错误家族分布" },
+            { key: "guide", label: "家族说明" },
+          ]}
+          active={errorTab}
+          onChange={setErrorTab}
+        />
+        {errorTab === "top" ? (
+          <DistributionList title="高频错误簇 Top 8" items={topErrorDistribution} />
+        ) : errorTab === "family" ? (
+          <DistributionList
+            title="错误家族分布"
+            items={errorFamilyRows.map((row) => ({
+              label: row.label,
+              value: row.value,
+              note: row.description,
+            }))}
+          />
+        ) : (
+          <DataTable
+            title="家族说明"
+            rows={errorFamilyRows.map((row) => ({
+              家族名称: row.label,
+              错误次数: row.value,
+              说明: row.description,
+            }))}
+          />
+        )}
+      </div>
+    );
+  }
+
+  function renderParametersPage() {
+    const parameterDefinitions = safeArray(parameterBundle.definitions).map((item) =>
+      String(item.parameter_name),
+    );
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="参数趋势分析"
+          description="按参数与单位查看趋势曲线、Sub-step 聚合以及 Row Scan Metrics。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadParameters()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新参数趋势
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <Field label="选择参数">
+              <ChipToggleGroup options={parameterDefinitions} selected={selectedParameters} onToggle={toggleParameter} />
+            </Field>
+            <Field label="趋势图单位">
+              <Select value={parameterUnit} onChange={(event) => setParameterUnit(event.target.value)}>
+                {durationUnits.map((unit) => (
+                  <option key={unit.value} value={unit.value}>
+                    {unit.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </CardContent>
+        </Card>
+        {selectedParameters.map((name) => {
+          const rows = safeArray(safeObject(parameterBundle.parameterSeries)[name]);
+          const firstRow = rows[0] || {};
+          const thresholds = [];
+          if (firstRow.threshold_value !== undefined && firstRow.threshold_value !== null) {
+            thresholds.push({ label: "阈值", value: Number(firstRow.threshold_value), color: "#D94841", dash: "6 6" });
+          }
+          if (firstRow.expected_value !== undefined && firstRow.expected_value !== null) {
+            thresholds.push({ label: "期望值", value: Number(firstRow.expected_value), color: "#1E8E6A", dash: "4 6" });
+          }
+          return (
+            <SimpleLineChart
+              key={name}
+              title={`${name} 趋势`}
+              rows={rows}
+              xKey={name.startsWith("temperature_") ? "start_time" : "cycle"}
+              yKey="duration_value"
+              thresholdLines={thresholds}
+            />
+          );
+        })}
+        <SimpleLineChart title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="cycle" yKey="duration_value" seriesKey="sub_step" />
+        <SimpleLineChart title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="cycle" yKey="duration_value" seriesKey="metric_stage" />
+        <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+          <input type="checkbox" checked={parameterShowMetricTable} onChange={(event) => setParameterShowMetricTable(event.target.checked)} />
+          显示 metrics 表格明细
+        </label>
+        {parameterShowMetricTable ? <DataTable title="Row Scan Metrics 明细" rows={safeArray(parameterBundle.rowScanMetrics)} /> : null}
+      </div>
+    );
+  }
+
+  function renderLlmPage() {
+    const historyTokenSummary = safeObject(selectedHistoryRow?.token_summary);
+
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="LLM 诊断"
+          description="结合日志、上下文、源码片段、历史案例和分析深度策略执行综合诊断。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadLlm()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新诊断数据
+            </Button>
+          }
+        />
+        <details className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4">
+          <summary className="cursor-pointer text-sm font-medium text-[var(--foreground)]">
+            当前策略与开关
+          </summary>
+          <div className="mt-4 space-y-4">
+            <InfoTileGrid
+              columns={4}
+              items={[
+                { label: "LLM 启用", value: safeObject(llmBundle.config).llm?.enabled, note: "总开关" },
+                { label: "模型", value: safeObject(llmBundle.config).llm?.model || "-", note: "当前诊断模型" },
+                { label: "诊断超时(秒)", value: safeObject(llmBundle.config).llm?.timeout_seconds || "-", note: "后端配置" },
+                { label: "可用深度档位", value: Object.keys(llmStrategyMap).length, note: "analysis_depths" },
+              ]}
+            />
+            <JsonPreview value={{ llm: safeObject(llmBundle.config).llm, solution_repository: repoConfig }} />
+          </div>
+        </details>
+        <TabBar
+          tabs={[
+            { key: "history", label: "历史诊断" },
+            { key: "diagnose", label: "综合诊断" },
+            { key: "solutionEntry", label: "已有方案录入" },
+            { key: "repo", label: "解决方案库" },
+            { key: "review", label: "审核中心" },
+          ]}
+          active={llmTab}
+          onChange={setLlmTab}
+        />
+        {llmTab === "history" ? (
+          <div className="space-y-4">
+            <DataTable title="历史诊断列表" rows={historyRows} maxHeight={320} />
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="按错误签名过滤">
+                <Select value={llmHistorySignatureFilter} onChange={(event) => setLlmHistorySignatureFilter(event.target.value)}>
+                  <option value="">全部</option>
+                  {uniqueHistorySignatures.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="选择历史结果">
+                <Select value={selectedHistoryIndex} onChange={(event) => setSelectedHistoryIndex(event.target.value)}>
+                  {filteredHistoryRows.map((row, index) => (
+                    <option key={`${row.normalized_signature}-${index}`} value={String(index)}>
+                      {`${index + 1}. ${row.normalized_signature || ""} | ${row.analysis_stage || "-"} | ${row.created_at || "-"}`}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+            {selectedHistoryRow ? (
+              <>
+                {selectedHistoryRow.chinese_summary ? (
+                  <Card>
+                    <CardContent className="pt-6">
+                      <p className="text-sm leading-7 text-[var(--foreground)]">
+                        {String(selectedHistoryRow.chinese_summary)}
+                      </p>
+                    </CardContent>
+                  </Card>
+                ) : null}
+                <InfoTileGrid
+                  columns={4}
+                  items={[
+                    { label: "分析深度", value: selectedHistoryRow.analysis_stage || "-" },
+                    { label: "Prompt 版本", value: selectedHistoryRow.prompt_version || "-" },
+                    { label: "LLM 状态", value: selectedHistoryRow.llm_status || "-" },
+                    { label: "总 Token", value: historyTokenSummary.final_total_tokens || "-", note: "来自 token_summary" },
+                  ]}
+                />
+                <TabBar
+                  tabs={[
+                    { key: "structured", label: "结构化结果" },
+                    { key: "context", label: "上下文摘要" },
+                    { key: "source", label: "源码片段" },
+                    { key: "cases", label: "相似案例" },
+                    { key: "full", label: "完整片段" },
+                  ]}
+                  active={historyDetailTab}
+                  onChange={setHistoryDetailTab}
+                />
+                {historyDetailTab === "structured" ? (
+                  <JsonPreview
+                    value={
+                      safeObject(selectedHistoryRow.response_payload).structured_result ||
+                      selectedHistoryRow.response_payload ||
+                      {}
+                    }
+                  />
+                ) : null}
+                {historyDetailTab === "context" ? <JsonPreview value={selectedHistoryRow.context_summary || {}} /> : null}
+                {historyDetailTab === "source" ? <JsonPreview value={selectedHistoryRow.source_context_snippets || []} /> : null}
+                {historyDetailTab === "cases" ? <JsonPreview value={selectedHistoryRow.similar_cases || []} /> : null}
+                {historyDetailTab === "full" ? <JsonPreview value={selectedHistoryRow} /> : null}
+              </>
+            ) : (
+              <p className="text-sm text-[var(--muted-foreground)]">当前没有可查看的历史诊断记录。</p>
+            )}
+          </div>
+        ) : llmTab === "diagnose" ? (
+          <div className="space-y-6">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="选择错误簇">
+                <Select value={selectedErrorSignature} onChange={(event) => setSelectedErrorSignature(event.target.value)}>
+                  <option value="">请选择错误簇</option>
+                  {errorItems.map((row) => (
+                    <option key={String(row.normalized_signature)} value={String(row.normalized_signature)}>
+                      {`${shortText(row.display_signature || row.normalized_signature, 72)} | count=${row.count || 0}`}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="分析深度">
+                <Select value={llmForm.analysisDepth} onChange={(event) => setLlmForm((current) => ({ ...current, analysisDepth: event.target.value }))}>
+                  {Object.keys(llmStrategyMap).length ? Object.keys(llmStrategyMap).map((depth) => (
+                    <option key={depth} value={depth}>
+                      {depth}
+                    </option>
+                  )) : (
+                    <>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                    </>
+                  )}
+                </Select>
+              </Field>
+            </div>
+            {selectedError ? (
+              <InfoTileGrid
+                columns={4}
+                items={[
+                  { label: "错误签名", value: shortText(selectedError.display_signature || selectedError.normalized_signature, 48), note: "当前选中的错误簇" },
+                  { label: "错误次数", value: selectedError.count || 0 },
+                  { label: "错误家族", value: selectedError.error_family_display || selectedError.error_family || "-" },
+                  { label: "代表消息", value: shortText(selectedError.representative_message || "", 48) },
+                ]}
+              />
+            ) : null}
+            <InfoTileGrid
+              columns={4}
+              items={[
+                { label: "上下文预算", value: activeStrategy.token_budget || "-", note: activeStrategy.description || "" },
+                { label: "历史案例数", value: activeStrategy.history_case_limit || "-" },
+                { label: "源码片段数", value: activeStrategy.max_source_snippets || "-" },
+                { label: "推理粒度", value: activeStrategy.reasoning_granularity || "-" },
+              ]}
+            />
+            <Card>
+              <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+                <Field label="所属模块">
+                  <Select value={llmForm.module} onChange={(event) => setLlmForm((current) => ({ ...current, module: event.target.value }))}>
+                    <option value="">请选择模块</option>
+                    {llmModuleOptions.map((value) => (
+                      <option key={value} value={value}>
+                        {value}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="子模块">
+                  <Input value={llmForm.submodule} onChange={(event) => setLlmForm((current) => ({ ...current, submodule: event.target.value }))} />
+                </Field>
+                <div className="lg:col-span-2">
+                  <Field label="触发场景">
+                    <Textarea value={llmForm.triggerScenario} onChange={(event) => setLlmForm((current) => ({ ...current, triggerScenario: event.target.value }))} />
+                  </Field>
+                </div>
+                <Field label="操作路径 / 前置动作">
+                  <Textarea value={llmForm.operationPath} onChange={(event) => setLlmForm((current) => ({ ...current, operationPath: event.target.value }))} />
+                </Field>
+                <Field label="客户现象描述">
+                  <Textarea value={llmForm.customerSymptom} onChange={(event) => setLlmForm((current) => ({ ...current, customerSymptom: event.target.value }))} />
+                </Field>
+                <Field label="环境信息">
+                  <Textarea value={llmForm.environmentInfo} onChange={(event) => setLlmForm((current) => ({ ...current, environmentInfo: event.target.value }))} />
+                </Field>
+                <Field label="复现步骤">
+                  <Textarea value={llmForm.reproductionSteps} onChange={(event) => setLlmForm((current) => ({ ...current, reproductionSteps: event.target.value }))} />
+                </Field>
+                <div className="lg:col-span-2">
+                  <Field label="源码补充说明">
+                    <Textarea value={llmForm.sourceNotes} onChange={(event) => setLlmForm((current) => ({ ...current, sourceNotes: event.target.value }))} />
+                  </Field>
+                </div>
+                <Field label="上传相关源码">
+                  <Input type="file" multiple onChange={(event) => setLlmSourceFiles(Array.from(event.target.files || []))} />
+                </Field>
+                <Field label="前端等待超时(秒)">
+                  <Input value={diagnoseTimeout} onChange={(event) => setDiagnoseTimeout(event.target.value)} />
+                </Field>
+                <div className="lg:col-span-2 flex flex-wrap gap-4">
+                  <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                    <input
+                      type="checkbox"
+                      checked={llmForm.force}
+                      onChange={(event) => setLlmForm((current) => ({ ...current, force: event.target.checked }))}
+                    />
+                    忽略缓存，重新调用 LLM
+                  </label>
+                </div>
+              </CardContent>
+            </Card>
+            <div className="flex flex-wrap gap-3">
+              <Button variant="secondary" onClick={() => void handleFindSimilarCases()}>
+                <Search className="h-4 w-4" />
+                检索相似案例
+              </Button>
+              <Button onClick={() => void handleRunDiagnosis()}>
+                <Send className="h-4 w-4" />
+                开始综合诊断
+              </Button>
+            </div>
+            {safeArray(llmBundle.similarCases).length ? <DataTable title="相似案例推荐" rows={safeArray(llmBundle.similarCases)} maxHeight={260} /> : null}
+            {Object.keys(llmLatestDiagnosis).length ? (
+              <>
+                <InfoTileGrid columns={4} items={[{ label: "分析深度", value: llmLatestDiagnosis.analysis_stage || "-" }, { label: "缓存命中", value: llmLatestDiagnosis.from_cache ? "是" : "否" }, { label: "LLM 状态", value: llmLatestDiagnosis.llm_status || "-" }, { label: "总 Token", value: safeObject(llmLatestDiagnosis.token_summary).final_total_tokens || "-" }]} />
+                <TabBar tabs={[{ key: "structured", label: "结构化结果" }, { key: "context", label: "日志与证据摘要" }, { key: "source", label: "源码片段" }, { key: "cases", label: "相似案例" }, { key: "payload", label: "请求 / 响应" }]} active={diagnosisResultTab} onChange={setDiagnosisResultTab} />
+                {diagnosisResultTab === "structured" ? <JsonPreview title="结构化结果" value={llmLatestDiagnosis.structured_result || {}} /> : null}
+                {diagnosisResultTab === "context" ? <JsonPreview title="日志与证据摘要" value={llmLatestDiagnosis.context_summary || {}} /> : null}
+                {diagnosisResultTab === "source" ? <JsonPreview title="源码片段" value={llmLatestDiagnosis.source_context_snippets || []} /> : null}
+                {diagnosisResultTab === "cases" ? <JsonPreview title="相似案例" value={llmLatestDiagnosis.similar_cases || []} /> : null}
+                {diagnosisResultTab === "payload" ? <JsonPreview title="请求 / 响应" value={{ request_payload: llmLatestDiagnosis.request_payload || {}, response_payload: llmLatestDiagnosis.response_payload || {} }} /> : null}
+              </>
+            ) : null}
+            {Object.keys(llmLatestDiagnosis).length ? <Button onClick={() => void handleSubmitDiagnosisReview()}>提交入库审核</Button> : null}
+            {Object.keys(llmLatestReview).length ? <JsonPreview title="最新审核提交结果" value={llmLatestReview} /> : null}
+          </div>
+        ) : llmTab === "solutionEntry" ? (
+          <Card>
+            <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
+              <Field label="错误名"><Input value={reviewDraft.error_name} onChange={(event) => setReviewDraft((current) => ({ ...current, error_name: event.target.value }))} /></Field>
+              <Field label="错误类别"><Input value={reviewDraft.error_category} onChange={(event) => setReviewDraft((current) => ({ ...current, error_category: event.target.value }))} /></Field>
+              <Field label="错误码"><Input value={reviewDraft.error_code} onChange={(event) => setReviewDraft((current) => ({ ...current, error_code: event.target.value }))} /></Field>
+              <div className="lg:col-span-2"><Field label="影响范围"><Textarea value={reviewDraft.impact_scope} onChange={(event) => setReviewDraft((current) => ({ ...current, impact_scope: event.target.value }))} /></Field></div>
+              <Field label="责任部门"><Input value={reviewDraft.owner_department} onChange={(event) => setReviewDraft((current) => ({ ...current, owner_department: event.target.value }))} /></Field>
+              <div className="lg:col-span-2"><Field label="根因分析"><Textarea value={reviewDraft.root_cause_analysis} onChange={(event) => setReviewDraft((current) => ({ ...current, root_cause_analysis: event.target.value }))} /></Field></div>
+              <div className="lg:col-span-2"><Field label="已验证解决方案"><Textarea value={reviewDraft.verified_solution} onChange={(event) => setReviewDraft((current) => ({ ...current, verified_solution: event.target.value }))} /></Field></div>
+              <div className="lg:col-span-2"><Field label="临时绕过方案"><Textarea value={reviewDraft.workaround} onChange={(event) => setReviewDraft((current) => ({ ...current, workaround: event.target.value }))} /></Field></div>
+              <Field label="提交人 / 来源"><Input value={reviewDraft.submitter} onChange={(event) => setReviewDraft((current) => ({ ...current, submitter: event.target.value }))} /></Field>
+              <label className="flex items-center gap-2 pt-8 text-sm text-[var(--foreground)]">
+                <input type="checkbox" checked={reviewDraft.reusable} onChange={(event) => setReviewDraft((current) => ({ ...current, reusable: event.target.checked }))} />
+                是否可复用
+              </label>
+            </CardContent>
+          </Card>
+        ) : llmTab === "repo" ? (
+          <div className="space-y-4">
+            <DataTable title="解决方案库记录" rows={safeArray(hubBundle.records?.items)} maxHeight={320} />
+            <Field label="选择记录">
+              <Select value={editingRecordId} onChange={(event) => setEditingRecordId(event.target.value)}>
+                <option value="">请选择</option>
+                {safeArray(hubBundle.records?.items).map((item) => (
+                  <option key={String(item.id)} value={String(item.id)}>
+                    {`${item.id} | ${item.error_name || ""} | ${item.module || ""}`}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="编辑根因分析"><Textarea value={editingRecordDraft.root_cause_analysis} onChange={(event) => setEditingRecordDraft((current) => ({ ...current, root_cause_analysis: event.target.value }))} /></Field>
+              <Field label="编辑已验证解决方案"><Textarea value={editingRecordDraft.verified_solution} onChange={(event) => setEditingRecordDraft((current) => ({ ...current, verified_solution: event.target.value }))} /></Field>
+              <div className="lg:col-span-2"><Field label="编辑临时绕过方案"><Textarea value={editingRecordDraft.workaround} onChange={(event) => setEditingRecordDraft((current) => ({ ...current, workaround: event.target.value }))} /></Field></div>
+            </div>
+            {selectedRepositoryRecord ? <JsonPreview value={selectedRepositoryRecord} /> : null}
+            <Button onClick={() => void handleSaveRepositoryRecord()}>保存当前记录编辑</Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <DataTable title="审核列表" rows={safeArray(hubBundle.reviews?.items)} maxHeight={300} />
+            <Field label="选择审核记录">
+              <Select value={selectedReviewId} onChange={(event) => setSelectedReviewId(event.target.value)}>
+                <option value="">请选择</option>
+                {safeArray(hubBundle.reviews?.items).map((item) => (
+                  <option key={String(item.id)} value={String(item.id)}>
+                    {`${item.id} | ${item.review_status || ""} | ${item.module || ""} | ${item.normalized_signature || ""}`}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {selectedHubReview ? <JsonPreview value={selectedHubReview} /> : null}
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="人工复核人"><Input value={manualReviewer} onChange={(event) => setManualReviewer(event.target.value)} /></Field>
+              <Field label="审核意见"><Textarea value={manualReviewNotes} onChange={(event) => setManualReviewNotes(event.target.value)} /></Field>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Button onClick={() => void handleManualSolutionReview("approved")}>人工通过</Button>
+              <Button variant="secondary" onClick={() => void handleManualSolutionReview("needs_revision")}>退回修改</Button>
+              <Button variant="danger" onClick={() => void handleManualSolutionReview("rejected")}>拒绝入库</Button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderSolutionHubPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="方案库中心"
+          description="围绕全局可复用方案、检索索引、任务簇管理和审核流的统一入口。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadSolutionHub()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新方案中心
+            </Button>
+          }
+        />
+        <TabBar
+          tabs={[
+            { key: "submit", label: "方案提交" },
+            { key: "query", label: "方案检索" },
+            { key: "review", label: "方案审核" },
+            { key: "taxonomy", label: "任务簇与模块" },
+          ]}
+          active={solutionTab}
+          onChange={setSolutionTab}
+        />
+        {solutionTab === "submit" ? (
+          <div className="space-y-4">
+            <Card>
+              <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+                <Field label="模块前缀">
+                  <Select value={hubForm.module} onChange={(event) => setHubForm((current) => ({ ...current, module: event.target.value }))}>
+                    <option value="">请选择模块</option>
+                    {modules.map((module) => (
+                      <option key={String(module.id)} value={String(module.module_key)}>
+                        {`${module.display_name} | ${module.prefix}`}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="错误名"><Input value={hubForm.error_name} onChange={(event) => setHubForm((current) => ({ ...current, error_name: event.target.value }))} /></Field>
+                <div className="lg:col-span-2"><Field label="任务簇"><ChipToggleGroup options={taskClusters.map((item) => String(item.display_name || item.cluster_key))} selected={hubSelectedClusters} onToggle={toggleTaskCluster} /></Field></div>
+                <Field label="新增任务簇候选"><Input value={hubForm.new_cluster} onChange={(event) => setHubForm((current) => ({ ...current, new_cluster: event.target.value }))} /></Field>
+                <Field label="关联 task_uuid"><Input value={hubForm.task_uuid} onChange={(event) => setHubForm((current) => ({ ...current, task_uuid: event.target.value }))} /></Field>
+                <div className="lg:col-span-2"><Field label="message 关键词 / 现象描述"><Textarea value={hubForm.message} onChange={(event) => setHubForm((current) => ({ ...current, message: event.target.value }))} /></Field></div>
+                <Field label="message 关键词"><Input value={hubForm.message_keywords} onChange={(event) => setHubForm((current) => ({ ...current, message_keywords: event.target.value }))} /></Field>
+                <Field label="标签"><Input value={hubForm.tags} onChange={(event) => setHubForm((current) => ({ ...current, tags: event.target.value }))} /></Field>
+                <div className="lg:col-span-2"><Field label="根因分析"><Textarea value={hubForm.root_cause_analysis} onChange={(event) => setHubForm((current) => ({ ...current, root_cause_analysis: event.target.value }))} /></Field></div>
+                <div className="lg:col-span-2"><Field label="已验证解决方案"><Textarea value={hubForm.verified_solution} onChange={(event) => setHubForm((current) => ({ ...current, verified_solution: event.target.value }))} /></Field></div>
+                <div className="lg:col-span-2"><Field label="临时绕过方案"><Textarea value={hubForm.workaround} onChange={(event) => setHubForm((current) => ({ ...current, workaround: event.target.value }))} /></Field></div>
+                <div className="lg:col-span-2"><Field label="触发场景 / 问题簇"><Textarea value={hubForm.trigger_scenario} onChange={(event) => setHubForm((current) => ({ ...current, trigger_scenario: event.target.value }))} /></Field></div>
+                <Field label="关联 normalized_signature"><Input value={hubForm.normalized_signature} onChange={(event) => setHubForm((current) => ({ ...current, normalized_signature: event.target.value }))} /></Field>
+              </CardContent>
+            </Card>
+            <Button onClick={() => void handleSubmitSolutionHub()}>提交方案</Button>
+          </div>
+        ) : solutionTab === "query" ? (
+          <div className="space-y-4">
+            <Card>
+              <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
+                <Field label="全文检索"><Input value={hubQuery.search} onChange={(event) => setHubQuery((current) => ({ ...current, search: event.target.value }))} /></Field>
+                <Field label="模块过滤"><Select value={hubQuery.module} onChange={(event) => setHubQuery((current) => ({ ...current, module: event.target.value }))}><option value="">全部</option>{modules.map((item) => <option key={String(item.id)} value={String(item.module_key)}>{String(item.module_key)}</option>)}</Select></Field>
+                <Field label="审核状态"><Select value={hubQuery.review_status} onChange={(event) => setHubQuery((current) => ({ ...current, review_status: event.target.value }))}><option value="">全部</option><option value="approved">approved</option><option value="pending_review">pending_review</option><option value="needs_revision">needs_revision</option><option value="rejected">rejected</option></Select></Field>
+              </CardContent>
+            </Card>
+            <DataTable title="方案记录" rows={safeArray(hubBundle.records?.items)} maxHeight={360} />
+          </div>
+        ) : solutionTab === "review" ? (
+          <div className="space-y-4">
+            <DataTable title="审核中心" rows={safeArray(hubBundle.reviews?.items)} maxHeight={320} />
+            {isReviewer ? (
+              <>
+                <Field label="选择审核记录">
+                  <Select value={selectedReviewId} onChange={(event) => setSelectedReviewId(event.target.value)}>
+                    <option value="">请选择</option>
+                    {safeArray(hubBundle.reviews?.items).map((item) => (
+                      <option key={String(item.id)} value={String(item.id)}>
+                        {`${item.id} | ${item.review_status || ""} | ${item.module || ""} | ${item.created_by || ""}`}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                {selectedHubReview ? <JsonPreview value={selectedHubReview} /> : null}
+                <Field label="审核意见"><Textarea value={hubReviewNotes} onChange={(event) => setHubReviewNotes(event.target.value)} /></Field>
+                <div className="flex flex-wrap gap-3">
+                  <Button onClick={() => void handleManualSolutionReview("approved")}>通过</Button>
+                  <Button variant="secondary" onClick={() => void handleManualSolutionReview("needs_revision")}>退回修改</Button>
+                  <Button variant="danger" onClick={() => void handleManualSolutionReview("rejected")}>拒绝</Button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <DataTable title="任务簇" rows={safeArray(hubBundle.taskClusters)} maxHeight={260} />
+            <Card>
+              <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+                <Field label="新任务簇名称"><Input value={newClusterDraft.name} onChange={(event) => setNewClusterDraft((current) => ({ ...current, name: event.target.value }))} /></Field>
+                <Field label="任务簇说明"><Textarea value={newClusterDraft.description} onChange={(event) => setNewClusterDraft((current) => ({ ...current, description: event.target.value }))} /></Field>
+              </CardContent>
+            </Card>
+            <Button onClick={() => void handleCreateTaskCluster()}>提交任务簇</Button>
+            {isReviewer ? (
+              <>
+                <Field label="审核任务簇">
+                  <Select value={selectedClusterId} onChange={(event) => setSelectedClusterId(event.target.value)}>
+                    <option value="">请选择</option>
+                    {safeArray(hubBundle.taskClusters).map((item) => (
+                      <option key={String(item.id)} value={String(item.id)}>
+                        {`${item.id} | ${item.display_name || ""} | ${item.review_status || ""}`}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                {selectedHubCluster ? <JsonPreview value={selectedHubCluster} /> : null}
+                <div className="flex flex-wrap gap-3">
+                  <Button onClick={() => void handleReviewTaskCluster("approved")}>通过</Button>
+                  <Button variant="secondary" onClick={() => void handleReviewTaskCluster("rejected")}>拒绝</Button>
+                  <Button variant="danger" onClick={() => void handleReviewTaskCluster("disabled")}>停用</Button>
+                </div>
+                <DataTable title="模块配置" rows={modules} maxHeight={260} />
+                <Card>
+                  <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
+                    <Field label="module_key"><Input value={newModuleDraft.module_key} onChange={(event) => setNewModuleDraft((current) => ({ ...current, module_key: event.target.value }))} /></Field>
+                    <Field label="display_name"><Input value={newModuleDraft.display_name} onChange={(event) => setNewModuleDraft((current) => ({ ...current, display_name: event.target.value }))} /></Field>
+                    <Field label="prefix"><Input value={newModuleDraft.prefix} onChange={(event) => setNewModuleDraft((current) => ({ ...current, prefix: event.target.value }))} /></Field>
+                    <div className="lg:col-span-3"><Field label="模块说明"><Textarea value={newModuleDraft.description} onChange={(event) => setNewModuleDraft((current) => ({ ...current, description: event.target.value }))} /></Field></div>
+                  </CardContent>
+                </Card>
+                <Button onClick={() => void handleSaveModuleConfig()}>保存模块配置</Button>
+              </>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderFilesPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="原始文件预览"
+          description="查看任务中收录的原始文件列表，并按预览行数查看文件内容。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadFiles()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新文件列表
+            </Button>
+          }
+        />
+        <PaginationBar
+          page={filesPage}
+          pageSize={filesPageSize}
+          total={Number(filesBundle.list?.total || 0)}
+          onPageChange={setFilesPage}
+          onPageSizeChange={(value) => {
+            setFilesPage(1);
+            setFilesPageSize(value);
+          }}
+        />
+        <DataTable title="原始文件列表" rows={safeArray(filesBundle.list?.items)} maxHeight={360} />
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-[1fr_180px_auto]">
+            <Field label="选择原始文件">
+              <Select value={selectedFilePath} onChange={(event) => setSelectedFilePath(event.target.value)}>
+                <option value="">请选择文件</option>
+                {safeArray(filesBundle.list?.items).map((row) => (
+                  <option key={String(row.relative_path)} value={String(row.relative_path)}>
+                    {String(row.relative_path)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="预览行数">
+              <Input value={filePreviewLines} onChange={(event) => setFilePreviewLines(event.target.value)} />
+            </Field>
+            <div className="flex items-end">
+              <Button className="w-full" onClick={() => void loadFiles()}>加载预览</Button>
+            </div>
+          </CardContent>
+        </Card>
+        {filesBundle.preview ? (
+          <>
+            <InfoTileGrid
+              columns={4}
+              items={[
+                { label: "文件", value: filesBundle.preview.relative_path || "-" },
+                { label: "类型", value: filesBundle.preview.mime_type || "unknown" },
+                { label: "编码", value: filesBundle.preview.encoding || "unknown" },
+                { label: "预览行数", value: filesBundle.preview.line_count || 0 },
+              ]}
+            />
+            <CodePreview code={safeArray(filesBundle.preview.preview).join("\n")} title="文件预览" maxHeight={520} />
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderUnknownPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="未知日志待标注池"
+          description="优先按出现次数筛选，再查看代表样本、审核历史、尝试过的解析器和上下文样本。"
+          actions={
+            <Button variant="secondary" onClick={() => void loadUnknown()}>
+              <RefreshCcw className="h-4 w-4" />
+              刷新未知日志池
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
+            <Field label="最小出现次数"><Input value={unknownFilter.min_occurrence} onChange={(event) => setUnknownFilter((current) => ({ ...current, min_occurrence: event.target.value }))} /></Field>
+            <Field label="展示条数"><Input value={unknownFilter.limit} onChange={(event) => setUnknownFilter((current) => ({ ...current, limit: event.target.value }))} /></Field>
+            <Field label="审核状态过滤"><Select value={unknownFilter.review_status} onChange={(event) => setUnknownFilter((current) => ({ ...current, review_status: event.target.value }))}><option value="">全部</option><option value="pending_review">pending_review</option><option value="submitted_for_review">submitted_for_review</option><option value="approved">approved</option><option value="rejected">rejected</option><option value="ignored">ignored</option></Select></Field>
+          </CardContent>
+        </Card>
+        <DataTable title="未知日志簇" rows={safeArray(unknownBundle.items)} maxHeight={320} />
+        <Field label="选择未知日志簇">
+          <Select value={selectedUnknownSignature} onChange={(event) => setSelectedUnknownSignature(event.target.value)}>
+            <option value="">请选择</option>
+            {safeArray(unknownBundle.items).map((item) => (
+              <option key={String(item.signature)} value={String(item.signature)}>
+                {String(item.signature)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {selectedUnknownCluster ? (
+          <>
+            <InfoTileGrid columns={3} items={[{ label: "当前状态", value: selectedUnknownCluster.review_status || "pending_review" }, { label: "出现次数", value: selectedUnknownCluster.occurrence_count || 0 }, { label: "源文件数", value: Object.keys(safeObject(selectedUnknownCluster.source_files)).length }]} />
+            <CodePreview code={String(selectedUnknownCluster.representative_text || "")} title="代表性样本" />
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Field label="审核人"><Input value={unknownReviewer} onChange={(event) => setUnknownReviewer(event.target.value)} /></Field>
+              <Field label="审核备注"><Textarea value={unknownReviewNotes} onChange={(event) => setUnknownReviewNotes(event.target.value)} /></Field>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Button onClick={() => void handleUnknownReview("approved")}>通过</Button>
+              <Button variant="secondary" onClick={() => void handleUnknownReview("ignored")}>忽略</Button>
+              <Button variant="danger" onClick={() => void handleUnknownReview("rejected")}>拒绝</Button>
+            </div>
+            {safeArray(selectedUnknownCluster.review_history).length ? <DataTable title="审核历史" rows={safeArray(selectedUnknownCluster.review_history)} maxHeight={220} /> : null}
+            <div className="grid gap-6 xl:grid-cols-2">
+              <JsonPreview title="尝试过的 Parsers" value={selectedUnknownCluster.attempted_parsers || []} />
+              <JsonPreview title="尝试过的 Rules" value={selectedUnknownCluster.attempted_rules || []} />
+            </div>
+            {safeArray(selectedUnknownCluster.context_examples).map((item, index) => (
+              <details key={`context-example-${index}`} className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4">
+                <summary className="cursor-pointer text-sm font-medium text-[var(--foreground)]">
+                  {`样本 ${index + 1} | ${item.source_file || "-"} | line ${item.line_no || "-"}`}
+                </summary>
+                <div className="mt-4">
+                  <JsonPreview value={item} />
+                </div>
+              </details>
+            ))}
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderRulesPage() {
+    const currentLocalNew =
+      localNewSuggestions.find((item) => String(item.suggestion_id) === selectedLocalNewSuggestionId) ||
+      localNewSuggestions[0] ||
+      null;
+    const currentLocalFix =
+      localFixSuggestions.find((item) => String(item.suggestion_id) === selectedLocalFixSuggestionId) ||
+      localFixSuggestions[0] ||
+      null;
+    const currentLlmNew =
+      llmNewSuggestions.find((item) => String(item.suggestion_id) === selectedLlmNewSuggestionId) ||
+      llmNewSuggestions[0] ||
+      null;
+    const currentLlmFix =
+      llmFixSuggestions.find((item) => String(item.suggestion_id) === selectedLlmFixSuggestionId) ||
+      llmFixSuggestions[0] ||
+      null;
+
+    return (
+      <div className="space-y-6">
+        <SectionTitle
+          title="规则建议审核视图"
+          description="先看本地规则建议，再按需触发 LLM 候选建议；所有建议都只进入审核流，不会直接改生产规则。"
+          actions={
+            <div className="flex flex-wrap gap-3">
+              <Button variant="secondary" onClick={() => void loadRules(false)}>
+                <RefreshCcw className="h-4 w-4" />
+                刷新本地建议
+              </Button>
+              <Button onClick={() => void loadRules(true)}>
+                <WandSparkles className="h-4 w-4" />
+                生成 / 刷新 LLM 建议
+              </Button>
+            </div>
+          }
+        />
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+              <input type="checkbox" checked={ruleLlmEnabled} onChange={(event) => setRuleLlmEnabled(event.target.checked)} />
+              启用 LLM 规则建议
+            </label>
+            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+              <input type="checkbox" checked={ruleForceRefresh} onChange={(event) => setRuleForceRefresh(event.target.checked)} />
+              忽略 LLM 预览缓存并重新生成
+            </label>
+            <Field label="送入 LLM 的未知日志簇">
+              <ChipToggleGroup options={safeArray(rulesBundle.unknownPool?.items).map((item) => String(item.signature))} selected={selectedRuleSignatures} onToggle={toggleRuleSignature} />
+            </Field>
+          </CardContent>
+        </Card>
+        <InfoTileGrid columns={4} items={[{ label: "未知簇总数", value: safeObject(localPreview.summary).unknown_clusters_total || 0 }, { label: "反馈记录总数", value: safeObject(localPreview.summary).feedback_records_total || 0 }, { label: "新规则建议", value: safeObject(localPreview.summary).new_rule_suggestions || 0 }, { label: "修正规则建议", value: safeObject(localPreview.summary).rule_fix_suggestions || 0 }]} />
+        <TabBar tabs={[{ key: "localNew", label: "本地新规则建议" }, { key: "localFix", label: "本地修正规则建议" }, { key: "llmNew", label: "LLM 新规则建议" }, { key: "llmFix", label: "LLM 修正规则建议" }, { key: "patterns", label: "高频误判模式" }, { key: "yaml", label: "YAML 候选片段" }, { key: "reviews", label: "审核记录" }, { key: "files", label: "已写入建议文件" }, { key: "payload", label: "LLM 请求 / 响应" }]} active={rulesTab} onChange={setRulesTab} />
+        {rulesTab === "localNew" ? <><DataTable title="本地新规则建议" rows={localNewSuggestions} maxHeight={320} /><Field label="选择本地新规则建议"><Select value={selectedLocalNewSuggestionId} onChange={(event) => setSelectedLocalNewSuggestionId(event.target.value)}><option value="">自动选择首条</option>{localNewSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLocalNew ? <JsonPreview value={currentLocalNew} /> : null}{currentLocalNew ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLocalNew.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLocalNew.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLocalNew.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
+        {rulesTab === "localFix" ? <><DataTable title="本地修正规则建议" rows={localFixSuggestions} maxHeight={320} /><Field label="选择本地修正规则建议"><Select value={selectedLocalFixSuggestionId} onChange={(event) => setSelectedLocalFixSuggestionId(event.target.value)}><option value="">自动选择首条</option>{localFixSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLocalFix ? <JsonPreview value={currentLocalFix} /> : null}{currentLocalFix ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLocalFix.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLocalFix.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLocalFix.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
+        {rulesTab === "llmNew" ? <><DataTable title="LLM 新规则建议" rows={llmNewSuggestions} maxHeight={320} /><Field label="选择 LLM 新规则建议"><Select value={selectedLlmNewSuggestionId} onChange={(event) => setSelectedLlmNewSuggestionId(event.target.value)}><option value="">自动选择首条</option>{llmNewSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLlmNew ? <JsonPreview value={currentLlmNew} /> : null}{currentLlmNew ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLlmNew.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLlmNew.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLlmNew.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
+        {rulesTab === "llmFix" ? <><DataTable title="LLM 修正规则建议" rows={llmFixSuggestions} maxHeight={320} /><Field label="选择 LLM 修正规则建议"><Select value={selectedLlmFixSuggestionId} onChange={(event) => setSelectedLlmFixSuggestionId(event.target.value)}><option value="">自动选择首条</option>{llmFixSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLlmFix ? <JsonPreview value={currentLlmFix} /> : null}{currentLlmFix ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLlmFix.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLlmFix.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLlmFix.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
+        {rulesTab === "patterns" ? <DataTable title="高频误判模式" rows={[...safeArray(localPreview.high_frequency_misclassified_patterns), ...safeArray(llmResult.high_frequency_misclassified_patterns)]} maxHeight={320} /> : null}
+        {rulesTab === "yaml" ? <CodePreview title="YAML 候选片段" code={JSON.stringify(localPreview.parser_rules_yaml_fragment || {}, null, 2)} maxHeight={420} /> : null}
+        {rulesTab === "reviews" ? <DataTable title="审核记录" rows={ruleReviews} maxHeight={320} /> : null}
+        {rulesTab === "files" ? <><DataTable title="已写入建议文件" rows={ruleFiles} maxHeight={240} /><Field label="选择建议文件"><Select value={selectedRuleFile} onChange={(event) => { const next = event.target.value; setSelectedRuleFile(next); void loadRuleFile(next); }}><option value="">请选择</option>{ruleFiles.map((item) => <option key={String(item.filename)} value={String(item.filename)}>{String(item.filename)}</option>)}</Select></Field>{ruleFileContent ? <CodePreview title={String(ruleFileContent.filename || "建议文件")} code={String(ruleFileContent.content || "")} maxHeight={480} /> : null}</> : null}
+        {rulesTab === "payload" ? <JsonPreview title="LLM 请求 / 响应" value={{ request_payload: llmMeta.request_payload || {}, response_payload: llmMeta.response_payload || {} }} /> : null}
+        <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+          <Field label="审核人"><Input value={ruleReviewer} onChange={(event) => setRuleReviewer(event.target.value)} /></Field>
+          <Field label="审核备注"><Textarea value={ruleReviewNotes} onChange={(event) => setRuleReviewNotes(event.target.value)} /></Field>
+        </div>
+      </div>
+    );
+  }
+
+  function renderConfigPage() {
+    const thresholds = safeObject(configBundle.thresholds);
+    const parserRules = safeObject(configBundle.parser_rules);
+    const errorRules = safeObject(configBundle.error_rules);
+    const promptTemplates = safeObject(configBundle.prompt_templates);
+    const llmConfig = safeObject(configBundle.llm);
+    const repoBundle = safeObject(configBundle.solution_repository);
+    const promptVersions = safeObject(promptTemplates.templates);
+    const activeLearning = safeObject(parserRules.active_learning);
+    const familyRules = safeArray(errorRules.family_rules);
+    const moduleTree = safeArray(repoBundle.module_tree);
+    const modulePrefixes = safeObject(repoBundle.module_prefixes);
+
+    return (
+      <div className="space-y-6">
+        <SectionTitle title="配置页面" description="保留 Streamlit 的总览、阈值维护、异常规则和 Prompt / 方案库知识视图。" actions={<Button variant="secondary" onClick={() => void loadConfig()}><RefreshCcw className="h-4 w-4" />刷新配置</Button>} />
+        <TabBar tabs={[{ key: "overview", label: "总览" }, { key: "thresholds", label: "时间与阈值" }, { key: "rules", label: "异常与审核" }, { key: "knowledge", label: "Prompt 与方案库" }]} active={configTab} onChange={setConfigTab} />
+        {configTab === "overview" ? <InfoTileGrid columns={3} items={[{ label: "默认超时阈值", value: thresholds.default_threshold_ms || 0, note: "单位 ms" }, { label: "LLM 诊断开关", value: llmConfig.enabled, note: "控制诊断页面是否启用大模型分析" }, { label: "诊断模型", value: llmConfig.model || "-", note: "当前综合诊断模型" }, { label: "Prompt 版本", value: promptTemplates.active_version || "-", note: "当前生效模板" }, { label: "解决方案模块", value: moduleTree.length, note: "一级模块数量" }, { label: "组件映射规则", value: Object.keys(safeObject(parserRules.component_filename_rules)).length, note: "按文件名归类组件来源" }]} /> : null}
+        {configTab === "thresholds" ? <div className="space-y-4"><Card><CardContent className="pt-6"><Field label="默认超时阈值 (ms)"><Input type="number" value={thresholdEditor.default_threshold_ms} onChange={(event) => setThresholdEditor((current) => ({ ...current, default_threshold_ms: event.target.value }))} /></Field></CardContent></Card><MappingEditorTable title="参数阈值" rows={thresholdRows} columns={[{ key: "key", label: "参数项" }, { key: "value", label: "阈值(秒)" }]} onChange={(rows) => setThresholdRows(rows as Array<{ key: string; value: string }>)} /><MappingEditorTable title="参数期望值" rows={expectedRows} columns={[{ key: "key", label: "参数项" }, { key: "value", label: "期望(秒)" }]} onChange={(rows) => setExpectedRows(rows as Array<{ key: string; value: string }>)} /><MappingEditorTable title="步骤级阈值" rows={stepThresholdRows} columns={[{ key: "module", label: "业务模块" }, { key: "step", label: "步骤名称" }, { key: "value", label: "超时阈值(ms)" }]} onChange={(rows) => setStepThresholdRows(rows as Array<{ module: string; step: string; value: string }>)} /><MappingEditorTable title="诊断上下文窗口" rows={contextRows} columns={[{ key: "key", label: "上下文项" }, { key: "value", label: "值" }]} onChange={(rows) => setContextRows(rows as Array<{ key: string; value: string }>)} /><Button onClick={() => void handleSaveThresholds()}>保存阈值配置</Button></div> : null}
+        {configTab === "rules" ? <div className="space-y-4"><InfoTileGrid columns={4} items={[{ label: "时间格式规则", value: safeArray(parserRules.time_formats).length }, { label: "Cycle 提取规则", value: safeArray(parserRules.cycle_patterns).length }, { label: "Chip 提取规则", value: safeArray(parserRules.chip_patterns).length }, { label: "回退异常家族", value: errorRules.fallback_family || "-" }]} /><JsonPreview title="主动学习与审核策略" value={activeLearning} />{familyRules.length ? <DataTable title="异常家族" rows={familyRules} maxHeight={360} /> : null}</div> : null}
+        {configTab === "knowledge" ? <div className="space-y-4"><JsonPreview title="Prompt 模板" value={promptVersions} /><InfoTileGrid columns={4} items={[{ label: "模块前缀数", value: Object.keys(modulePrefixes).length }, { label: "一级模块", value: moduleTree.length }, { label: "子模块", value: moduleTree.reduce((sum, item) => sum + safeArray(item.children).length, 0) }, { label: "建议输出目录", value: safeObject(activeLearning.suggestion_generation).write_suggestions_to || "-" }]} />{moduleTree.map((module) => <details key={String(module.name || "module")} className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4"><summary className="cursor-pointer text-sm font-medium text-[var(--foreground)]">{`${module.name || "未命名模块"} · ${safeArray(module.children).length} 个子模块`}</summary><div className="mt-4"><InfoTileGrid columns={2} items={[{ label: "错误码前缀", value: modulePrefixes[module.name] || "-" }, { label: "子模块数量", value: safeArray(module.children).length }]} /><div className="mt-4"><ChipToggleGroup options={safeArray(module.children).map((item) => String(item))} selected={[]} onToggle={() => {}} /></div></div></details>)}</div> : null}
+      </div>
+    );
+  }
+
+  function renderExportsPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle title="导出" description="统一使用后端 FileResponse 接口导出任务产物和方案库数据。" />
+        {selectedTaskUuid ? (
+          <Card>
+            <CardContent className="flex flex-wrap gap-3 pt-6">
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/events`, { access_token: token })} target="_blank" rel="noreferrer">导出统一事件 CSV</a></Button>
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/errors`, { access_token: token })} target="_blank" rel="noreferrer">导出错误分析 CSV</a></Button>
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/parameters`, { access_token: token })} target="_blank" rel="noreferrer">导出参数结果 CSV</a></Button>
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/report.html`, { access_token: token })} target="_blank" rel="noreferrer">导出 HTML 报告</a></Button>
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/report.json`, { access_token: token })} target="_blank" rel="noreferrer">导出 JSON 报告</a></Button>
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/report.xlsx`, { access_token: token })} target="_blank" rel="noreferrer">导出 Excel 报告</a></Button>
+              <Button variant="secondary" asChild><a href={buildApiUrl(apiBase, `/tasks/${selectedTaskUuid}/export/report.pdf`, { access_token: token })} target="_blank" rel="noreferrer">导出 PDF 报告</a></Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card><CardContent className="pt-6"><p className="text-sm text-[var(--muted-foreground)]">请先选择任务 UUID。</p></CardContent></Card>
+        )}
+      </div>
+    );
+  }
+
+  function renderUsersPage() {
+    return (
+      <div className="space-y-6">
+        <SectionTitle title="用户管理" description="仅管理员可见，用于处理注册审核、账号启停与角色设置。" actions={<Button variant="secondary" onClick={() => void loadUsers()}><RefreshCcw className="h-4 w-4" />刷新用户列表</Button>} />
+        <DataTable title="用户列表" rows={userList} maxHeight={320} />
+        <Field label="选择用户">
+          <Select value={selectedUserId} onChange={(event) => setSelectedUserId(event.target.value)}>
+            <option value="">请选择</option>
+            {userList.map((item) => (
+              <option key={String(item.id)} value={String(item.id)}>
+                {`${item.id} | ${item.username || ""} | ${item.status || ""} | ${safeArray(item.roles).join(",")}`}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {selectedUserRecord ? <JsonPreview value={selectedUserRecord} /> : null}
+        <div className="flex flex-wrap gap-3">
+          <Button onClick={() => void handleUpdateUserStatus("approve")}>通过</Button>
+          <Button variant="secondary" onClick={() => void handleUpdateUserStatus("reject")}>拒绝</Button>
+          <Button variant="secondary" onClick={() => void handleUpdateUserStatus("disable")}>停用</Button>
+          <Button variant="secondary" onClick={() => void handleUpdateUserStatus("enable")}>启用</Button>
+        </div>
+        <div className="flex flex-wrap gap-6 rounded-2xl border border-[var(--border)] bg-[var(--card)] px-4 py-4">
+          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]"><input type="checkbox" checked={selectedUserRoles.is_reviewer} onChange={(event) => setSelectedUserRoles((current) => ({ ...current, is_reviewer: event.target.checked }))} />设为 reviewer</label>
+          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]"><input type="checkbox" checked={selectedUserRoles.is_admin} onChange={(event) => setSelectedUserRoles((current) => ({ ...current, is_admin: event.target.checked }))} />设为 admin</label>
+        </div>
+        <Button onClick={() => void handleSaveUserRoles()}>保存角色设置</Button>
+      </div>
+    );
+  }
+
+  function renderMainContent() {
+    if (!isAuthenticated) {
+      if (page === "welcome") {
+        return renderWelcome();
+      }
+      if (page === "login") {
+        return renderLogin();
+      }
+      return renderRegister();
+    }
+
+    switch (page) {
+      case "dashboard":
+        return renderDashboardPage();
+      case "history":
+        return renderHistoryPage();
+      case "upload":
+        return renderUploadPage();
+      case "events":
+        return renderEventsPage();
+      case "performance":
+        return renderPerformancePage();
+      case "timeline":
+        return renderTimelinePage();
+      case "errors":
+        return renderErrorsPage();
+      case "parameters":
+        return renderParametersPage();
+      case "llm":
+        return renderLlmPage();
+      case "solutionHub":
+        return renderSolutionHubPage();
+      case "files":
+        return renderFilesPage();
+      case "unknown":
+        return renderUnknownPage();
+      case "rules":
+        return renderRulesPage();
+      case "config":
+        return renderConfigPage();
+      case "exports":
+        return renderExportsPage();
+      case "users":
+        return renderUsersPage();
+      default:
+        return renderDashboardPage();
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
@@ -1006,7 +3023,7 @@ export function LogPlatformConsole() {
     );
   }
 
-  const mainContent =
+  const legacyMainContent =
     !isAuthenticated && page === "welcome" ? (
       <div className="space-y-6">
         <SectionTitle title="前后端分离版日志平台" description="按 Streamlit 使用逻辑重建上传、分析、诊断、主动学习和方案管理流程。" />
@@ -1063,6 +3080,9 @@ export function LogPlatformConsole() {
     ) : (
       <div className="space-y-8"><SectionTitle title="用户管理" description="仅管理员可见，用于处理注册审核、账号启停和角色配置。" actions={<Button variant="secondary" onClick={() => void loadUsers()}><RefreshCcw className="h-4 w-4" />刷新用户列表</Button>} /><DataTable title="用户列表" rows={userList} /></div>
     );
+
+  void legacyMainContent;
+  const mainContent = renderMainContent();
 
   return (
     <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">

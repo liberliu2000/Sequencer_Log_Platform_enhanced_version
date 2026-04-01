@@ -14,6 +14,7 @@ export type PlatformRequestOptions = {
   query?: Record<string, QueryValue>;
   body?: unknown;
   formData?: FormData;
+  timeoutMs?: number;
 };
 
 const DEFAULT_API_BASE =
@@ -72,6 +73,11 @@ export async function platformRequest<T>(
   options: PlatformRequestOptions = {},
 ): Promise<T> {
   const headers = new Headers();
+  const controller = new AbortController();
+  const timeoutId =
+    options.timeoutMs && options.timeoutMs > 0
+      ? globalThis.setTimeout(() => controller.abort(), options.timeoutMs)
+      : null;
 
   if (options.token) {
     headers.set("Authorization", `Bearer ${options.token}`);
@@ -81,37 +87,49 @@ export async function platformRequest<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(buildApiUrl(baseUrl, path, options.query), {
-    method: options.method ?? "GET",
-    headers,
-    body: options.formData
-      ? options.formData
-      : options.body === undefined
-        ? undefined
-        : JSON.stringify(options.body),
-    cache: "no-store",
-  });
+  try {
+    const response = await fetch(buildApiUrl(baseUrl, path, options.query), {
+      method: options.method ?? "GET",
+      headers,
+      body: options.formData
+        ? options.formData
+        : options.body === undefined
+          ? undefined
+          : JSON.stringify(options.body),
+      cache: "no-store",
+      signal: controller.signal,
+    });
 
-  const text = await response.text();
-  let data: unknown = null;
+    const text = await response.text();
+    let data: unknown = null;
 
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = text;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
+    }
+
+    if (!response.ok) {
+      const detail =
+        typeof data === "object" && data && "detail" in data
+          ? String((data as { detail?: unknown }).detail)
+          : typeof data === "string"
+            ? data
+            : response.statusText;
+      throw new PlatformApiError(detail || "Request failed", response.status);
+    }
+
+    return data as T;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new PlatformApiError("请求超时，请稍后重试", 408);
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      globalThis.clearTimeout(timeoutId);
     }
   }
-
-  if (!response.ok) {
-    const detail =
-      typeof data === "object" && data && "detail" in data
-        ? String((data as { detail?: unknown }).detail)
-        : typeof data === "string"
-          ? data
-          : response.statusText;
-    throw new PlatformApiError(detail || "Request failed", response.status);
-  }
-
-  return data as T;
 }
