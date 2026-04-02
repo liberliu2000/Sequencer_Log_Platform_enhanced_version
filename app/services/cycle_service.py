@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from app.schemas.common import CycleSummary, NormalizedEvent, ParameterResult, StepSummary
 from app.services.parameter_definitions import DIRECT_DURATION_RULES, PAIRING_RULES, ROW_SCAN_METRIC_STAGES, parameter_definition_map
@@ -9,26 +9,42 @@ PARAM_MAP = parameter_definition_map()
 
 
 def summarize_cycles(step_summaries: list[StepSummary]) -> list[CycleSummary]:
-    grouped: dict[tuple[int | None, str | None], list[StepSummary]] = defaultdict(list)
+    grouped: dict[tuple[int | None, str | None], dict[str, float | int | None | bool]] = defaultdict(
+        lambda: {
+            "min_start": None,
+            "max_end": None,
+            "duration_sum": 0.0,
+            "has_nonzero_duration": False,
+        }
+    )
     for item in step_summaries:
-        grouped[(item.cycle_no, item.chip_name)].append(item)
+        stats = grouped[(item.cycle_no, item.chip_name)]
+        if item.start_epoch_ms is not None:
+            current_min = stats["min_start"]
+            stats["min_start"] = item.start_epoch_ms if current_min is None else min(int(current_min), item.start_epoch_ms)
+        if item.end_epoch_ms is not None:
+            current_max = stats["max_end"]
+            stats["max_end"] = item.end_epoch_ms if current_max is None else max(int(current_max), item.end_epoch_ms)
+        if item.duration_ms:
+            stats["has_nonzero_duration"] = True
+            stats["duration_sum"] = float(stats["duration_sum"]) + float(item.duration_ms)
 
     out: list[CycleSummary] = []
-    for (cycle_no, chip_name), items in grouped.items():
-        starts = [x.start_epoch_ms for x in items if x.start_epoch_ms is not None]
-        ends = [x.end_epoch_ms for x in items if x.end_epoch_ms is not None]
+    for (cycle_no, chip_name), stats in grouped.items():
+        min_start = stats["min_start"]
+        max_end = stats["max_end"]
         total_ms = None
-        if starts and ends:
-            total_ms = max(ends) - min(starts)
-        elif any(x.duration_ms for x in items):
-            total_ms = sum(float(x.duration_ms or 0) for x in items)
+        if min_start is not None and max_end is not None:
+            total_ms = float(int(max_end) - int(min_start))
+        elif bool(stats["has_nonzero_duration"]):
+            total_ms = float(stats["duration_sum"])
         out.append(
             CycleSummary(
                 cycle_no=cycle_no,
                 chip_name=chip_name,
                 total_duration_ms=total_ms,
-                started_at=min(starts) if starts else None,
-                ended_at=max(ends) if ends else None,
+                started_at=int(min_start) if min_start is not None else None,
+                ended_at=int(max_end) if max_end is not None else None,
             )
         )
     return sorted(out, key=lambda x: (x.cycle_no if x.cycle_no is not None else -1, x.chip_name or ""))
@@ -187,7 +203,7 @@ def _build_direct_duration_results(events: list[NormalizedEvent]) -> list[Parame
 def _build_pairing_results(events: list[NormalizedEvent]) -> list[ParameterResult]:
     out: list[ParameterResult] = []
     for rule in PAIRING_RULES:
-        open_map: dict[tuple, list[NormalizedEvent]] = defaultdict(list)
+        open_map: dict[tuple, deque[NormalizedEvent]] = defaultdict(deque)
         for ev in events:
             msg = ev.message or ""
             sm = rule.start_pattern.search(msg)
@@ -213,7 +229,7 @@ def _build_pairing_results(events: list[NormalizedEvent]) -> list[ParameterResul
             starts = open_map.get(key) or open_map.get(_pairing_key(rule.parameter_name, cycle, slide, None))
             if not starts:
                 continue
-            start_event = starts.pop(0)
+            start_event = starts.popleft()
             if start_event.epoch_ms is None or ev.epoch_ms is None:
                 continue
             out.append(_mk_result(rule.parameter_name, rule.display_name, cycle, slide, ev.chip_name or start_event.chip_name, start_event, ev, float(ev.epoch_ms - start_event.epoch_ms), ev.source_file, rule.source_type, component=ev.component or start_event.component, extra={"rule_notes": rule.notes}))
@@ -221,7 +237,9 @@ def _build_pairing_results(events: list[NormalizedEvent]) -> list[ParameterResul
 
 
 def _build_row_scan_metric_results(events: list[NormalizedEvent]) -> list[ParameterResult]:
-    grouped: dict[tuple[int | None, str | None, str], list[NormalizedEvent]] = defaultdict(list)
+    grouped: dict[tuple[int | None, str | None, str], dict[str, object]] = defaultdict(
+        lambda: {"sum_duration_ms": 0.0, "row_count": 0, "exemplar": None, "raw_duration_ms_list": []}
+    )
     for ev in events:
         if ev.parser_name != "metrics_csv":
             continue
@@ -231,17 +249,53 @@ def _build_row_scan_metric_results(events: list[NormalizedEvent]) -> list[Parame
         norm_name = "scanTotalTime" if metric_name == "ScanTotalTime" else metric_name
         if norm_name not in ROW_SCAN_METRIC_STAGES:
             continue
-        grouped[(ev.cycle_no, ev.chip_name, norm_name)].append(ev)
+        if ev.duration_ms is None:
+            continue
+        stats = grouped[(ev.cycle_no, ev.chip_name, norm_name)]
+        stats["sum_duration_ms"] = float(stats["sum_duration_ms"]) + float(ev.duration_ms)
+        stats["row_count"] = int(stats["row_count"]) + 1
+        if stats["exemplar"] is None:
+            stats["exemplar"] = ev
+        raw_duration_ms_list = stats["raw_duration_ms_list"]
+        if isinstance(raw_duration_ms_list, list) and len(raw_duration_ms_list) < 20:
+            raw_duration_ms_list.append(float(ev.duration_ms))
 
     out: list[ParameterResult] = []
     threshold, expected = _definition_values("row_scan_metric_avg")
-    for (cycle_no, chip_name, metric_name), rows in grouped.items():
-        durations = [float(x.duration_ms) for x in rows if x.duration_ms is not None]
-        if not durations:
+    for (cycle_no, chip_name, metric_name), stats in grouped.items():
+        row_count = int(stats["row_count"])
+        if row_count <= 0:
             continue
-        avg_ms = sum(durations) / len(durations)
-        exemplar = rows[0]
-        out.append(ParameterResult(parameter_name="row_scan_metric_avg", parameter_display_name=f"row scan metric avg::{metric_name}", cycle=cycle_no, slide=None, chip_name=chip_name, duration_seconds=_safe_seconds(avg_ms), duration_ms=avg_ms, start_time=_event_time_text(exemplar), end_time=_event_time_text(exemplar), start_message=exemplar.message, end_message=exemplar.message, source_file=exemplar.source_file, source_type="metrics", threshold=threshold, expected=expected, is_exceed=False, component=exemplar.component, extra={"metric_stage": metric_name, "row_count": len(durations), "raw_duration_ms_list": durations[:20]}))
+        avg_ms = float(stats["sum_duration_ms"]) / row_count
+        exemplar = stats["exemplar"]
+        if exemplar is None:
+            continue
+        out.append(
+            ParameterResult(
+                parameter_name="row_scan_metric_avg",
+                parameter_display_name=f"row scan metric avg::{metric_name}",
+                cycle=cycle_no,
+                slide=None,
+                chip_name=chip_name,
+                duration_seconds=_safe_seconds(avg_ms),
+                duration_ms=avg_ms,
+                start_time=_event_time_text(exemplar),
+                end_time=_event_time_text(exemplar),
+                start_message=exemplar.message,
+                end_message=exemplar.message,
+                source_file=exemplar.source_file,
+                source_type="metrics",
+                threshold=threshold,
+                expected=expected,
+                is_exceed=False,
+                component=exemplar.component,
+                extra={
+                    "metric_stage": metric_name,
+                    "row_count": row_count,
+                    "raw_duration_ms_list": list(stats["raw_duration_ms_list"]),
+                },
+            )
+        )
     return out
 
 

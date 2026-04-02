@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import time
@@ -15,7 +16,6 @@ from app.core.settings import get_settings
 from app.correlators.pairing import pair_start_end
 from app.db.session import SessionLocal
 from app.detectors.error_detection import annotate_errors, top_error_clusters
-from app.models.db_models import ErrorClusterModel, NormalizedEventModel, StepSummaryModel
 from app.repositories.task_repository import TaskRepository
 from app.schemas.common import NormalizedEvent
 from app.services.cycle_inference import infer_missing_cycles
@@ -241,6 +241,32 @@ class IngestionService:
             self._progress(task_id, f"主进程汇总解析结果 {min(idx * self.settings.load_batch_size, total)}/{total}", min(74, pct), task_uuid=task_uuid, message=f"已合并 {min(idx * self.settings.load_batch_size, total)} 个文件中间结果", cpu_cores=cpu_cores)
         return all_events
 
+    @staticmethod
+    def _iter_event_rows(events: list[NormalizedEvent]):
+        for event in events:
+            payload = event.model_dump()
+            payload["extra_json"] = orjson.dumps(payload.get("extra_json") or {}).decode("utf-8")
+            yield payload
+
+    @staticmethod
+    def _collect_error_stats(events: list[NormalizedEvent]) -> tuple[int, dict[str, dict[str, int | None]]]:
+        total_errors = 0
+        bounds: dict[str, dict[str, int | None]] = {}
+        for event in events:
+            signature = event.normalized_signature
+            if not signature:
+                continue
+            total_errors += 1
+            epoch_ms = event.epoch_ms
+            state = bounds.setdefault(signature, {"first": None, "last": None})
+            if epoch_ms is None:
+                continue
+            if state["first"] is None or epoch_ms < int(state["first"]):
+                state["first"] = epoch_ms
+            if state["last"] is None or epoch_ms > int(state["last"]):
+                state["last"] = epoch_ms
+        return total_errors, bounds
+
     def process_task(self, task_id: int, stored_root: Path, task_uuid: str | None = None, cpu_cores: int | None = None) -> None:
         settings = get_settings()
         resolved_cores = resolve_parallel_workers(cpu_cores, os.cpu_count() or 1, settings.max_parallel_cpu_cores)
@@ -267,62 +293,79 @@ class IngestionService:
 
         try:
             t0 = time.perf_counter(); files = self._discover_inputs(stored_root, work_dir, task_id, task_uuid or "", resolved_cores); stage_timing["file_scan_seconds"] = round(time.perf_counter()-t0, 4)
-            self._progress(task_id, "文件识别完成", 15, task_uuid=task_uuid, message=f"识别到 {len(files)} 个候选文件", file_count=len(files), cpu_cores=resolved_cores)
+            candidate_file_count = len(files)
+            self._progress(task_id, "文件识别完成", 15, task_uuid=task_uuid, message=f"识别到 {candidate_file_count} 个候选文件", file_count=candidate_file_count, cpu_cores=resolved_cores)
 
             t0 = time.perf_counter(); prescanned = self._prescan_files(files, task_id, task_uuid or "", resolved_cores); stage_timing["prescan_seconds"] = round(time.perf_counter()-t0, 4)
             perf_summary["prescanned_files"] = len(prescanned)
 
             t0 = time.perf_counter(); parse_results, parse_perf = self._parse_files_parallel(prescanned, intermediate_dir, task_id, task_uuid or "", resolved_cores); stage_timing["parse_seconds"] = round(time.perf_counter()-t0, 4)
             perf_summary.update(parse_perf)
+            parsed_file_count = len(parse_results)
+            del prescanned
+            gc.collect()
 
             t0 = time.perf_counter(); all_events = self._load_events_from_intermediate(parse_results, task_id, task_uuid or "", resolved_cores); stage_timing["normalize_merge_seconds"] = round(time.perf_counter()-t0, 4)
-            perf_summary["total_events_before_postprocess"] = len(all_events)
+            total_event_count = len(all_events)
+            perf_summary["total_events_before_postprocess"] = total_event_count
+            del parse_results
+            gc.collect()
 
-            self._progress(task_id, "cycle 推断与错误归一化", 76, task_uuid=task_uuid, message=f"已生成 {len(all_events)} 条标准事件，开始跨文件关联", file_count=len(files), cpu_cores=resolved_cores)
+            self._progress(task_id, "cycle 推断与错误归一化", 76, task_uuid=task_uuid, message=f"已生成 {total_event_count} 条标准事件，开始跨文件关联", file_count=candidate_file_count, cpu_cores=resolved_cores)
             t0 = time.perf_counter(); all_events = infer_missing_cycles(all_events); all_events = annotate_errors(all_events); stage_timing["postprocess_seconds"] = round(time.perf_counter()-t0, 4)
 
             t0 = time.perf_counter()
-            event_models = []
-            for e in all_events:
-                payload = e.model_dump()
-                payload["extra_json"] = orjson.dumps(payload.get("extra_json") or {}).decode("utf-8")
-                event_models.append(NormalizedEventModel(**payload))
-            self.repo.save_events(task_id, event_models)
+            self.repo.save_events(task_id, self._iter_event_rows(all_events), batch_size=max(500, self.settings.metrics_batch_size * 4))
             stage_timing["db_write_events_seconds"] = round(time.perf_counter()-t0, 4)
 
-            self._progress(task_id, "参数统计与 metrics 聚合", 84, task_uuid=task_uuid, message="开始 workflow 配对、metrics 聚合与各 cycle 参数统计", file_count=len(files), cpu_cores=resolved_cores)
-            t0 = time.perf_counter(); paired_steps = pair_start_end(all_events); metric_steps = aggregate_metric_steps(all_events); parameter_steps = build_parameter_summaries(all_events, paired_steps + metric_steps); stage_timing["aggregate_seconds"] = round(time.perf_counter()-t0, 4)
-            step_models = [StepSummaryModel(**s.model_dump()) for s in (paired_steps + metric_steps + parameter_steps)]
-            if step_models:
-                t0 = time.perf_counter(); self.repo.save_step_summaries(task_id, step_models); stage_timing["db_write_steps_seconds"] = round(time.perf_counter()-t0, 4)
+            self._progress(task_id, "参数统计与 metrics 聚合", 84, task_uuid=task_uuid, message="开始 workflow 配对、metrics 聚合与各 cycle 参数统计", file_count=candidate_file_count, cpu_cores=resolved_cores)
+            t0 = time.perf_counter(); paired_steps = pair_start_end(all_events); metric_steps = aggregate_metric_steps(all_events); base_steps = paired_steps + metric_steps; parameter_steps = build_parameter_summaries(all_events, base_steps); all_step_summaries = base_steps + parameter_steps; stage_timing["aggregate_seconds"] = round(time.perf_counter()-t0, 4)
+            step_summary_count = len(all_step_summaries)
+            if all_step_summaries:
+                t0 = time.perf_counter(); self.repo.save_step_summaries(task_id, all_step_summaries, batch_size=max(500, self.settings.metrics_batch_size * 4)); stage_timing["db_write_steps_seconds"] = round(time.perf_counter()-t0, 4)
+            del paired_steps, metric_steps, parameter_steps, base_steps, all_step_summaries
+            gc.collect()
 
-            self._progress(task_id, "错误簇预处理与图表数据预计算", 92, task_uuid=task_uuid, message="开始汇总错误簇与首页/图表基础数据", file_count=len(files), cpu_cores=resolved_cores)
-            t0 = time.perf_counter(); cluster_rows = top_error_clusters(all_events, limit=200); stage_timing["error_prep_seconds"] = round(time.perf_counter()-t0, 4)
+            self._progress(task_id, "错误簇预处理与图表数据预计算", 92, task_uuid=task_uuid, message="开始汇总错误簇与首页/图表基础数据", file_count=candidate_file_count, cpu_cores=resolved_cores)
+            t0 = time.perf_counter(); total_errors, cluster_bounds = self._collect_error_stats(all_events); cluster_rows = top_error_clusters(all_events, limit=200); stage_timing["error_prep_seconds"] = round(time.perf_counter()-t0, 4)
             clusters = []
             for row in cluster_rows:
-                matching = [e for e in all_events if e.normalized_signature == row["normalized_signature"]]
-                first_seen = min((e.epoch_ms for e in matching if e.epoch_ms is not None), default=None)
-                last_seen = max((e.epoch_ms for e in matching if e.epoch_ms is not None), default=None)
-                clusters.append(ErrorClusterModel(normalized_signature=row["normalized_signature"], error_family=row["error_family"], severity=row["severity"], representative_message=row["display_signature"], representative_exception=row["exception_type"], component=row["component"], count=row["count"], first_seen_epoch_ms=first_seen, last_seen_epoch_ms=last_seen))
+                signature = row["normalized_signature"]
+                bounds = cluster_bounds.get(signature, {})
+                clusters.append(
+                    {
+                        "normalized_signature": signature,
+                        "error_family": row["error_family"],
+                        "severity": row["severity"],
+                        "representative_message": row["display_signature"],
+                        "representative_exception": row["exception_type"],
+                        "component": row["component"],
+                        "count": row["count"],
+                        "first_seen_epoch_ms": bounds.get("first"),
+                        "last_seen_epoch_ms": bounds.get("last"),
+                    }
+                )
+            cluster_count = len(clusters)
             if clusters:
-                t0 = time.perf_counter(); self.repo.replace_error_clusters(task_id, clusters); stage_timing["db_write_clusters_seconds"] = round(time.perf_counter()-t0, 4)
+                t0 = time.perf_counter(); self.repo.replace_error_clusters(task_id, clusters, batch_size=max(200, self.settings.metrics_batch_size * 2)); stage_timing["db_write_clusters_seconds"] = round(time.perf_counter()-t0, 4)
 
-            total_errors = sum(1 for e in all_events if e.normalized_signature)
-            self.repo.finalize_task(task_id, file_count=len(files), total_events=len(all_events), total_errors=total_errors)
+            self.repo.finalize_task(task_id, file_count=candidate_file_count, total_events=total_event_count, total_errors=total_errors)
             elapsed = round(time.perf_counter() - overall_start, 3)
             stage_timing["total_seconds"] = elapsed
             perf_summary["stage_timings"] = stage_timing
             perf_summary["final_counts"] = {
-                "candidate_files": len(files),
-                "parsed_files": len(parse_results),
-                "total_events": len(all_events),
+                "candidate_files": candidate_file_count,
+                "parsed_files": parsed_file_count,
+                "total_events": total_event_count,
                 "total_errors": total_errors,
-                "step_summaries": len(step_models),
-                "error_clusters": len(clusters),
+                "step_summaries": step_summary_count,
+                "error_clusters": cluster_count,
             }
+            del all_events, cluster_bounds, clusters
+            gc.collect()
             if task_uuid:
                 self.performance.write_summary(task_uuid, perf_summary)
-                task_state_cache.update(task_uuid, status="completed", progress_percent=100, current_stage="已完成", file_count=len(files), message=f"处理完成，用时 {elapsed} 秒", cpu_cores=resolved_cores)
+                task_state_cache.update(task_uuid, status="completed", progress_percent=100, current_stage="已完成", file_count=candidate_file_count, message=f"处理完成，用时 {elapsed} 秒", cpu_cores=resolved_cores)
                 task_state_cache.mark_finished(task_uuid, status="completed")
             self.repo.add_audit_log(task_id, task_uuid, "task_timing", "success", "性能摘要", orjson.dumps(perf_summary).decode("utf-8")[:4000])
         except ArchiveHandlingError as exc:

@@ -4,9 +4,9 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterable
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -62,6 +62,32 @@ class TaskRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    @staticmethod
+    def _iter_chunks(items: Iterable[Any], batch_size: int) -> Iterable[list[Any]]:
+        batch: list[Any] = []
+        for item in items:
+            batch.append(item)
+            if len(batch) >= max(1, int(batch_size)):
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    @staticmethod
+    def _iter_insert_mappings(
+        rows: Iterable[Any],
+        *,
+        task_id: int,
+        field_names: tuple[str, ...],
+    ) -> Iterable[dict[str, Any]]:
+        for row in rows:
+            if isinstance(row, dict):
+                mapping = {key: row.get(key) for key in field_names if key in row}
+            else:
+                mapping = {key: getattr(row, key, None) for key in field_names}
+            mapping["task_id"] = task_id
+            yield mapping
+
     def create_task(self, task_uuid: str, filename: str, stored_path: str) -> UploadTaskModel:
         task = UploadTaskModel(
             task_uuid=task_uuid,
@@ -72,9 +98,19 @@ class TaskRepository:
             current_stage="已上传",
         )
         self.db.add(task)
+        self.db.flush()
+        self.db.add(
+            TaskAuditLogModel(
+                task_id=task.id,
+                task_uuid=task_uuid,
+                action="upload_created",
+                status="success",
+                stage="上传",
+                detail=f"文件: {filename}",
+            )
+        )
         self.db.commit()
         self.db.refresh(task)
-        self.add_audit_log(task.id, task_uuid, "upload_created", "success", "上传", f"文件: {filename}")
         return task
 
     def add_audit_log(
@@ -135,9 +171,18 @@ class TaskRepository:
         if queue_position is not None:
             task.queue_position = queue_position
         task.updated_at = datetime.utcnow()
-        self.db.commit()
         if current_stage or message:
-            self.add_audit_log(task.id, task.task_uuid, "progress_update", "info", current_stage, message)
+            self.db.add(
+                TaskAuditLogModel(
+                    task_id=task.id,
+                    task_uuid=task.task_uuid,
+                    action="progress_update",
+                    status="info",
+                    stage=current_stage,
+                    detail=message,
+                )
+            )
+        self.db.commit()
 
     def finalize_task(self, task_id: int, file_count: int, total_events: int, total_errors: int) -> None:
         task = self.db.get(UploadTaskModel, task_id)
@@ -151,8 +196,17 @@ class TaskRepository:
         task.queue_position = None
         task.current_stage = "已完成"
         task.updated_at = datetime.utcnow()
+        self.db.add(
+            TaskAuditLogModel(
+                task_id=task.id,
+                task_uuid=task.task_uuid,
+                action="task_completed",
+                status="success",
+                stage="完成",
+                detail=f"events={total_events}, errors={total_errors}",
+            )
+        )
         self.db.commit()
-        self.add_audit_log(task.id, task.task_uuid, "task_completed", "success", "完成", f"events={total_events}, errors={total_errors}")
 
     def _fallback_task_select_sql(self, where_clause: str = "", limit_clause: str = "") -> str:
         return f"""
@@ -202,24 +256,33 @@ class TaskRepository:
                 return _row_to_task_like(rows[0]) if rows else None
             raise
 
-    def save_events(self, task_id: int, events: list[NormalizedEventModel]) -> None:
-        for e in events:
-            e.task_id = task_id
-        self.db.add_all(events)
+    def save_events(self, task_id: int, events: Iterable[NormalizedEventModel | dict[str, Any]], batch_size: int = 1000) -> None:
+        field_names = tuple(column.name for column in NormalizedEventModel.__table__.columns if column.name != "id")
+        for batch in self._iter_chunks(
+            self._iter_insert_mappings(events, task_id=task_id, field_names=field_names),
+            batch_size,
+        ):
+            self.db.execute(insert(NormalizedEventModel), batch)
         self.db.commit()
 
-    def save_step_summaries(self, task_id: int, steps: list[StepSummaryModel]) -> None:
-        self.db.query(StepSummaryModel).filter(StepSummaryModel.task_id == task_id).delete()
-        for s in steps:
-            s.task_id = task_id
-        self.db.add_all(steps)
+    def save_step_summaries(self, task_id: int, steps: Iterable[StepSummaryModel | dict[str, Any]], batch_size: int = 1000) -> None:
+        self.db.execute(delete(StepSummaryModel).where(StepSummaryModel.task_id == task_id))
+        field_names = tuple(column.name for column in StepSummaryModel.__table__.columns if column.name != "id")
+        for batch in self._iter_chunks(
+            self._iter_insert_mappings(steps, task_id=task_id, field_names=field_names),
+            batch_size,
+        ):
+            self.db.execute(insert(StepSummaryModel), batch)
         self.db.commit()
 
-    def replace_error_clusters(self, task_id: int, rows: list[ErrorClusterModel]) -> None:
-        self.db.query(ErrorClusterModel).filter(ErrorClusterModel.task_id == task_id).delete()
-        for row in rows:
-            row.task_id = task_id
-        self.db.add_all(rows)
+    def replace_error_clusters(self, task_id: int, rows: Iterable[ErrorClusterModel | dict[str, Any]], batch_size: int = 500) -> None:
+        self.db.execute(delete(ErrorClusterModel).where(ErrorClusterModel.task_id == task_id))
+        field_names = tuple(column.name for column in ErrorClusterModel.__table__.columns if column.name != "id")
+        for batch in self._iter_chunks(
+            self._iter_insert_mappings(rows, task_id=task_id, field_names=field_names),
+            batch_size,
+        ):
+            self.db.execute(insert(ErrorClusterModel), batch)
         self.db.commit()
 
     def save_llm_result(self, row: LLMAnalysisResultModel) -> None:

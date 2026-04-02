@@ -288,7 +288,72 @@ pytest -q
 
 当前仓库已验证通过：
 
-- `43 passed`
+- `59 passed`
+
+## 后端性能优化（2026-04）
+
+本次后端优化严格遵循以下原则：
+
+- 不改变接口、最终统计结果、图表数据内容、数据精度与前端展示质量
+- 不修改 `.env`、部署环境变量或前端调用方式
+- 优先适配低 CPU 核数、小内存服务器，降低峰值内存和 SQLite 争用
+
+本次已落地的优化点：
+
+- `app/services/ingestion_service.py`
+  - 解析后事件入库改为分批映射插入，避免一次性构造大量 ORM 对象
+  - `StepSummary` / `ErrorCluster` 同样改为分批写库，降低峰值内存
+  - 错误簇首末时间改为单次遍历统计，避免 Top N 错误簇逐个全表扫描
+  - 在大列表完成阶段性用途后主动释放引用并触发 `gc.collect()`
+- `app/repositories/task_repository.py`
+  - `save_events` / `save_step_summaries` / `replace_error_clusters` 改为批量 `insert`
+  - 任务创建、进度更新、完成审计合并事务，减少 SQLite 双重提交
+- `app/services/query_service.py`
+  - 列表查询改为按需列投影，避免把整行 ORM 对象全部加载进内存
+  - `cycle summary` 与 `substep-cycle` 聚合下推到 SQL，减少 Python 端全量聚合
+  - 时间轴错误点、错误趋势、错误簇查询改为轻量字段读取
+  - `operational metrics`、温控校验改为单次遍历分类，减少重复扫描
+- `app/services/cycle_service.py`
+  - `summarize_cycles` 改为单次聚合，不再为每个 cycle 保存整组中间列表
+  - 成对匹配队列改为 `deque`，将 `pop(0)` 的线性开销降为常数开销
+  - `row_scan_metric` 聚合仅保留求均值所需统计量和前 20 条样本，减少中间对象
+- `app/detectors/error_detection.py`
+  - 错误标注在传入 `list` 时原地更新，避免额外复制事件列表
+- `app/services/export_service.py`
+  - 报表构建改为复用同一个 `QueryService` 顺序生成，减少低核机器上的多线程争抢与重复缓存扫描
+
+低资源服务器收益说明：
+
+- 峰值内存下降：主要来自“批量 ORM 对象构造”改为“分批映射写入”
+- CPU 下降：主要来自 SQL 聚合下推、单次遍历统计、`deque` 配对
+- I/O 压力下降：主要来自 SQLite 提交次数减少与导出阶段并发收敛
+
+## 同步建议
+
+为了保持 GitHub 在线分支、本地代码和服务器代码一致，建议使用以下流程：
+
+```powershell
+git checkout <branch>
+git pull --ff-only origin <branch>
+pytest -q
+git push origin <branch>
+```
+
+服务器端仅同步代码，不修改环境配置：
+
+```bash
+ssh ubuntu@<server>
+cd <project-dir>
+git fetch --all
+git checkout <branch>
+git pull --ff-only origin <branch>
+```
+
+说明：
+
+- 保持服务器 `.env` 原样，不在服务器端修改环境变量配置
+- 先在本地跑 `pytest -q`，确认通过后再推送和拉取
+- 若服务器使用 Docker 或 systemd，请在拉取后按现有部署方式重启服务，不改运行参数
 
 ## 安全说明
 
