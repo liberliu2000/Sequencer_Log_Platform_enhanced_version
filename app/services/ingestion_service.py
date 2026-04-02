@@ -30,6 +30,7 @@ from app.services.pipeline_parallel import (
     prescan_file,
     resolve_parallel_workers,
 )
+from app.services.streaming_aggregation import StreamingAggregationCoordinator
 from app.services.task_state_cache import task_state_cache
 from app.utils.files import ArchiveHandlingError, iter_supported_files, unpack_archive
 
@@ -305,49 +306,68 @@ class IngestionService:
             del prescanned
             gc.collect()
 
-            t0 = time.perf_counter(); all_events = self._load_events_from_intermediate(parse_results, task_id, task_uuid or "", resolved_cores); stage_timing["normalize_merge_seconds"] = round(time.perf_counter()-t0, 4)
-            total_event_count = len(all_events)
+            aggregator = StreamingAggregationCoordinator(self.db, task_id, self.settings)
+            aggregator.clear_existing_outputs()
+            t0 = time.perf_counter()
+            merge_result = aggregator.merge_intermediate_results(
+                parse_results,
+                progress_callback=lambda stage, percent, message: self._progress(
+                    task_id,
+                    stage,
+                    percent,
+                    task_uuid=task_uuid,
+                    message=message,
+                    file_count=candidate_file_count,
+                    cpu_cores=resolved_cores,
+                ),
+            )
+            stage_timing["normalize_merge_seconds"] = round(time.perf_counter()-t0, 4)
+            total_event_count = int(merge_result["total_events"])
             perf_summary["total_events_before_postprocess"] = total_event_count
             del parse_results
             gc.collect()
 
             self._progress(task_id, "cycle 推断与错误归一化", 76, task_uuid=task_uuid, message=f"已生成 {total_event_count} 条标准事件，开始跨文件关联", file_count=candidate_file_count, cpu_cores=resolved_cores)
-            t0 = time.perf_counter(); all_events = infer_missing_cycles(all_events); all_events = annotate_errors(all_events); stage_timing["postprocess_seconds"] = round(time.perf_counter()-t0, 4)
-
             t0 = time.perf_counter()
-            self.repo.save_events(task_id, self._iter_event_rows(all_events), batch_size=max(500, self.settings.metrics_batch_size * 4))
-            stage_timing["db_write_events_seconds"] = round(time.perf_counter()-t0, 4)
+            cycle_context = aggregator.build_cycle_context(
+                total_events=total_event_count,
+                progress_callback=lambda stage, percent, message: self._progress(
+                    task_id,
+                    stage,
+                    percent,
+                    task_uuid=task_uuid,
+                    message=message,
+                    file_count=candidate_file_count,
+                    cpu_cores=resolved_cores,
+                ),
+            )
+            stage_timing["cycle_context_seconds"] = round(time.perf_counter()-t0, 4)
 
             self._progress(task_id, "参数统计与 metrics 聚合", 84, task_uuid=task_uuid, message="开始 workflow 配对、metrics 聚合与各 cycle 参数统计", file_count=candidate_file_count, cpu_cores=resolved_cores)
-            t0 = time.perf_counter(); paired_steps = pair_start_end(all_events); metric_steps = aggregate_metric_steps(all_events); base_steps = paired_steps + metric_steps; parameter_steps = build_parameter_summaries(all_events, base_steps); all_step_summaries = base_steps + parameter_steps; stage_timing["aggregate_seconds"] = round(time.perf_counter()-t0, 4)
-            step_summary_count = len(all_step_summaries)
-            if all_step_summaries:
-                t0 = time.perf_counter(); self.repo.save_step_summaries(task_id, all_step_summaries, batch_size=max(500, self.settings.metrics_batch_size * 4)); stage_timing["db_write_steps_seconds"] = round(time.perf_counter()-t0, 4)
-            del paired_steps, metric_steps, parameter_steps, base_steps, all_step_summaries
+            t0 = time.perf_counter()
+            postprocess_result = aggregator.postprocess_and_aggregate(
+                cycle_context,
+                total_events=total_event_count,
+                progress_callback=lambda stage, percent, message: self._progress(
+                    task_id,
+                    stage,
+                    percent,
+                    task_uuid=task_uuid,
+                    message=message,
+                    file_count=candidate_file_count,
+                    cpu_cores=resolved_cores,
+                ),
+            )
+            stage_timing["postprocess_seconds"] = round(time.perf_counter()-t0, 4)
+            stage_timing.update(postprocess_result["timings"])
+            perf_summary["memory_guard"] = postprocess_result["memory_guard"]
+            total_errors = int(postprocess_result["total_errors"])
+            step_summary_count = int(postprocess_result["step_summary_count"])
+            cluster_count = int(postprocess_result["cluster_count"])
             gc.collect()
 
             self._progress(task_id, "错误簇预处理与图表数据预计算", 92, task_uuid=task_uuid, message="开始汇总错误簇与首页/图表基础数据", file_count=candidate_file_count, cpu_cores=resolved_cores)
-            t0 = time.perf_counter(); total_errors, cluster_bounds = self._collect_error_stats(all_events); cluster_rows = top_error_clusters(all_events, limit=200); stage_timing["error_prep_seconds"] = round(time.perf_counter()-t0, 4)
-            clusters = []
-            for row in cluster_rows:
-                signature = row["normalized_signature"]
-                bounds = cluster_bounds.get(signature, {})
-                clusters.append(
-                    {
-                        "normalized_signature": signature,
-                        "error_family": row["error_family"],
-                        "severity": row["severity"],
-                        "representative_message": row["display_signature"],
-                        "representative_exception": row["exception_type"],
-                        "component": row["component"],
-                        "count": row["count"],
-                        "first_seen_epoch_ms": bounds.get("first"),
-                        "last_seen_epoch_ms": bounds.get("last"),
-                    }
-                )
-            cluster_count = len(clusters)
-            if clusters:
-                t0 = time.perf_counter(); self.repo.replace_error_clusters(task_id, clusters, batch_size=max(200, self.settings.metrics_batch_size * 2)); stage_timing["db_write_clusters_seconds"] = round(time.perf_counter()-t0, 4)
+            stage_timing.setdefault("error_prep_seconds", 0.0)
 
             self.repo.finalize_task(task_id, file_count=candidate_file_count, total_events=total_event_count, total_errors=total_errors)
             elapsed = round(time.perf_counter() - overall_start, 3)
@@ -361,7 +381,6 @@ class IngestionService:
                 "step_summaries": step_summary_count,
                 "error_clusters": cluster_count,
             }
-            del all_events, cluster_bounds, clusters
             gc.collect()
             if task_uuid:
                 self.performance.write_summary(task_uuid, perf_summary)
