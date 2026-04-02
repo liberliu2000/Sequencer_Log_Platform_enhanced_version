@@ -24,6 +24,12 @@ def _overlap_score(a: set[str], b: set[str]) -> float:
     return len(a & b) / max(1, len(a | b))
 
 
+def _error_code_prefix(value: str | None) -> str:
+    text = str(value or "").strip().upper().replace("-", "")
+    prefix = "".join(ch for ch in text if ch.isalpha())
+    return prefix[:2]
+
+
 class CaseRetriever:
     def __init__(self, db: Session):
         self.db = db
@@ -104,7 +110,7 @@ class CaseRetriever:
         if error_code and row_error_code:
             if row_error_code == error_code:
                 score += 0.25
-            elif row_error_code.split("-")[0] == error_code.split("-")[0]:
+            elif _error_code_prefix(row_error_code) and _error_code_prefix(row_error_code) == _error_code_prefix(error_code):
                 score += 0.12
 
         if module and str(row.get("module") or "") == module:

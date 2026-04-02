@@ -7,8 +7,8 @@ services:
     ports:
       - "8000:8000"
       - "8501:8501"
-    env_file:
-      - .env
     volumes:
+      - ./.env:/workspace/.env
+      - ./.env.example:/workspace/.env.example:ro
       - ./data:/workspace/data
       - ./config:/workspace/config

@@ -9,6 +9,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.core.runtime import ensure_runtime_layout
 
 BASE_DIR = ensure_runtime_layout()
+SQLITE_URL_PREFIX = "sqlite:///"
+
+
+def _resolve_runtime_path(value: str | Path) -> str:
+    path = Path(str(value))
+    if path.is_absolute():
+        return str(path)
+    return str((BASE_DIR / path).resolve())
 
 
 class Settings(BaseSettings):
@@ -63,6 +71,9 @@ class Settings(BaseSettings):
     lightweight_mode: bool = True
     ui_auto_refresh_seconds: int = 5
     performance_log_enabled: bool = True
+    system_memory_soft_limit_percent: int = 88
+    system_memory_soft_reserve_mb: int = 2048
+    system_memory_guard_wait_seconds: int = 5
 
     default_time_rounding: Literal["truncate", "round"] = "truncate"
     default_timezone: str = "Asia/Shanghai"
@@ -94,6 +105,25 @@ class Settings(BaseSettings):
     cors_allow_origins: str = "*"
     task_queue_workers: int = 2
 
+    auth_session_hours: int = 12
+    auth_max_failed_logins: int = 5
+    auth_lock_minutes: int = 15
+    auth_verification_code_minutes: int = 10
+    auth_verification_resend_seconds: int = 60
+    auth_verification_max_daily_sends: int = 10
+    auth_default_admin_username: str = "Yanbo"
+    auth_default_admin_password: str = "MGItech2026"
+
+    mail_delivery_mode: Literal["smtp", "console"] = "console"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = "noreply@example.com"
+    smtp_from_name: str = "Sequencer Log Platform"
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
     @field_validator("debug", mode="before")
     @classmethod
     def _coerce_debug(cls, value):
@@ -104,6 +134,32 @@ class Settings(BaseSettings):
             if text in {"debug", "dev", "true", "1", "yes", "on"}:
                 return True
         return value
+
+    @field_validator(
+        "data_dir",
+        "upload_dir",
+        "export_dir",
+        "log_dir",
+        "intermediate_cache_dir",
+        "temp_dir",
+        mode="before",
+    )
+    @classmethod
+    def _resolve_relative_runtime_dirs(cls, value):
+        if value in (None, ""):
+            return value
+        return _resolve_runtime_path(value)
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _resolve_relative_sqlite_database_url(cls, value):
+        text = str(value or "").strip()
+        if not text.startswith(SQLITE_URL_PREFIX):
+            return value
+        db_path = Path(text[len(SQLITE_URL_PREFIX) :])
+        if db_path.is_absolute():
+            return text
+        return f"{SQLITE_URL_PREFIX}{(BASE_DIR / db_path).resolve().as_posix()}"
 
     @property
     def thresholds_path(self) -> Path:

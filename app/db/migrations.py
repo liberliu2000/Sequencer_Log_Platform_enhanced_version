@@ -43,6 +43,21 @@ def _create_indexes_if_possible(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_task_audit_logs_task_uuid ON task_audit_logs(task_uuid)",
         "CREATE INDEX IF NOT EXISTS idx_task_audit_logs_created_at ON task_audit_logs(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_llm_results_task_sig ON llm_analysis_results(task_id, normalized_signature)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_records_review_status ON solution_records(review_status)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_records_submitter ON solution_records(submitter)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_records_error_name ON solution_records(error_name)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_records_created_updated ON solution_records(created_at, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_task_links_task_uuid ON solution_task_links(task_uuid)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_task_links_signature ON solution_task_links(normalized_signature)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_module_links_module_key ON solution_module_links(module_key)",
+        "CREATE INDEX IF NOT EXISTS idx_solution_keyword_keyword ON solution_message_keywords(keyword)",
+        "CREATE INDEX IF NOT EXISTS idx_task_clusters_status ON task_clusters(review_status)",
+        "CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)",
+        "CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users(email_verified)",
+        "CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_email_codes_expires ON email_verification_codes(expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_registration_challenges_email ON registration_challenges(email)",
+        "CREATE INDEX IF NOT EXISTS idx_registration_challenges_verified ON registration_challenges(verified_at)",
     ]
     with engine.begin() as conn:
         for stmt in stmts:
@@ -50,6 +65,69 @@ def _create_indexes_if_possible(engine: Engine) -> None:
                 conn.execute(text(stmt))
             except Exception:
                 pass
+
+
+def _table_row_count(conn, table_name: str) -> int:
+    try:
+        return int(conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0)
+    except Exception:
+        return 0
+
+
+def _create_solution_search_fts(engine: Engine) -> dict[str, Any]:
+    if engine.dialect.name.lower() != "sqlite":
+        return {"exists": False, "reindexed": False, "solution_count": 0, "fts_count": 0}
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        existed_before = _has_table(inspector, "solution_search_fts")
+        try:
+            conn.execute(
+                text(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS solution_search_fts
+                    USING fts5(solution_id UNINDEXED, search_text)
+                    """
+                )
+            )
+        except Exception:
+            return {"exists": False, "reindexed": False, "solution_count": 0, "fts_count": 0}
+
+        solution_count = _table_row_count(conn, "solution_records")
+        fts_count = _table_row_count(conn, "solution_search_fts")
+        should_reindex = (not existed_before) or (solution_count != fts_count)
+
+        if should_reindex:
+            conn.execute(text("DELETE FROM solution_search_fts"))
+            if solution_count > 0:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO solution_search_fts(solution_id, search_text)
+                        SELECT
+                            id,
+                            trim(
+                                coalesce(error_name, '') || ' ' ||
+                                coalesce(error_code, '') || ' ' ||
+                                coalesce(module, '') || ' ' ||
+                                coalesce(message, '') || ' ' ||
+                                coalesce(trigger_scenario, '') || ' ' ||
+                                coalesce(root_cause_analysis, '') || ' ' ||
+                                coalesce(verified_solution, '') || ' ' ||
+                                coalesce(submitter, '') || ' ' ||
+                                coalesce(review_status, '')
+                            )
+                        FROM solution_records
+                        """
+                    )
+                )
+            fts_count = _table_row_count(conn, "solution_search_fts")
+
+        return {
+            "exists": True,
+            "reindexed": should_reindex,
+            "solution_count": solution_count,
+            "fts_count": fts_count,
+        }
 
 
 def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
@@ -109,5 +187,10 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
             result["migrated"] = True
 
     _create_indexes_if_possible(engine)
+    fts_status = _create_solution_search_fts(engine)
+    if fts_status.get("exists"):
+        result["fts"] = fts_status
+        if fts_status.get("reindexed"):
+            result["migrated"] = True
     result["notes"].append("SQLite 轻量迁移已检查完成。")
     return result

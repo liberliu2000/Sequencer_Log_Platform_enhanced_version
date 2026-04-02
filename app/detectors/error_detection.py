@@ -69,14 +69,16 @@ def classify_error_family(
 
 
 def annotate_errors(events: Iterable[NormalizedEvent]) -> list[NormalizedEvent]:
-    result = []
-    for event in events:
+    if isinstance(events, list):
+        target = events
+    else:
+        target = list(events)
+    for event in target:
         signature, family, severity = normalize_error_signature(event)
         event.normalized_signature = signature
         event.error_family = family
         event.severity = severity
-        result.append(event)
-    return result
+    return target
 
 
 def top_error_clusters(events: list[NormalizedEvent], limit: int = 20) -> list[dict]:

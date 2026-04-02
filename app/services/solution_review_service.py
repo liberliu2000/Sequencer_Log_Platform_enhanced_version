@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.llm.client import LLMClient
@@ -33,22 +33,8 @@ class SolutionReviewService:
         payload: dict[str, Any],
         *,
         attachments: list[dict[str, Any]] | None = None,
-        auto_store_if_approved: bool = True,
     ) -> dict[str, Any]:
-        validation_errors = self._basic_validate(payload)
-        if validation_errors:
-            review = SolutionReviewResult(
-                review_status="needs_revision",
-                review_reason="基础校验未通过",
-                revision_suggestions=validation_errors,
-                completeness_score=0.35,
-                reusability_score=0.25,
-                clarity_score=0.3,
-                llm_used=False,
-            )
-        else:
-            review = self._review_with_llm(payload)
-
+        advisory = self._review_with_llm(payload) if not self._basic_validate(payload) else self._heuristic_review(payload)
         now = datetime.utcnow()
         row = SolutionReviewRecordModel(
             task_uuid=str(payload.get("task_uuid") or "").strip() or None,
@@ -58,20 +44,27 @@ class SolutionReviewService:
             submission_type=str(payload.get("submission_type") or "solution_record"),
             proposed_payload=json.dumps(payload, ensure_ascii=False),
             attachments_json=json.dumps(attachments or [], ensure_ascii=False),
-            review_status=review.review_status,
-            review_reason=review.review_reason,
-            revision_suggestions=json.dumps(review.revision_suggestions, ensure_ascii=False),
-            completeness_score=review.completeness_score,
-            reusability_score=review.reusability_score,
-            clarity_score=review.clarity_score,
-            review_payload=json.dumps(review.model_dump(), ensure_ascii=False),
+            review_status="pending_review",
+            review_reason="等待人工审核",
+            revision_suggestions=json.dumps(advisory.revision_suggestions, ensure_ascii=False),
+            completeness_score=advisory.completeness_score,
+            reusability_score=advisory.reusability_score,
+            clarity_score=advisory.clarity_score,
+            review_payload=json.dumps(
+                {
+                    "advisory_review_status": advisory.review_status,
+                    "advisory_review_reason": advisory.review_reason,
+                    "advisory_revision_suggestions": advisory.revision_suggestions,
+                    "llm_used": advisory.llm_used,
+                },
+                ensure_ascii=False,
+            ),
             review_history_json=json.dumps(
                 [
                     {
-                        "review_status": review.review_status,
-                        "review_reason": review.review_reason,
-                        "revision_suggestions": review.revision_suggestions,
-                        "reviewed_by": "llm" if review.llm_used else "heuristic",
+                        "review_status": "pending_review",
+                        "review_reason": "等待人工审核",
+                        "reviewed_by": "system",
                         "reviewed_at": now.isoformat(),
                     }
                 ],
@@ -84,20 +77,21 @@ class SolutionReviewService:
         self.db.add(row)
         self.db.commit()
         self.db.refresh(row)
-
-        if review.review_status == "approved" and auto_store_if_approved:
-            created = self.repository.create_record(payload)
-            row.linked_solution_id = created["id"]
-            row.updated_at = datetime.utcnow()
-            self.db.commit()
-            self.db.refresh(row)
-
         return self.serialize(row)
 
-    def list_reviews(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_reviews(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        viewer_username: str | None = None,
+        viewer_is_reviewer: bool = False,
+    ) -> list[dict[str, Any]]:
         stmt = select(SolutionReviewRecordModel).order_by(SolutionReviewRecordModel.updated_at.desc(), SolutionReviewRecordModel.id.desc())
         if status:
             stmt = stmt.where(SolutionReviewRecordModel.review_status == status)
+        if not viewer_is_reviewer and viewer_username:
+            stmt = stmt.where(or_(SolutionReviewRecordModel.created_by == viewer_username, SolutionReviewRecordModel.review_status == "approved"))
         rows = list(self.db.scalars(stmt.limit(max(1, min(limit, 500)))))
         return [self.serialize(row) for row in rows]
 
@@ -108,7 +102,6 @@ class SolutionReviewService:
         review_status: str,
         reviewer: str | None,
         notes: str | None,
-        auto_store_if_approved: bool = True,
     ) -> dict[str, Any]:
         row = self.db.get(SolutionReviewRecordModel, review_id)
         if not row:
@@ -133,15 +126,20 @@ class SolutionReviewService:
         row.updated_at = datetime.utcnow()
 
         payload = _json_load(row.proposed_payload, {})
-        if review_status == "approved" and auto_store_if_approved and not row.linked_solution_id:
-            created = self.repository.create_record(payload)
-            row.linked_solution_id = created["id"]
+        if review_status == "approved":
+            if row.linked_solution_id:
+                updated = self.repository.update_record(row.linked_solution_id, {**payload, "review_status": "approved"}, actor=reviewer)
+                row.linked_solution_id = updated["id"]
+            else:
+                created = self.repository.create_record({**payload, "review_status": "approved"}, actor=reviewer)
+                row.linked_solution_id = created["id"]
 
         self.db.commit()
         self.db.refresh(row)
         return self.serialize(row)
 
     def serialize(self, row: SolutionReviewRecordModel) -> dict[str, Any]:
+        review_payload = _json_load(row.review_payload, {})
         return {
             "id": row.id,
             "task_uuid": row.task_uuid,
@@ -157,7 +155,9 @@ class SolutionReviewService:
             "completeness_score": row.completeness_score,
             "reusability_score": row.reusability_score,
             "clarity_score": row.clarity_score,
-            "review_payload": _json_load(row.review_payload, {}),
+            "review_payload": review_payload,
+            "advisory_review_status": review_payload.get("advisory_review_status"),
+            "advisory_review_reason": review_payload.get("advisory_review_reason"),
             "review_history": _json_load(row.review_history_json, []),
             "reviewed_by": row.reviewed_by,
             "linked_solution_id": row.linked_solution_id,
@@ -175,15 +175,15 @@ class SolutionReviewService:
         if not str(payload.get("message") or "").strip() and not str(payload.get("normalized_signature") or "").strip():
             errors.append("message 或 normalized_signature 至少填写一项")
         try:
-            self.repository.validate_case_payload(payload)
+            self.repository.validate_case_payload({**payload, "review_status": "approved"})
         except Exception as exc:
             errors.append(str(exc))
         if str(payload.get("message") or "").strip() and len(str(payload.get("message") or "").strip()) < 6:
-            errors.append("message 过于模糊，建议补充关键异常内容")
+            errors.append("message 过于简略，建议补充关键错误内容")
         if not str(payload.get("root_cause_analysis") or "").strip():
-            errors.append("root_cause_analysis 为空，建议补充根因描述")
+            errors.append("建议补充 root_cause_analysis")
         if not str(payload.get("verified_solution") or "").strip():
-            errors.append("verified_solution 为空，建议补充已验证解决方案")
+            errors.append("建议补充 verified_solution")
         return list(dict.fromkeys(errors))
 
     def _review_with_llm(self, payload: dict[str, Any]) -> SolutionReviewResult:
@@ -193,12 +193,11 @@ class SolutionReviewService:
 
         fallback = heuristic.model_dump()
         system_prompt = (
-            "你是错误案例库审核助手。只返回 JSON，字段包括 "
+            "你是方案库内容预审助手。只返回 JSON，字段包括："
             '{"review_status":"","review_reason":"","revision_suggestions":[],"completeness_score":0.0,"reusability_score":0.0,"clarity_score":0.0,"llm_used":true}'
         )
         user_prompt = (
-            "请审核以下错误案例是否适合进入解决方案数据库。"
-            "需要判断描述是否清晰、是否指向具体问题、是否具备可复用性、是否存在冲突或歧义、解决方案是否可操作。"
+            "请对以下方案进行预审，只能返回 advisory 结果，不做最终审批。"
             "review_status 只能是 approved / needs_revision / rejected。\n"
             f"payload={json.dumps(payload, ensure_ascii=False)}"
         )
@@ -237,9 +236,9 @@ class SolutionReviewService:
         if not scenario:
             suggestions.append("补充触发场景、前置条件和复现步骤")
         if len(root_cause) < 8:
-            suggestions.append("根因分析需要更具体，最好指向具体模块/函数/配置")
+            suggestions.append("根因分析需要更具体，最好指向模块、函数或配置")
         if len(solution) < 8:
-            suggestions.append("解决方案需要更可操作，建议写出修复动作和验证结果")
+            suggestions.append("解决方案需要更可操作，建议写出修复动作与验证结果")
         if not payload.get("module"):
             suggestions.append("需要明确所属模块")
 
@@ -249,9 +248,9 @@ class SolutionReviewService:
             status = "rejected"
 
         reason = {
-            "approved": "信息较完整，具备复用价值，可入库",
-            "needs_revision": "存在信息缺口，建议补充后再入库",
-            "rejected": "信息过于缺失，暂不建议入库",
+            "approved": "信息较完整，具备复用价值",
+            "needs_revision": "存在信息缺口，建议补充后再审核",
+            "rejected": "信息缺失较多，暂不建议入库",
         }[status]
         return SolutionReviewResult(
             review_status=status,

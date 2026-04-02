@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import get_current_user, require_admin_user, require_reviewer_user
 from app.core.settings import get_settings
 from app.db.session import get_db
 from app.repositories.task_repository import TaskRepository
@@ -25,10 +26,13 @@ from app.services.solution_repository import SolutionRepositoryService
 from app.services.solution_review_service import SolutionReviewService
 from app.services.case_retriever import CaseRetriever
 from app.services.analysis_depth_manager import AnalysisDepthManager
+from app.services.solution_catalog_service import SolutionCatalogService
 from app.services.task_queue import queue
 from app.services.task_state_cache import task_state_cache
 from app.services.feedback_service import FeedbackService
 from app.services.env_file_service import EnvFileService
+from app.services.error_code_service import ErrorCodeService
+from app.services.system_runtime_service import SystemRuntimeService
 from app.parsers.unknown_log_handler import UnknownLogHandler
 
 router = APIRouter()
@@ -181,10 +185,39 @@ def health():
     return {'status': 'ok', 'queue_pending': len(queue.pending), 'pipeline_stages': PIPELINE_STAGE_PLAN}
 
 
+@router.get('/system/runtime')
+def system_runtime(current_user: dict = Depends(get_current_user)):
+    snapshot = SystemRuntimeService().current_snapshot()
+    snapshot['current_user'] = {
+        'username': current_user.get('username'),
+        'is_admin': bool(current_user.get('is_admin')),
+    }
+    return snapshot
+
+
+@router.post('/admin/system/runtime-policy')
+def update_system_runtime_policy(
+    payload: dict,
+    current_user: dict = Depends(require_admin_user),
+):
+    try:
+        return {
+            'status': 'ok',
+            'item': SystemRuntimeService().update_memory_policy(
+                memory_soft_limit_percent=payload.get('memory_soft_limit_percent'),
+                memory_soft_reserve_mb=payload.get('memory_soft_reserve_mb'),
+                actor=str(current_user.get('username') or 'admin'),
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post('/tasks/upload', response_model=UploadTaskResponse)
 async def upload_logs(files: list[UploadFile] = File(...), cpu_cores: int = Form(default=1), db: Session = Depends(get_db)):
     settings = get_settings()
     repo = TaskRepository(db)
+    runtime_service = SystemRuntimeService()
     task_uuid = uuid.uuid4().hex
     batch_dir = Path(settings.upload_dir) / task_uuid
     batch_dir.mkdir(parents=True, exist_ok=True)
@@ -211,7 +244,11 @@ async def upload_logs(files: list[UploadFile] = File(...), cpu_cores: int = Form
     position = queue.submit(task_uuid, lambda: IngestionService.process_task_by_uuid(task_uuid, cpu_cores=cpu_cores))
     repo.update_task_progress(task.id, queue_position=position)
     task_state_cache.update(task_uuid, status='queued', current_stage='等待异步任务队列调度', queue_position=position, file_count=saved_count, message=f'已进入队列，第 {position} 位', cpu_cores=cpu_cores)
-    return UploadTaskResponse(task_uuid=task_uuid, status='queued', message=f'任务已提交，前方排队 {max(position - 1, 0)} 个', file_count=saved_count, filename=display_name, total_events=0, total_errors=0, progress_percent=0, current_stage='已上传，等待处理', queue_position=position, cpu_cores=cpu_cores)
+    guard = runtime_service.dispatch_guard()
+    message = f'任务已提交，前方排队 {max(position - 1, 0)} 个'
+    if guard.get("blocked"):
+        message = f'{message}；当前内存压力较高，新任务会在资源回落后自动启动。'
+    return UploadTaskResponse(task_uuid=task_uuid, status='queued', message=message, file_count=saved_count, filename=display_name, total_events=0, total_errors=0, progress_percent=0, current_stage='已上传，等待处理', queue_position=position, cpu_cores=cpu_cores)
 
 
 @router.get('/tasks')
@@ -758,12 +795,48 @@ def active_learning_rule_suggestion_file(filename: str):
     return {'filename': path.name, 'content': path.read_text(encoding='utf-8')}
 
 @router.get('/solution-repository/config')
-def solution_repository_config():
+def solution_repository_config(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    catalog = SolutionCatalogService(db)
     repo = ConfigService().get_all().get('solution_repository', {})
     return {
         'module_tree': repo.get('module_tree', []),
         'module_prefixes': repo.get('module_prefixes', {}),
+        'modules': catalog.list_modules(active_only=True),
+        'task_clusters': catalog.list_task_clusters(include_pending=bool(current_user.get("is_reviewer") or current_user.get("is_admin"))),
+        'fts_enabled': SolutionRepositoryService(db).fts_enabled(),
         'analysis_depths': AnalysisDepthManager().list_strategies(),
+    }
+
+
+@router.get('/module-prefixes')
+def list_module_prefixes(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    catalog = SolutionCatalogService(db)
+    items = catalog.list_modules(active_only=True)
+    return {
+        'items': items,
+        'total': len(items),
+        'module_prefixes': {item['module_key']: item['prefix'] for item in items},
+        'current_user': current_user,
+    }
+
+
+@router.post('/error-code/generate')
+def generate_error_code(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    module_value = str(payload.get('module') or payload.get('module_key') or payload.get('prefix') or '').strip()
+    if not module_value:
+        raise HTTPException(status_code=400, detail='module is required')
+    try:
+        module_row = SolutionCatalogService(db).resolve_module(module_value)
+        error_code = ErrorCodeService(db).allocate(module_row.prefix)
+        db.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        'status': 'ok',
+        'module': module_row.module_key,
+        'prefix': module_row.prefix,
+        'error_code': error_code,
+        'current_user': current_user,
     }
 
 
@@ -772,43 +845,65 @@ def list_solution_records(
     module: str | None = None,
     submodule: str | None = None,
     error_code: str | None = None,
+    error_name: str | None = None,
     message: str | None = None,
+    message_keyword: str | None = None,
     normalized_signature: str | None = None,
     trigger_scenario: str | None = None,
+    task_cluster: str | None = None,
+    submitter: str | None = None,
     reusable: bool | None = None,
     review_status: str | None = None,
     search: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     items = SolutionRepositoryService(db).list_records(
         module=module,
         submodule=submodule,
         error_code=error_code,
+        error_name=error_name,
         message=message,
+        message_keyword=message_keyword,
         normalized_signature=normalized_signature,
         trigger_scenario=trigger_scenario,
+        task_cluster=task_cluster,
+        submitter=submitter,
         reusable=reusable,
         review_status=review_status,
         search=search,
+        created_from=created_from,
+        created_to=created_to,
+        updated_from=updated_from,
+        updated_to=updated_to,
+        viewer_username=str(current_user.get("username") or ""),
+        viewer_is_reviewer=bool(current_user.get("is_reviewer") or current_user.get("is_admin")),
         limit=limit,
     )
     return {'items': items, 'total': len(items)}
 
 
 @router.post('/solution-repository/records')
-def create_solution_record(payload: dict, db: Session = Depends(get_db)):
+def create_solution_record(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_reviewer_user)):
     try:
-        item = SolutionRepositoryService(db).create_record(payload)
+        item = SolutionRepositoryService(db).create_record(
+            {**payload, 'submitter': payload.get('submitter') or current_user.get('username'), 'review_status': 'approved'},
+            actor=str(current_user.get("username") or "reviewer"),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {'status': 'ok', 'item': item}
 
 
 @router.put('/solution-repository/records/{record_id}')
-def update_solution_record(record_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_solution_record(record_id: int, payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_reviewer_user)):
     try:
-        item = SolutionRepositoryService(db).update_record(record_id, payload)
+        item = SolutionRepositoryService(db).update_record(record_id, payload, actor=str(current_user.get("username") or "reviewer"))
     except KeyError:
         raise HTTPException(status_code=404, detail='solution record not found')
     except ValueError as exc:
@@ -817,19 +912,27 @@ def update_solution_record(record_id: int, payload: dict, db: Session = Depends(
 
 
 @router.get('/solution-reviews')
-def list_solution_reviews(status: str | None = None, limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)):
-    items = SolutionReviewService(db).list_reviews(status=status, limit=limit)
+def list_solution_reviews(status: str | None = None, limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    items = SolutionReviewService(db).list_reviews(
+        status=status,
+        limit=limit,
+        viewer_username=str(current_user.get("username") or ""),
+        viewer_is_reviewer=bool(current_user.get("is_reviewer") or current_user.get("is_admin")),
+    )
     return {'items': items, 'total': len(items)}
 
 
 @router.post('/solution-reviews')
-def create_solution_review(payload: dict, db: Session = Depends(get_db)):
-    item = SolutionReviewService(db).submit_for_review(payload, attachments=payload.get('attachments') or [])
+def create_solution_review(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    item = SolutionReviewService(db).submit_for_review(
+        {**payload, 'submitter': payload.get('submitter') or current_user.get('username'), 'created_by': current_user.get('username')},
+        attachments=payload.get('attachments') or [],
+    )
     return {'status': 'ok', 'item': item}
 
 
 @router.post('/solution-reviews/{review_id}/manual-review')
-def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(get_db)):
+def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_reviewer_user)):
     review_status = str(payload.get('review_status') or '').strip()
     if not review_status:
         raise HTTPException(status_code=400, detail='missing review_status')
@@ -837,7 +940,7 @@ def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(
         item = SolutionReviewService(db).manually_review(
             review_id,
             review_status=review_status,
-            reviewer=payload.get('reviewer'),
+            reviewer=payload.get('reviewer') or current_user.get('username'),
             notes=payload.get('notes'),
         )
     except KeyError:
@@ -848,9 +951,48 @@ def manual_solution_review(review_id: int, payload: dict, db: Session = Depends(
 
 
 @router.get('/solution-repository/export')
-def export_solution_repository(format: str = Query(default='json'), db: Session = Depends(get_db)):
+def export_solution_repository(format: str = Query(default='json'), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     path = ExportService(db).export_solution_repository(export_format=format)
     return FileResponse(path=path, filename=Path(path).name)
+
+
+@router.post('/solution-repository/import')
+async def import_solution_repository(
+    file: UploadFile = File(...),
+    preserve_error_codes: bool = Form(default=True),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_reviewer_user),
+):
+    content = await file.read()
+    try:
+        result = SolutionRepositoryService(db).import_records(
+            filename=file.filename or 'solution_repository_import.json',
+            content=content,
+            actor=str(current_user.get('username') or 'reviewer'),
+            preserve_error_codes=preserve_error_codes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        await file.close()
+    return {'status': 'ok', 'item': result}
+
+
+@router.post('/solution-repository/ask')
+def ask_solution_repository(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    question = str(payload.get('question') or '').strip()
+    if not question:
+        raise HTTPException(status_code=400, detail='question is required')
+    try:
+        item = SolutionRepositoryService(db).answer_question(
+            question=question,
+            viewer_username=str(current_user.get('username') or ''),
+            viewer_is_reviewer=bool(current_user.get('is_reviewer') or current_user.get('is_admin')),
+            limit=int(payload.get('limit') or 8),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {'status': 'ok', 'item': item}
 
 
 @router.get('/tasks/{task_uuid}/export/events')
@@ -915,4 +1057,6 @@ def delete_task(task_uuid: str, db: Session = Depends(get_db)):
     ok = repo.delete_task_by_uuid(task_uuid)
     if not ok:
         raise HTTPException(status_code=404, detail='任务不存在')
+    queue.cancel(task_uuid)
+    task_state_cache.remove(task_uuid)
     return {'success': True, 'task_uuid': task_uuid}

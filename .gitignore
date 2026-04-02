@@ -35,3 +35,5 @@ data/performance/
 .env.*
 !.env.example
 local_config.py
+
+.vercel

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.settings import get_settings
-from app.db.session import SessionLocal
 from app.services.query_service import QueryService
 from app.services.solution_repository import SolutionRepositoryService
 
@@ -132,14 +130,6 @@ class ExportService:
 
         return px, pio
 
-    def _fetch_with_new_session(self, task_id: int, fn_name: str, *args, **kwargs):
-        db = SessionLocal()
-        try:
-            query = QueryService(db)
-            return getattr(query, fn_name)(task_id, *args, **kwargs)
-        finally:
-            db.close()
-
     def _build_report_payload(self, task_id: int) -> dict:
         defs = [d for d in self.query.get_parameter_definitions() if d["parameter_name"] not in SKIP_PARAMETER_PLOTS]
         payload = {}
@@ -154,21 +144,13 @@ class ExportService:
             "audit_logs": ("get_audit_logs", {}),
             "llm_results": ("get_llm_results", {}),
         }
-        with ThreadPoolExecutor(max_workers=min(8, max(2, len(jobs)))) as ex:
-            future_map = {ex.submit(self._fetch_with_new_session, task_id, fn, **kwargs): key for key, (fn, kwargs) in jobs.items()}
-            for future in as_completed(future_map):
-                key = future_map[future]
-                val = future.result()
-                if key in {"events", "errors"}:
-                    payload[key] = val["items"]
-                else:
-                    payload[key] = val
+        for key, (fn, kwargs) in jobs.items():
+            val = getattr(self.query, fn)(task_id, **kwargs)
+            payload[key] = val["items"] if key in {"events", "errors"} else val
 
         param_series = {}
-        with ThreadPoolExecutor(max_workers=min(8, max(2, len(defs) or 1))) as ex:
-            future_map = {ex.submit(self._fetch_with_new_session, task_id, "get_parameter_series", d["parameter_name"], unit="s"): d["parameter_name"] for d in defs}
-            for future in as_completed(future_map):
-                param_series[future_map[future]] = future.result()
+        for d in defs:
+            param_series[d["parameter_name"]] = self.query.get_parameter_series(task_id, d["parameter_name"], unit="s")
 
         payload["parameter_definitions"] = defs
         payload["parameter_series"] = param_series

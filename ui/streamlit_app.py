@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import textwrap
 from html import escape
 from typing import Any, cast
@@ -1294,7 +1295,7 @@ def _api_base() -> str:
 @st.cache_data(show_spinner=False, ttl=15)
 def cached_api_get(path: str, params_json: str = "") -> Any:
     params = json.loads(params_json) if params_json else {}
-    resp = requests.get(f"{_api_base()}{path}", params=params, timeout=120)
+    resp = requests.get(f"{_api_base()}{path}", params=params, headers=_auth_headers(), timeout=120)
     resp.raise_for_status()
     return resp.json()
 
@@ -1317,8 +1318,22 @@ def api_get(path: str, **params: Any) -> tuple[bool, Any]:
         return False, f"GET {path} 失败: {exc}"
 
 
+def _auth_headers(headers: dict[str, Any] | None = None) -> dict[str, Any]:
+    merged = dict(headers or {})
+    token = str(st.session_state.get("auth_token") or "").strip()
+    if token:
+        merged["Authorization"] = f"Bearer {token}"
+    return merged
+
+
+def _auth_query_suffix() -> str:
+    token = str(st.session_state.get("auth_token") or "").strip()
+    return f"&access_token={token}" if token else ""
+
+
 def api_post(path: str, timeout: int = 180, **kwargs: Any) -> tuple[bool, Any]:
     try:
+        kwargs["headers"] = _auth_headers(kwargs.get("headers"))
         resp = requests.post(f"{_api_base()}{path}", timeout=timeout, **kwargs)
         resp.raise_for_status()
         clear_cached_api_get()
@@ -1335,7 +1350,7 @@ def api_post(path: str, timeout: int = 180, **kwargs: Any) -> tuple[bool, Any]:
 
 def api_put(path: str, payload: JsonDict) -> tuple[bool, Any]:
     try:
-        resp = requests.put(f"{_api_base()}{path}", json=payload, timeout=120)
+        resp = requests.put(f"{_api_base()}{path}", json=payload, headers=_auth_headers(), timeout=120)
         resp.raise_for_status()
         clear_cached_api_get()
         return True, resp.json()
@@ -1351,7 +1366,7 @@ def api_put(path: str, payload: JsonDict) -> tuple[bool, Any]:
 
 def api_delete(path: str) -> tuple[bool, Any]:
     try:
-        resp = requests.delete(f"{_api_base()}{path}", timeout=120)
+        resp = requests.delete(f"{_api_base()}{path}", headers=_auth_headers(), timeout=120)
         resp.raise_for_status()
         clear_cached_api_get()
         return True, resp.json() if resp.text else {"success": True}
@@ -1825,9 +1840,604 @@ def load_tasks_page(page: int = 1, page_size: int = 50) -> JsonDict:
     return cast(JsonDict, data) if ok and isinstance(data, dict) else {"items": [], "total": 0}
 
 
+def _set_logged_in_user(token: str, user: dict[str, Any]) -> None:
+    st.session_state["auth_token"] = token
+    st.session_state["current_user"] = user
+    clear_cached_api_get()
+
+
+def _clear_login_state() -> None:
+    st.session_state["auth_token"] = ""
+    st.session_state["current_user"] = None
+    clear_cached_api_get()
+
+
+def _refresh_current_user() -> dict[str, Any] | None:
+    token = str(st.session_state.get("auth_token") or "").strip()
+    if not token:
+        return None
+    try:
+        resp = requests.get(f"{_api_base()}/auth/me", headers=_auth_headers(), timeout=15)
+        resp.raise_for_status()
+        user = resp.json()
+        st.session_state["current_user"] = user
+        return user
+    except Exception:
+        _clear_login_state()
+        return None
+
+
+def render_login_portal() -> None:
+    theme = get_design_tokens(str(st.session_state.get("theme_mode", "light")))
+    if theme.name == "dark":
+        page_background = """
+                radial-gradient(circle at 15% 15%, rgba(78, 141, 255, 0.18), transparent 28%),
+                radial-gradient(circle at 85% 12%, rgba(0, 215, 180, 0.12), transparent 24%),
+                linear-gradient(180deg, #0b1422 0%, #121f31 42%, #0e1826 100%)
+        """
+        card_border = "rgba(194, 220, 255, 0.14)"
+        card_background = "linear-gradient(180deg, rgba(12, 22, 35, 0.86) 0%, rgba(15, 28, 43, 0.92) 100%)"
+        card_shadow = "0 28px 80px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(90, 144, 214, 0.10) inset"
+        headline_color = "#f7fbff"
+        subtitle_color = "rgba(226, 238, 255, 0.74)"
+        chip_border = "rgba(190, 214, 255, 0.16)"
+        chip_background = "rgba(18, 37, 58, 0.72)"
+        chip_color = "#d8e9ff"
+        form_background = "linear-gradient(180deg, rgba(11, 22, 38, 0.88) 0%, rgba(14, 28, 46, 0.94) 100%)"
+        form_border = "rgba(194, 220, 255, 0.14)"
+    else:
+        page_background = f"""
+                radial-gradient(circle at 15% 15%, {theme.page_glow_primary} 0%, transparent 30%),
+                radial-gradient(circle at 85% 12%, {theme.page_glow_secondary} 0%, transparent 24%),
+                linear-gradient(180deg, {theme.bg_top} 0%, {theme.bg_mid} 42%, {theme.bg_bottom} 100%)
+        """
+        card_border = "rgba(84, 131, 179, 0.18)"
+        card_background = "linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(237, 247, 255, 0.92) 100%)"
+        card_shadow = "0 28px 80px rgba(2, 16, 36, 0.12), 0 0 0 1px rgba(193, 232, 255, 0.42) inset"
+        headline_color = theme.ink
+        subtitle_color = theme.muted
+        chip_border = "rgba(84, 131, 179, 0.18)"
+        chip_background = "rgba(193, 232, 255, 0.36)"
+        chip_color = theme.ink
+        form_background = "linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(241, 249, 255, 0.94) 100%)"
+        form_border = "rgba(84, 131, 179, 0.18)"
+
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stAppViewContainer"] {{
+            background:
+                {page_background};
+        }}
+        .block-container {{
+            max-width: 1240px;
+            padding-top: 0.9rem;
+            padding-bottom: 1.5rem;
+        }}
+        .auth-page-note {{
+            color: {subtitle_color};
+            font-size: 0.96rem;
+            line-height: 1.65;
+            margin: 0 0 0.9rem 0;
+        }}
+        .auth-layout-anchor + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {{
+            border: 1px solid {form_border};
+            border-radius: 28px;
+            background: {form_background};
+            box-shadow: {card_shadow};
+            padding: 1.15rem 1.15rem 1rem;
+        }}
+        .auth-shell {{
+            padding: 0.15rem 0 0.75rem;
+        }}
+        .auth-card {{
+            width: 100%;
+            padding: 1.45rem 1.5rem;
+            border-radius: 28px;
+            border: 1px solid {card_border};
+            background: {card_background};
+            box-shadow: {card_shadow};
+            backdrop-filter: blur(14px);
+        }}
+        .auth-headline {{
+            color: {headline_color};
+            font-size: clamp(1.6rem, 2.5vw, 2.25rem);
+            font-family: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif;
+            margin-bottom: 0.3rem;
+        }}
+        .auth-subtitle {{
+            color: {subtitle_color};
+            line-height: 1.72;
+            margin-bottom: 0.95rem;
+        }}
+        .auth-chip-row {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.55rem;
+            margin-top: 0.8rem;
+            margin-bottom: 0;
+        }}
+        .auth-chip {{
+            display: inline-flex;
+            align-items: center;
+            padding: 0.38rem 0.74rem;
+            border-radius: 999px;
+            border: 1px solid {chip_border};
+            background: {chip_background};
+            color: {chip_color};
+            font-size: 0.84rem;
+        }}
+        @media (max-width: 900px) {{
+            .block-container {{
+                padding-top: 0.7rem;
+                padding-bottom: 1.2rem;
+            }}
+            .auth-card {{
+                padding: 1.2rem 1.1rem;
+                border-radius: 24px;
+            }}
+            .auth-layout-anchor + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:last-child > div[data-testid="stVerticalBlock"] {{
+                padding: 0.95rem 0.9rem 0.9rem;
+                border-radius: 24px;
+            }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="auth-layout-anchor"></div>', unsafe_allow_html=True)
+    hero_col, form_col = st.columns([1.02, 0.98], gap="medium")
+    with hero_col:
+        st.markdown(
+            """
+            <div class="auth-shell">
+                <div class="auth-card">
+                    <div class="auth-headline">Sequencer Log Platform</div>
+                    <div class="auth-subtitle">统一登录、注册审核与全局方案知识库入口。如果有任何问题，请联系liuyanbo1@genomics.cn。</div>
+                    <div class="auth-chip-row">
+                        <span class="auth-chip">FastAPI + Streamlit</span>
+                        <span class="auth-chip">角色权限</span>
+                        <span class="auth-chip">邮箱验证</span>
+                        <span class="auth-chip">方案库索引</span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<p class="auth-page-note">管理员、审核人和普通用户共用同一个登录入口。</p>', unsafe_allow_html=True)
+        st.markdown("### 登录说明")
+        st.markdown(
+            """
+            - `admin`: 用户管理、审核、方案库维护
+            - `reviewer`: 方案审核、注册审核、模块与任务簇维护
+            - `submitter`: 提交方案、查看授权数据、发起注册申请
+            """
+        )
+        st.info("默认管理员首次启动后自动创建，首次登录建议立即修改密码。")
+
+    with form_col:
+        st.markdown("### 登录入口")
+        login_tab, register_tab = st.tabs(["登录", "注册"])
+        with login_tab:
+            login_name = st.text_input("用户名或邮箱", key="auth_login_name")
+            password = st.text_input("密码", type="password", key="auth_login_password")
+            if st.button("登录系统", type="primary", use_container_width=True, key="auth_login_button"):
+                ok, resp = api_post("/auth/login", json={"login_name": login_name, "password": password}, timeout=30)
+                if ok:
+                    _set_logged_in_user(str(resp.get("token") or ""), resp.get("user") or {})
+                    st.success("登录成功，正在进入系统。")
+                    st.rerun()
+                else:
+                    st.error(resp)
+
+        with register_tab:
+            username = st.text_input("用户名", key="register_username")
+            email = st.text_input("邮箱", key="register_email")
+            password = st.text_input("密码", type="password", key="register_password")
+            confirm_password = st.text_input("确认密码", type="password", key="register_password_confirm")
+            registration_note = st.text_area("注册备注", key="register_note", height=90, placeholder="可填写部门、用途或申请说明")
+            current_register_fingerprint = "||".join(
+                [
+                    str(username or "").strip().lower(),
+                    str(email or "").strip().lower(),
+                    str(password or ""),
+                    str(confirm_password or ""),
+                    str(registration_note or "").strip(),
+                ]
+            )
+            request_fingerprint = str(st.session_state.get("register_request_fingerprint") or "")
+            verification_token = str(st.session_state.get("register_verification_token") or "").strip()
+            verification_step = str(st.session_state.get("register_verification_step") or "draft")
+            register_changed_after_code = bool(request_fingerprint) and current_register_fingerprint != request_fingerprint
+            if register_changed_after_code and (verification_token or verification_step in {"code_sent", "verified"}):
+                st.session_state["register_verification_token"] = ""
+                st.session_state["register_verification_step"] = "draft"
+                verification_token = ""
+                verification_step = "draft"
+            verification_login_name = str(st.session_state.get("register_login_name") or username or email).strip()
+            verification_code = str(st.session_state.get("register_verify_code") or "").strip()
+
+            st.caption("注册步骤：1. 发送验证码  2. 直接在当前卡片输入验证码完成校验  3. 提交注册申请")
+            if verification_step == "verified" and verification_token and not register_changed_after_code:
+                st.success("邮箱已验证，当前注册信息可以直接提交注册申请。")
+            elif register_changed_after_code:
+                st.warning("注册信息已发生变化，请重新发送验证码并重新完成邮箱验证。")
+            elif verification_step == "code_sent":
+                st.info("验证码已发送，请在当前卡片完成邮箱验证，验证成功后会解锁提交按钮。")
+            else:
+                st.info("提交注册申请前，需要先通过邮箱验证码验证。请使用公司邮箱进行注册，否则审核不通过。")
+            if st.button("发送验证码", use_container_width=True, key="register_request_code_button"):
+                if password != confirm_password:
+                    st.error("两次输入的密码不一致。")
+                else:
+                    ok, resp = api_post(
+                        "/auth/register/request-code",
+                        json={"username": username, "email": email, "password": password, "registration_note": registration_note},
+                        timeout=30,
+                    )
+                    if ok:
+                        st.session_state["register_login_name"] = username or email
+                        st.session_state["register_verification_token"] = ""
+                        st.session_state["register_request_fingerprint"] = current_register_fingerprint
+                        st.session_state["register_verification_step"] = "code_sent"
+                        st.session_state["register_verify_code"] = ""
+                        st.success("验证码已发送，请直接在下方输入验证码完成邮箱验证。")
+                    else:
+                        st.error(resp)
+
+            st.text_input(
+                "邮箱验证码",
+                key="register_verify_code",
+                placeholder="输入邮箱收到的 6 位验证码",
+                disabled=not bool(request_fingerprint),
+            )
+            verify_col, resend_col = st.columns(2)
+            if verify_col.button(
+                "验证邮箱",
+                use_container_width=True,
+                key="register_verify_code_button",
+                disabled=not bool(request_fingerprint),
+            ):
+                if not verification_login_name:
+                    st.error("请先填写注册信息并发送验证码。")
+                elif not verification_code:
+                    st.error("请输入邮箱验证码。")
+                else:
+                    ok, resp = api_post(
+                        "/auth/register/verify-email",
+                        json={"login_name": verification_login_name, "code": verification_code},
+                        timeout=30,
+                    )
+                    if ok:
+                        st.session_state["register_verification_token"] = str(resp.get("verification_token") or "")
+                        st.session_state["register_verification_step"] = "verified"
+                        st.success("邮箱验证成功，现在可以直接提交注册申请。")
+                    else:
+                        st.session_state["register_verification_token"] = ""
+                        st.session_state["register_verification_step"] = "code_sent"
+                        st.error(resp)
+            if resend_col.button(
+                "重新发送验证码",
+                use_container_width=True,
+                key="register_resend_code_button",
+                disabled=not bool(request_fingerprint),
+            ):
+                if not verification_login_name:
+                    st.error("请先填写注册信息并发送验证码。")
+                else:
+                    ok, resp = api_post("/auth/register/resend-code", json={"login_name": verification_login_name}, timeout=30)
+                    if ok:
+                        st.session_state["register_verification_token"] = ""
+                        st.session_state["register_verification_step"] = "code_sent"
+                        st.session_state["register_verify_code"] = ""
+                        st.success("验证码已重新发送。")
+                    else:
+                        st.error(resp)
+
+            if st.button(
+                "提交注册申请",
+                use_container_width=True,
+                key="register_submit_button",
+                disabled=not bool(verification_token) or register_changed_after_code,
+            ):
+                if not verification_token:
+                    st.error("请先输入正确验证码并完成邮箱验证，再提交注册申请。")
+                else:
+                    ok, resp = api_post("/auth/register", json={"verification_token": verification_token}, timeout=30)
+                    if ok:
+                        st.session_state["register_verification_token"] = ""
+                        st.session_state["register_request_fingerprint"] = ""
+                        st.session_state["register_verification_step"] = "submitted"
+                        st.session_state["register_verify_code"] = ""
+                        st.success("注册申请已提交，等待管理员审核。")
+                    else:
+                        st.error(resp)
+
+
+def render_account_controls(current_user: dict[str, Any]) -> None:
+    with st.sidebar.expander("账户", expanded=True):
+        st.caption(f"用户: {current_user.get('username')} | 状态: {current_user.get('status')}")
+        st.write(f"角色: {', '.join(current_user.get('roles') or [])}")
+        if current_user.get("force_password_change"):
+            st.warning("当前账号建议尽快修改初始密码。")
+        with st.form("change_password_form", clear_on_submit=True):
+            current_password = st.text_input("当前密码", type="password")
+            new_password = st.text_input("新密码", type="password")
+            confirm_password = st.text_input("确认新密码", type="password")
+            submitted = st.form_submit_button("修改密码")
+            if submitted:
+                if new_password != confirm_password:
+                    st.error("两次输入的新密码不一致。")
+                else:
+                    ok, resp = api_post("/auth/change-password", json={"current_password": current_password, "new_password": new_password}, timeout=30)
+                    if ok:
+                        st.session_state["current_user"] = resp.get("user")
+                        st.success("密码已更新。")
+                        st.rerun()
+                    else:
+                        st.error(resp)
+        if st.button("退出登录", use_container_width=True, key="logout_button"):
+            api_post("/auth/logout", json={}, timeout=15)
+            _clear_login_state()
+            st.rerun()
+
+
+def render_user_management_page() -> None:
+    st.subheader("用户管理")
+    st.caption("仅管理员可见，用于处理注册审核、账号启停与角色设置。")
+    ok, data = api_get("/admin/users")
+    if not ok:
+        st.error(data)
+        return
+    items = data.get("items", [])
+    safe_dataframe(pd.DataFrame(items), use_container_width=True, height=320)
+    if not items:
+        return
+    labels = [f"{row['id']} | {row['username']} | {row['status']} | {','.join(row.get('roles') or [])}" for row in items]
+    picked = st.selectbox("选择用户", labels, key="admin_user_pick")
+    selected = items[labels.index(picked)]
+    c1, c2, c3, c4 = st.columns(4)
+    actions = [
+        (c1, "approve", "通过"),
+        (c2, "reject", "拒绝"),
+        (c3, "disable", "停用"),
+        (c4, "enable", "启用"),
+    ]
+    for column, action, label in actions:
+        if column.button(label, key=f"user_status_{selected['id']}_{action}"):
+            ok_status, resp_status = api_post(f"/admin/users/{selected['id']}/status", json={"action": action}, timeout=30)
+            if ok_status:
+                st.success(f"用户状态已更新为 {action}")
+                clear_cached_api_get()
+                st.rerun()
+            else:
+                st.error(resp_status)
+
+    reviewer_flag = st.checkbox("设为 reviewer", value=bool(selected.get("is_reviewer")), key=f"user_reviewer_{selected['id']}")
+    admin_flag = st.checkbox("设为 admin", value=bool(selected.get("is_admin")), key=f"user_admin_{selected['id']}")
+    if st.button("保存角色设置", key=f"user_roles_{selected['id']}"):
+        ok_roles, resp_roles = api_post(
+            f"/admin/users/{selected['id']}/roles",
+            json={"is_reviewer": reviewer_flag, "is_admin": admin_flag},
+            timeout=30,
+        )
+        if ok_roles:
+            st.success("角色设置已保存。")
+            clear_cached_api_get()
+            st.rerun()
+        else:
+            st.error(resp_roles)
+
+
+def render_solution_hub(current_user: dict[str, Any]) -> None:
+    st.subheader("全局方案库")
+    st.caption("围绕全局可复用方案、检索索引、任务簇管理和审核流的统一入口。")
+    ok_cfg, cfg = api_get("/solution-repository/config")
+    if not ok_cfg:
+        st.error(cfg)
+        return
+    modules = cfg.get("modules", [])
+    task_clusters = cfg.get("task_clusters", [])
+    module_map = {f"{item['display_name']} | {item['prefix']}": item for item in modules}
+    cluster_names = [item["display_name"] for item in task_clusters]
+    is_reviewer = bool(current_user.get("is_reviewer") or current_user.get("is_admin"))
+
+    submit_tab, query_tab, review_tab, taxonomy_tab = st.tabs(["方案提交", "方案检索", "方案审核", "任务簇与模块"])
+
+    with submit_tab:
+        module_label = st.selectbox("模块前缀", list(module_map.keys()), key="hub_module_pick")
+        selected_module = module_map[module_label]
+        selected_clusters = st.multiselect("任务簇", cluster_names, key="hub_clusters")
+        new_cluster = st.text_input("新增任务簇候选", key="hub_new_cluster")
+        error_name = st.text_input("错误名", key="hub_error_name")
+        message = st.text_area("message 关键词 / 现象描述", key="hub_message", height=90)
+        message_keywords = st.text_input("message 关键词", key="hub_message_keywords", help="多个关键词用逗号分隔")
+        tags = st.text_input("标签", key="hub_tags", help="多个标签用逗号分隔")
+        root_cause = st.text_area("根因分析", key="hub_root_cause", height=120)
+        verified_solution = st.text_area("已验证解决方案", key="hub_verified_solution", height=120)
+        workaround = st.text_area("临时绕过方案", key="hub_workaround", height=90)
+        trigger_scenario = st.text_area("触发场景 / 问题簇", key="hub_trigger_scenario", height=100)
+        related_task_uuid = st.text_input("关联 task_uuid", key="hub_task_uuid")
+        normalized_signature = st.text_input("关联 normalized_signature", key="hub_signature")
+        if st.button("提交方案", type="primary", key="hub_submit_review"):
+            final_clusters = list(selected_clusters)
+            if new_cluster.strip():
+                ok_cluster, resp_cluster = api_post(
+                    "/solution-repository/task-clusters",
+                    json={"display_name": new_cluster.strip(), "description": trigger_scenario},
+                    timeout=30,
+                )
+                if ok_cluster:
+                    final_clusters.append(resp_cluster.get("item", {}).get("display_name", new_cluster.strip()))
+                else:
+                    st.error(resp_cluster)
+                    st.stop()
+            payload = {
+                "module": selected_module["module_key"],
+                "error_name": error_name,
+                "message": message,
+                "message_keywords": [part.strip() for part in message_keywords.split(",") if part.strip()],
+                "tags": [part.strip() for part in tags.split(",") if part.strip()],
+                "task_clusters": final_clusters,
+                "root_cause_analysis": root_cause,
+                "verified_solution": verified_solution,
+                "workaround": workaround,
+                "trigger_scenario": trigger_scenario,
+                "task_uuid": related_task_uuid or None,
+                "normalized_signature": normalized_signature or None,
+                "reusable": True,
+                "source": "streamlit_solution_hub",
+            }
+            endpoint = "/solution-repository/records" if is_reviewer else "/solution-reviews"
+            ok_submit, resp_submit = api_post(endpoint, json=payload, timeout=45)
+            if ok_submit:
+                st.success("方案已提交。")
+                safe_json(resp_submit.get("item") or resp_submit)
+                clear_cached_api_get()
+            else:
+                st.error(resp_submit)
+
+    with query_tab:
+        q1, q2, q3 = st.columns(3)
+        search = q1.text_input("全文检索", key="hub_search")
+        module_filter = q2.selectbox("模块过滤", [""] + [item["module_key"] for item in modules], key="hub_query_module")
+        cluster_filter = q3.selectbox("任务簇过滤", [""] + cluster_names, key="hub_query_cluster")
+        q4, q5, q6 = st.columns(3)
+        error_code = q4.text_input("错误码", key="hub_query_error_code")
+        error_name_filter = q5.text_input("错误名", key="hub_query_error_name")
+        submitter_filter = q6.text_input("提交人", key="hub_query_submitter")
+        q7, q8, q9 = st.columns(3)
+        keyword_filter = q7.text_input("message 关键词", key="hub_query_keyword")
+        review_status_filter = q8.selectbox("审核状态", ["", "approved", "pending_review", "needs_revision", "rejected"], key="hub_query_status")
+        reusable_filter = q9.selectbox("可复用", ["", "true", "false"], key="hub_query_reusable")
+        params = {
+            "search": search or None,
+            "module": module_filter or None,
+            "task_cluster": cluster_filter or None,
+            "error_code": error_code or None,
+            "error_name": error_name_filter or None,
+            "submitter": submitter_filter or None,
+            "message_keyword": keyword_filter or None,
+            "review_status": review_status_filter or None,
+            "reusable": None if reusable_filter == "" else (reusable_filter == "true"),
+            "limit": 200,
+        }
+        ok_records, records = api_get("/solution-repository/records", **params)
+        if ok_records:
+            items = records.get("items", [])
+            safe_dataframe(pd.DataFrame(items), use_container_width=True, height=320)
+            st.markdown(f"[导出 JSON]({_api_base()}/solution-repository/export?format=json{_auth_query_suffix()})")
+            st.markdown(f"[导出 CSV]({_api_base()}/solution-repository/export?format=csv{_auth_query_suffix()})")
+            st.markdown(f"[导出 Excel]({_api_base()}/solution-repository/export?format=xlsx{_auth_query_suffix()})")
+            st.markdown(f"[导出 SQLite]({_api_base()}/solution-repository/export?format=sqlite{_auth_query_suffix()})")
+        else:
+            st.error(records)
+
+    with review_tab:
+        if not is_reviewer:
+            st.info("当前账号为 submitter，仅能查看自己提交的审核记录。")
+        review_status = st.selectbox("审核列表状态", ["", "pending_review", "approved", "needs_revision", "rejected"], key="hub_review_status")
+        ok_reviews, reviews = api_get("/solution-reviews", status=review_status or None, limit=200)
+        if ok_reviews:
+            items = reviews.get("items", [])
+            safe_dataframe(pd.DataFrame(items), use_container_width=True, height=300)
+            if is_reviewer and items:
+                labels = [f"{row['id']} | {row.get('review_status')} | {row.get('module')} | {row.get('created_by')}" for row in items]
+                picked = st.selectbox("选择审核记录", labels, key="hub_review_pick")
+                selected = items[labels.index(picked)]
+                safe_json(selected)
+                notes = st.text_area("审核意见", key="hub_review_notes", height=90)
+                r1, r2, r3 = st.columns(3)
+                actions = [(r1, "approved", "通过"), (r2, "needs_revision", "退回修改"), (r3, "rejected", "拒绝")]
+                for col, status_value, label in actions:
+                    if col.button(label, key=f"hub_review_{selected['id']}_{status_value}"):
+                        ok_action, resp_action = api_post(
+                            f"/solution-reviews/{selected['id']}/manual-review",
+                            json={"review_status": status_value, "notes": notes},
+                            timeout=45,
+                        )
+                        if ok_action:
+                            st.success(f"已更新为 {status_value}")
+                            clear_cached_api_get()
+                            st.rerun()
+                        else:
+                            st.error(resp_action)
+        else:
+            st.error(reviews)
+
+    with taxonomy_tab:
+        st.markdown("#### 任务簇")
+        ok_clusters, cluster_resp = api_get("/solution-repository/task-clusters", include_pending=True if is_reviewer else False)
+        if ok_clusters:
+            cluster_items = cluster_resp.get("items", [])
+            safe_dataframe(pd.DataFrame(cluster_items), use_container_width=True, height=220)
+            cluster_name = st.text_input("新任务簇名称", key="taxonomy_new_cluster")
+            cluster_desc = st.text_area("任务簇说明", key="taxonomy_new_cluster_desc", height=80)
+            if st.button("提交任务簇", key="taxonomy_submit_cluster"):
+                ok_create, resp_create = api_post(
+                    "/solution-repository/task-clusters",
+                    json={"display_name": cluster_name, "description": cluster_desc},
+                    timeout=30,
+                )
+                if ok_create:
+                    st.success("任务簇已提交。")
+                    clear_cached_api_get()
+                    st.rerun()
+                else:
+                    st.error(resp_create)
+            if is_reviewer and cluster_items:
+                pending_labels = [f"{row['id']} | {row['display_name']} | {row['review_status']}" for row in cluster_items]
+                picked = st.selectbox("审核任务簇", pending_labels, key="taxonomy_cluster_review_pick")
+                selected = cluster_items[pending_labels.index(picked)]
+                c1, c2, c3 = st.columns(3)
+                for col, status_value, label in [(c1, "approved", "通过"), (c2, "rejected", "拒绝"), (c3, "disabled", "停用")]:
+                    if col.button(label, key=f"taxonomy_cluster_{selected['id']}_{status_value}"):
+                        ok_review, resp_review = api_post(
+                            f"/solution-repository/task-clusters/{selected['id']}/review",
+                            json={"review_status": status_value},
+                            timeout=30,
+                        )
+                        if ok_review:
+                            st.success(f"任务簇已更新为 {status_value}")
+                            clear_cached_api_get()
+                            st.rerun()
+                        else:
+                            st.error(resp_review)
+        else:
+            st.error(cluster_resp)
+
+        if is_reviewer:
+            st.markdown("#### 模块配置")
+            safe_dataframe(pd.DataFrame(modules), use_container_width=True, height=220)
+            m1, m2, m3 = st.columns(3)
+            module_key = m1.text_input("module_key", key="taxonomy_module_key")
+            display_name = m2.text_input("display_name", key="taxonomy_module_name")
+            prefix = m3.text_input("prefix", key="taxonomy_module_prefix")
+            description = st.text_area("模块说明", key="taxonomy_module_desc", height=80)
+            if st.button("保存模块配置", key="taxonomy_module_submit"):
+                ok_module, resp_module = api_post(
+                    "/solution-repository/modules",
+                    json={"module_key": module_key, "display_name": display_name, "prefix": prefix, "description": description, "is_active": True},
+                    timeout=30,
+                )
+                if ok_module:
+                    st.success("模块配置已保存。")
+                    clear_cached_api_get()
+                    st.rerun()
+                else:
+                    st.error(resp_module)
+
+
 st.session_state.setdefault("theme_mode", "light")
-inject_design_system(str(st.session_state.get("theme_mode", "light")))
 st.session_state.setdefault("api_base", DEFAULT_API_BASE)
+st.session_state.setdefault("auth_token", "")
+st.session_state.setdefault("current_user", None)
+st.session_state.setdefault("register_verification_token", "")
+st.session_state.setdefault("register_request_fingerprint", "")
+st.session_state.setdefault("register_verification_step", "draft")
+inject_design_system(str(st.session_state.get("theme_mode", "light")))
 API_BASE = st.sidebar.text_input("FastAPI 地址", value=st.session_state["api_base"])
 st.session_state["api_base"] = API_BASE
 theme_is_dark = st.sidebar.toggle("暗色主题", value=str(st.session_state.get("theme_mode", "light")) == "dark")
@@ -1835,6 +2445,13 @@ next_theme_mode = "dark" if theme_is_dark else "light"
 if next_theme_mode != st.session_state.get("theme_mode", "light"):
     st.session_state["theme_mode"] = next_theme_mode
     st.rerun()
+
+current_user = st.session_state.get("current_user") or _refresh_current_user()
+if not current_user:
+    render_login_portal()
+    st.stop()
+
+render_account_controls(cast(dict[str, Any], current_user))
 api_ok, api_msg = check_api_health()
 
 tasks_page = load_tasks_page()
@@ -1867,11 +2484,20 @@ with st.sidebar.expander("项目管理", expanded=False):
     else:
         st.info("当前未选择历史项目。")
 
-page = st.sidebar.radio("导航", ["首页 / 仪表盘", "历史项目中心", "文件上传", "统一事件流", "耗时分析", "事件流时间轴", "错误分析", "参数趋势分析", "LLM 诊断", "原始文件预览", "未知日志待标注池", "规则建议审核视图", "配置页面", "导出"])
+nav_pages = ["首页 / 仪表盘", "历史项目中心", "文件上传", "统一事件流", "耗时分析", "事件流时间轴", "错误分析", "参数趋势分析", "LLM 诊断", "方案库中心", "原始文件预览", "未知日志待标注池", "规则建议审核视图", "配置页面", "导出"]
+if bool(current_user.get("is_admin")):
+    nav_pages.insert(nav_pages.index("方案库中心") + 1, "用户管理")
+page = st.sidebar.radio("导航", nav_pages)
 if page != "首页 / 仪表盘":
     render_page_intro(page, task_uuid, api_ok)
 
-if page == "首页 / 仪表盘":
+if page == "用户管理":
+    render_user_management_page()
+
+elif page == "方案库中心":
+    render_solution_hub(cast(dict[str, Any], current_user))
+
+elif page == "首页 / 仪表盘":
     if not task_uuid:
         st.info("请先在左侧选择任务 UUID。")
     else:
@@ -2455,10 +3081,10 @@ elif page == "LLM 诊断":
                 items = repo_rows.get("items", [])
                 safe_dataframe(pd.DataFrame(items), use_container_width=True, height=280)
                 st.markdown("#### 导出解决方案数据")
-                st.markdown(f"[导出 JSON]({_api_base()}/solution-repository/export?format=json)")
-                st.markdown(f"[导出 CSV]({_api_base()}/solution-repository/export?format=csv)")
-                st.markdown(f"[导出 Excel]({_api_base()}/solution-repository/export?format=xlsx)")
-                st.markdown(f"[导出 SQLite 备份]({_api_base()}/solution-repository/export?format=sqlite)")
+                st.markdown(f"[导出 JSON]({_api_base()}/solution-repository/export?format=json{_auth_query_suffix()})")
+                st.markdown(f"[导出 CSV]({_api_base()}/solution-repository/export?format=csv{_auth_query_suffix()})")
+                st.markdown(f"[导出 Excel]({_api_base()}/solution-repository/export?format=xlsx{_auth_query_suffix()})")
+                st.markdown(f"[导出 SQLite 备份]({_api_base()}/solution-repository/export?format=sqlite{_auth_query_suffix()})")
                 if items:
                     labels = [f"{row['id']} | {row.get('error_name', '')} | {row.get('module', '')}" for row in items]
                     picked = st.selectbox("选择记录进行编辑", labels, key="repo_edit_pick")
@@ -3039,13 +3665,13 @@ elif page == "配置页面":
 
 elif page == "导出":
     if task_uuid:
-        st.markdown(f"[导出统一事件 CSV]({_api_base()}/tasks/{task_uuid}/export/events)")
-        st.markdown(f"[导出错误分析 CSV]({_api_base()}/tasks/{task_uuid}/export/errors)")
-        st.markdown(f"[导出参数结果 CSV]({_api_base()}/tasks/{task_uuid}/export/parameters)")
-        st.markdown(f"[导出统一 HTML 报告]({_api_base()}/tasks/{task_uuid}/export/report.html)")
-        st.markdown(f"[导出 JSON 报告]({_api_base()}/tasks/{task_uuid}/export/report.json)")
-        st.markdown(f"[导出 Excel 报告]({_api_base()}/tasks/{task_uuid}/export/report.xlsx)")
-        st.markdown(f"[导出 PDF 报告]({_api_base()}/tasks/{task_uuid}/export/report.pdf)")
+        st.markdown(f"[导出统一事件 CSV]({_api_base()}/tasks/{task_uuid}/export/events?access_token={st.session_state.get('auth_token','')})")
+        st.markdown(f"[导出错误分析 CSV]({_api_base()}/tasks/{task_uuid}/export/errors?access_token={st.session_state.get('auth_token','')})")
+        st.markdown(f"[导出参数结果 CSV]({_api_base()}/tasks/{task_uuid}/export/parameters?access_token={st.session_state.get('auth_token','')})")
+        st.markdown(f"[导出统一 HTML 报告]({_api_base()}/tasks/{task_uuid}/export/report.html?access_token={st.session_state.get('auth_token','')})")
+        st.markdown(f"[导出 JSON 报告]({_api_base()}/tasks/{task_uuid}/export/report.json?access_token={st.session_state.get('auth_token','')})")
+        st.markdown(f"[导出 Excel 报告]({_api_base()}/tasks/{task_uuid}/export/report.xlsx?access_token={st.session_state.get('auth_token','')})")
+        st.markdown(f"[导出 PDF 报告]({_api_base()}/tasks/{task_uuid}/export/report.pdf?access_token={st.session_state.get('auth_token','')})")
     else:
         st.info("请先选择任务 UUID。")
 

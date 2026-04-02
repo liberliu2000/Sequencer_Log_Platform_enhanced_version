@@ -14,7 +14,7 @@ from app.core.settings import get_settings
 from app.llm.context import ContextConfig, compress_records
 from app.models.db_models import ErrorClusterModel, LLMAnalysisResultModel, NormalizedEventModel, StepSummaryModel, TaskAuditLogModel, UploadTaskModel
 from app.schemas.common import NormalizedEvent, StepSummary
-from app.services.cycle_service import build_unified_parameter_results, summarize_cycles
+from app.services.cycle_service import build_unified_parameter_results
 from app.services.parameter_definitions import PARAMETER_DEFINITIONS
 from app.services.perf_cache import TTLCache
 from app.services.performance_service import PerformanceService
@@ -54,13 +54,34 @@ class QueryService:
         _QUERY_CACHE.set(key, value)
         return value
 
-    def _event_extra(self, ev: NormalizedEventModel) -> dict[str, Any]:
-        if not ev.extra_json:
+    @staticmethod
+    def _row_value(row: Any, field: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(field)
+        getter = getattr(row, "get", None)
+        if callable(getter):
+            try:
+                return getter(field)
+            except Exception:
+                pass
+        mapping = getattr(row, "_mapping", None)
+        if mapping is not None:
+            return mapping.get(field)
+        return getattr(row, field, None)
+
+    def _event_extra(self, ev: Any) -> dict[str, Any]:
+        if isinstance(ev, dict):
+            raw = ev.get("extra_json", ev)
+        elif isinstance(ev, str):
+            raw = ev
+        else:
+            raw = self._row_value(ev, "extra_json")
+        if not raw:
             return {}
-        if isinstance(ev.extra_json, dict):
-            return ev.extra_json
+        if isinstance(raw, dict):
+            return raw
         try:
-            return json.loads(ev.extra_json)
+            return json.loads(raw)
         except Exception:
             return {}
 
@@ -114,54 +135,78 @@ class QueryService:
             end_time_text=row.get("end_time_text"),
         )
 
-    def _orm_event_to_schema(self, ev: NormalizedEventModel) -> NormalizedEvent:
+    def _orm_event_to_schema(self, ev: Any) -> NormalizedEvent:
         return NormalizedEvent(
-            source_file=ev.source_file,
-            parser_name=ev.parser_name,
-            original_time_text=ev.original_time_text,
-            parsed_datetime=ev.parsed_datetime,
-            epoch_ms=ev.epoch_ms,
-            formatted_ms=ev.formatted_ms,
-            level=ev.level,
-            component=ev.component,
-            module=ev.module,
-            thread=ev.thread,
-            method_name=ev.method_name,
-            class_name=ev.class_name,
-            source_path=ev.source_path,
-            line_no=ev.line_no,
-            message=ev.message,
-            raw_text=ev.raw_text,
-            cycle_no=ev.cycle_no,
-            sub_step=ev.sub_step,
-            chip_name=ev.chip_name,
-            stage_name=ev.stage_name,
-            board_name=ev.board_name,
-            event_kind=ev.event_kind,
-            direction=ev.direction,
-            duration_ms=ev.duration_ms,
-            status=ev.status,
-            error_code=ev.error_code,
-            exception_type=ev.exception_type,
-            normalized_signature=ev.normalized_signature,
-            error_family=ev.error_family,
-            severity=ev.severity,
-            cycle_inferred=getattr(ev, "cycle_inferred", False),
-            cycle_infer_method=getattr(ev, "cycle_infer_method", None),
-            cycle_infer_confidence=getattr(ev, "cycle_infer_confidence", None),
-            cycle_infer_reason=getattr(ev, "cycle_infer_reason", None),
+            source_file=self._row_value(ev, "source_file"),
+            parser_name=self._row_value(ev, "parser_name"),
+            original_time_text=self._row_value(ev, "original_time_text"),
+            parsed_datetime=self._row_value(ev, "parsed_datetime"),
+            epoch_ms=self._row_value(ev, "epoch_ms"),
+            formatted_ms=self._row_value(ev, "formatted_ms"),
+            level=self._row_value(ev, "level") or "INFO",
+            component=self._row_value(ev, "component"),
+            module=self._row_value(ev, "module"),
+            thread=self._row_value(ev, "thread"),
+            method_name=self._row_value(ev, "method_name"),
+            class_name=self._row_value(ev, "class_name"),
+            source_path=self._row_value(ev, "source_path"),
+            line_no=self._row_value(ev, "line_no"),
+            message=self._row_value(ev, "message") or "",
+            raw_text=self._row_value(ev, "raw_text") or "",
+            cycle_no=self._row_value(ev, "cycle_no"),
+            sub_step=self._row_value(ev, "sub_step"),
+            chip_name=self._row_value(ev, "chip_name"),
+            stage_name=self._row_value(ev, "stage_name"),
+            board_name=self._row_value(ev, "board_name"),
+            event_kind=self._row_value(ev, "event_kind"),
+            direction=self._row_value(ev, "direction"),
+            duration_ms=self._row_value(ev, "duration_ms"),
+            status=self._row_value(ev, "status"),
+            error_code=self._row_value(ev, "error_code"),
+            exception_type=self._row_value(ev, "exception_type"),
+            normalized_signature=self._row_value(ev, "normalized_signature"),
+            error_family=self._row_value(ev, "error_family"),
+            severity=self._row_value(ev, "severity"),
+            cycle_inferred=bool(self._row_value(ev, "cycle_inferred")),
+            cycle_infer_method=self._row_value(ev, "cycle_infer_method"),
+            cycle_infer_confidence=self._row_value(ev, "cycle_infer_confidence"),
+            cycle_infer_reason=self._row_value(ev, "cycle_infer_reason"),
             extra_json=self._event_extra(ev),
         )
 
     def _load_all_event_schemas(self, task_id: int) -> list[NormalizedEvent]:
         key = self._cache_key(task_id, "all_event_schemas")
         def factory():
-            rows = list(self.db.scalars(select(NormalizedEventModel).where(NormalizedEventModel.task_id == task_id).order_by(NormalizedEventModel.epoch_ms.asc(), NormalizedEventModel.id.asc())))
-            return [self._orm_event_to_schema(r) for r in rows]
+            stmt = (
+                select(*NormalizedEventModel.__table__.c)
+                .where(NormalizedEventModel.task_id == task_id)
+                .order_by(NormalizedEventModel.epoch_ms.asc(), NormalizedEventModel.id.asc())
+            )
+            return [self._orm_event_to_schema(row) for row in self.db.execute(stmt).mappings()]
         return self._cached(key, factory)
 
     def list_events(self, task_id: int, component: str | None = None, level: str | None = None, cycle_no: int | None = None, chip_name: str | None = None, search: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
-        stmt = select(NormalizedEventModel).where(NormalizedEventModel.task_id == task_id)
+        stmt = select(
+            NormalizedEventModel.id,
+            NormalizedEventModel.formatted_ms,
+            NormalizedEventModel.parsed_datetime,
+            NormalizedEventModel.level,
+            NormalizedEventModel.component,
+            NormalizedEventModel.module,
+            NormalizedEventModel.cycle_no,
+            NormalizedEventModel.sub_step,
+            NormalizedEventModel.chip_name,
+            NormalizedEventModel.method_name,
+            NormalizedEventModel.exception_type,
+            NormalizedEventModel.error_code,
+            NormalizedEventModel.message,
+            NormalizedEventModel.source_file,
+            NormalizedEventModel.extra_json,
+            NormalizedEventModel.cycle_inferred,
+            NormalizedEventModel.cycle_infer_method,
+            NormalizedEventModel.cycle_infer_confidence,
+            NormalizedEventModel.cycle_infer_reason,
+        ).where(NormalizedEventModel.task_id == task_id)
         count_stmt = select(func.count()).select_from(NormalizedEventModel).where(NormalizedEventModel.task_id == task_id)
         if component:
             stmt = stmt.where(NormalizedEventModel.component == component)
@@ -180,29 +225,29 @@ class QueryService:
             count_stmt = count_stmt.where(NormalizedEventModel.message.contains(search))
         total = int(self.db.scalar(count_stmt) or 0)
         stmt = stmt.order_by(NormalizedEventModel.epoch_ms.asc(), NormalizedEventModel.id.asc()).offset(max(0, offset)).limit(limit)
-        rows = list(self.db.scalars(stmt))
+        rows = self.db.execute(stmt).mappings()
         output = []
         for r in rows:
             extra = self._event_extra(r)
             output.append({
-                "id": r.id,
-                "time": r.formatted_ms,
-                "time_sec": format_seconds(r.parsed_datetime),
-                "level": r.level,
-                "component": r.component,
-                "module": r.module,
-                "cycle_no": r.cycle_no,
-                "sub_step": r.sub_step,
-                "chip_name": r.chip_name,
-                "method_name": r.method_name,
-                "exception_type": r.exception_type,
-                "error_code": r.error_code,
-                "message": r.message,
-                "source_file": r.source_file,
-                "cycle_inferred": extra.get("cycle_inferred", getattr(r, "cycle_inferred", False)),
-                "cycle_infer_method": extra.get("cycle_infer_method", getattr(r, "cycle_infer_method", None)),
-                "cycle_infer_confidence": extra.get("cycle_infer_confidence", getattr(r, "cycle_infer_confidence", None)),
-                "cycle_infer_reason": extra.get("cycle_infer_reason", getattr(r, "cycle_infer_reason", None)),
+                "id": r["id"],
+                "time": r["formatted_ms"],
+                "time_sec": format_seconds(r["parsed_datetime"]),
+                "level": r["level"],
+                "component": r["component"],
+                "module": r["module"],
+                "cycle_no": r["cycle_no"],
+                "sub_step": r["sub_step"],
+                "chip_name": r["chip_name"],
+                "method_name": r["method_name"],
+                "exception_type": r["exception_type"],
+                "error_code": r["error_code"],
+                "message": r["message"],
+                "source_file": r["source_file"],
+                "cycle_inferred": extra.get("cycle_inferred", r["cycle_inferred"]),
+                "cycle_infer_method": extra.get("cycle_infer_method", r["cycle_infer_method"]),
+                "cycle_infer_confidence": extra.get("cycle_infer_confidence", r["cycle_infer_confidence"]),
+                "cycle_infer_reason": extra.get("cycle_infer_reason", r["cycle_infer_reason"]),
             })
         return {"items": output, "total": total, "offset": offset, "limit": limit}
 
@@ -230,7 +275,20 @@ class QueryService:
         return self._cached(key, factory)
 
     def get_step_summaries(self, task_id: int, cycle_no: int | None = None, parameter_name: str | None = None, offset: int = 0, limit: int = 200) -> dict[str, Any]:
-        stmt = select(StepSummaryModel).where(StepSummaryModel.task_id == task_id)
+        stmt = select(
+            StepSummaryModel.cycle_no,
+            StepSummaryModel.parameter_name,
+            StepSummaryModel.sub_step,
+            StepSummaryModel.component,
+            StepSummaryModel.chip_name,
+            StepSummaryModel.start_epoch_ms,
+            StepSummaryModel.end_epoch_ms,
+            StepSummaryModel.duration_ms,
+            StepSummaryModel.threshold_ms,
+            StepSummaryModel.is_over_threshold,
+            StepSummaryModel.start_time_text,
+            StepSummaryModel.end_time_text,
+        ).where(StepSummaryModel.task_id == task_id)
         count_stmt = select(func.count()).select_from(StepSummaryModel).where(StepSummaryModel.task_id == task_id)
         if cycle_no is not None:
             stmt = stmt.where(StepSummaryModel.cycle_no == cycle_no)
@@ -240,24 +298,24 @@ class QueryService:
             count_stmt = count_stmt.where(StepSummaryModel.parameter_name == parameter_name)
         total = int(self.db.scalar(count_stmt) or 0)
         stmt = stmt.order_by(StepSummaryModel.cycle_no.asc(), StepSummaryModel.start_epoch_ms.asc(), StepSummaryModel.sub_step.asc()).offset(max(0, offset)).limit(limit)
-        rows = list(self.db.scalars(stmt))
+        rows = self.db.execute(stmt).mappings()
         items = [{
-            "cycle_no": r.cycle_no,
-            "parameter_name": getattr(r, "parameter_name", None),
-            "sub_step": r.sub_step,
-            "component": r.component,
-            "module": r.component,
-            "chip_name": r.chip_name,
-            "start_epoch_ms": r.start_epoch_ms,
-            "end_epoch_ms": r.end_epoch_ms,
-            "duration_ms": r.duration_ms,
-            "threshold_ms": r.threshold_ms,
-            "is_over_threshold": r.is_over_threshold,
-            "start_time_text": r.start_time_text,
-            "end_time_text": r.end_time_text,
-            "start_time_sec": self._epoch_to_seconds(r.start_epoch_ms),
-            "end_time_sec": self._epoch_to_seconds(r.end_epoch_ms),
-            "message": r.sub_step,
+            "cycle_no": r["cycle_no"],
+            "parameter_name": r["parameter_name"],
+            "sub_step": r["sub_step"],
+            "component": r["component"],
+            "module": r["component"],
+            "chip_name": r["chip_name"],
+            "start_epoch_ms": r["start_epoch_ms"],
+            "end_epoch_ms": r["end_epoch_ms"],
+            "duration_ms": r["duration_ms"],
+            "threshold_ms": r["threshold_ms"],
+            "is_over_threshold": r["is_over_threshold"],
+            "start_time_text": r["start_time_text"],
+            "end_time_text": r["end_time_text"],
+            "start_time_sec": self._epoch_to_seconds(r["start_epoch_ms"]),
+            "end_time_sec": self._epoch_to_seconds(r["end_epoch_ms"]),
+            "message": r["sub_step"],
             "source_file": None,
         } for r in rows]
         return {"items": items, "total": total, "offset": offset, "limit": limit}
@@ -265,11 +323,35 @@ class QueryService:
     def get_cycle_summaries(self, task_id: int, unit: str = "ms") -> list[dict]:
         key = self._cache_key(task_id, "cycle_summaries", unit=unit)
         def factory():
-            step_rows = self.get_step_summaries(task_id, offset=0, limit=200000)["items"]
-            summaries = summarize_cycles([self._dict_to_step(r) for r in step_rows])
             output = []
-            for s in summaries:
-                item = s.model_dump(mode="json")
+            stmt = (
+                select(
+                    StepSummaryModel.cycle_no.label("cycle_no"),
+                    StepSummaryModel.chip_name.label("chip_name"),
+                    func.min(StepSummaryModel.start_epoch_ms).label("started_at"),
+                    func.max(StepSummaryModel.end_epoch_ms).label("ended_at"),
+                    func.sum(StepSummaryModel.duration_ms).label("duration_sum"),
+                    func.max(func.abs(func.coalesce(StepSummaryModel.duration_ms, 0))).label("max_abs_duration"),
+                )
+                .where(StepSummaryModel.task_id == task_id)
+                .group_by(StepSummaryModel.cycle_no, StepSummaryModel.chip_name)
+                .order_by(StepSummaryModel.cycle_no.asc(), StepSummaryModel.chip_name.asc())
+            )
+            for row in self.db.execute(stmt).mappings():
+                started_at = row["started_at"]
+                ended_at = row["ended_at"]
+                total_duration_ms = None
+                if started_at is not None and ended_at is not None:
+                    total_duration_ms = float(ended_at - started_at)
+                elif row["max_abs_duration"]:
+                    total_duration_ms = float(row["duration_sum"] or 0.0)
+                item = {
+                    "cycle_no": row["cycle_no"],
+                    "chip_name": row["chip_name"],
+                    "total_duration_ms": total_duration_ms,
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                }
                 item["started_at_text"] = self._epoch_to_seconds(item.get("started_at"))
                 item["ended_at_text"] = self._epoch_to_seconds(item.get("ended_at"))
                 item["total_duration_value"] = self._convert_duration(item.get("total_duration_ms"), unit)
@@ -551,18 +633,33 @@ class QueryService:
         return {"cluster": cluster, "records": context_rows, "summary": stats.get("context_summary", {}), "stats": stats}
 
     def get_movement_timeline(self, task_id: int, cycle_no: int | None = None, track_order: str = "default") -> list[dict[str, Any]]:
-        rows = self.get_step_summaries(task_id, cycle_no=cycle_no, offset=0, limit=200000)["items"]
+        stmt = select(
+            StepSummaryModel.cycle_no,
+            StepSummaryModel.sub_step,
+            StepSummaryModel.component,
+            StepSummaryModel.chip_name,
+            StepSummaryModel.start_epoch_ms,
+            StepSummaryModel.end_epoch_ms,
+            StepSummaryModel.duration_ms,
+            StepSummaryModel.threshold_ms,
+            StepSummaryModel.is_over_threshold,
+            StepSummaryModel.start_time_text,
+            StepSummaryModel.end_time_text,
+        ).where(StepSummaryModel.task_id == task_id)
+        if cycle_no is not None:
+            stmt = stmt.where(StepSummaryModel.cycle_no == cycle_no)
+        stmt = stmt.order_by(StepSummaryModel.cycle_no.asc(), StepSummaryModel.start_epoch_ms.asc(), StepSummaryModel.sub_step.asc())
         output = []
         lanes: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        for r in rows:
-            sub_step = str(r.get("sub_step") or "")
-            component = str(r.get("component") or "")
-            if not (r.get("start_epoch_ms") and r.get("end_epoch_ms")):
+        for r in self.db.execute(stmt).mappings():
+            sub_step = str(r["sub_step"] or "")
+            component = str(r["component"] or "")
+            if not (r["start_epoch_ms"] and r["end_epoch_ms"]):
                 continue
             movement_like = any(key in sub_step.lower() for key in ["move", "align", "scan", "transfer", "temperature", "priming", "coarsetheta", "finealign"]) or component in {"XYZStage", "Scanner_1", "Scanner_2", "Workflow", "StageRunMgr", "ImagingMetrics"}
             if not movement_like:
                 continue
-            base_track = f"{r.get('component') or '未知部件'} | Cycle {r.get('cycle_no') or 'NA'}"
+            base_track = f"{r['component'] or '未知部件'} | Cycle {r['cycle_no'] or 'NA'}"
             lane_idx = 0
             start_ms = r["start_epoch_ms"]
             end_ms = r["end_epoch_ms"]
@@ -574,14 +671,38 @@ class QueryService:
             else:
                 existing[lane_idx] = (start_ms, end_ms)
             track = base_track if lane_idx == 0 else f"{base_track} | lane {lane_idx+1}"
-            output.append({**r, "start": datetime.fromtimestamp(start_ms / 1000).isoformat(timespec="seconds"), "end": datetime.fromtimestamp(end_ms / 1000).isoformat(timespec="seconds"), "track": track})
+            item = dict(r)
+            item["module"] = item.get("component")
+            item["message"] = item.get("sub_step")
+            item["start_time_sec"] = self._epoch_to_seconds(start_ms)
+            item["end_time_sec"] = self._epoch_to_seconds(end_ms)
+            item["source_file"] = None
+            item["start"] = datetime.fromtimestamp(start_ms / 1000).isoformat(timespec="seconds")
+            item["end"] = datetime.fromtimestamp(end_ms / 1000).isoformat(timespec="seconds")
+            item["track"] = track
+            output.append(item)
         if track_order == "cycle":
             output.sort(key=lambda x: ((x.get("cycle_no") is None), x.get("cycle_no") or -1, x.get("track") or ""))
         return output
 
     def get_timeline_error_points(self, task_id: int, cycle_no: int | None = None) -> list[dict[str, Any]]:
         stmt = (
-            select(NormalizedEventModel)
+            select(
+                NormalizedEventModel.id,
+                NormalizedEventModel.cycle_no,
+                NormalizedEventModel.component,
+                NormalizedEventModel.module,
+                NormalizedEventModel.sub_step,
+                NormalizedEventModel.epoch_ms,
+                NormalizedEventModel.formatted_ms,
+                NormalizedEventModel.message,
+                NormalizedEventModel.normalized_signature,
+                NormalizedEventModel.error_family,
+                NormalizedEventModel.severity,
+                NormalizedEventModel.error_code,
+                NormalizedEventModel.exception_type,
+                NormalizedEventModel.source_file,
+            )
             .where(
                 NormalizedEventModel.task_id == task_id,
                 NormalizedEventModel.normalized_signature.is_not(None),
@@ -591,50 +712,64 @@ class QueryService:
         )
         if cycle_no is not None:
             stmt = stmt.where(NormalizedEventModel.cycle_no == cycle_no)
-        rows = list(self.db.scalars(stmt))
         points: list[dict[str, Any]] = []
-        for r in rows:
-            epoch_ms = r.epoch_ms
+        for r in self.db.execute(stmt).mappings():
+            epoch_ms = r["epoch_ms"]
             if epoch_ms is None:
                 continue
             points.append({
-                "event_id": r.id,
-                "cycle_no": r.cycle_no,
-                "component": r.component,
-                "module": r.module,
-                "sub_step": r.sub_step,
-                "track": f"{r.component or '鏈煡閮ㄤ欢'} | Cycle {r.cycle_no or 'NA'}",
+                "event_id": r["id"],
+                "cycle_no": r["cycle_no"],
+                "component": r["component"],
+                "module": r["module"],
+                "sub_step": r["sub_step"],
+                "track": f"{r['component'] or '\u93c8\ue046\u7161\u95ae\u3124\u6b22'} | Cycle {r['cycle_no'] or 'NA'}",
                 "time": datetime.fromtimestamp(epoch_ms / 1000).isoformat(timespec="seconds"),
-                "time_text": r.formatted_ms or self._epoch_to_seconds(epoch_ms),
+                "time_text": r["formatted_ms"] or self._epoch_to_seconds(epoch_ms),
                 "epoch_ms": epoch_ms,
-                "message": r.message,
-                "normalized_signature": r.normalized_signature,
-                **self._error_family_fields(r.error_family),
-                "severity": r.severity,
-                "error_code": r.error_code,
-                "exception_type": r.exception_type,
-                "source_file": r.source_file,
+                "message": r["message"],
+                "normalized_signature": r["normalized_signature"],
+                **self._error_family_fields(r["error_family"]),
+                "severity": r["severity"],
+                "error_code": r["error_code"],
+                "exception_type": r["exception_type"],
+                "source_file": r["source_file"],
             })
         return points
 
     def get_operational_metrics(self, task_id: int, cycle_no: int | None = None) -> dict[str, Any]:
-        parameter_rows = self.get_parameter_results(task_id)
-        if cycle_no is not None:
-            parameter_rows = [r for r in parameter_rows if r.get("cycle") == cycle_no]
         photo_names = {"imaging_time_real", "coarse_theta", "finealign", "row_scan"}
-        return {
-            "photo_summary": [r for r in parameter_rows if r["parameter_name"] in photo_names],
-            "transfer_summary": [r for r in parameter_rows if r["parameter_name"] == "transfer_time"],
-            "cpas_priming_summary": [r for r in parameter_rows if r["parameter_name"] == "cpas_priming"],
-            "cpas_summary": [r for r in parameter_rows if r["parameter_name"] == "cpas_time"],
-            "temperature_times": [r for r in parameter_rows if r["parameter_name"] in {"temperature_rise_n", "temperature_rise_f", "temperature_drop_n", "temperature_drop_f"}],
+        temperature_names = {"temperature_rise_n", "temperature_rise_f", "temperature_drop_n", "temperature_drop_f"}
+        result = {
+            "photo_summary": [],
+            "transfer_summary": [],
+            "cpas_priming_summary": [],
+            "cpas_summary": [],
+            "temperature_times": [],
             "metric_stage_avg": self.get_row_scan_metric_stage_series(task_id, unit="ms"),
         }
+        for row in self.get_parameter_results(task_id):
+            if cycle_no is not None and row.get("cycle") != cycle_no:
+                continue
+            name = row["parameter_name"]
+            if name in photo_names:
+                result["photo_summary"].append(row)
+            elif name == "transfer_time":
+                result["transfer_summary"].append(row)
+            elif name == "cpas_priming":
+                result["cpas_priming_summary"].append(row)
+            elif name == "cpas_time":
+                result["cpas_summary"].append(row)
+            elif name in temperature_names:
+                result["temperature_times"].append(row)
+        return result
 
     def get_temperature_cycle_validation(self, task_id: int) -> list[dict[str, Any]]:
-        rows = [r for r in self.get_parameter_results(task_id) if r["parameter_name"] in {"temperature_rise_n", "temperature_rise_f", "temperature_drop_n", "temperature_drop_f"}]
+        target_names = {"temperature_rise_n", "temperature_rise_f", "temperature_drop_n", "temperature_drop_f"}
         grouped: dict[int | None, dict[str, Any]] = defaultdict(lambda: {"cycle": None, "rise_count": 0, "drop_count": 0, "records": []})
-        for r in rows:
+        for r in self.get_parameter_results(task_id):
+            if r["parameter_name"] not in target_names:
+                continue
             item = grouped[r.get("cycle")]
             item["cycle"] = r.get("cycle")
             if "rise" in r["parameter_name"]:
@@ -649,55 +784,93 @@ class QueryService:
         return sorted(out, key=lambda x: x["cycle"] if x["cycle"] is not None else -1)
 
     def get_substep_cycle_series(self, task_id: int, agg_mode: str = "mean", unit: str = "s") -> list[dict[str, Any]]:
-        step_rows = self.get_step_summaries(task_id, offset=0, limit=200000)["items"]
-        grouped: dict[tuple[int | None, str], list[float]] = defaultdict(list)
-        for r in step_rows:
-            if r.get("cycle_no") is None or r.get("duration_ms") is None:
-                continue
-            grouped[(r.get("cycle_no"), r.get("sub_step") or "unknown")].append(float(r["duration_ms"]))
         out = []
-        for (cycle_no, sub_step), durations in grouped.items():
-            val_ms = sum(durations) if agg_mode == "sum" else sum(durations) / max(1, len(durations))
+        agg_fn = func.sum if agg_mode == "sum" else func.avg
+        stmt = (
+            select(
+                StepSummaryModel.cycle_no.label("cycle_no"),
+                StepSummaryModel.sub_step.label("sub_step"),
+                agg_fn(StepSummaryModel.duration_ms).label("agg_duration_ms"),
+                func.count(StepSummaryModel.id).label("sample_count"),
+            )
+            .where(
+                StepSummaryModel.task_id == task_id,
+                StepSummaryModel.cycle_no.is_not(None),
+                StepSummaryModel.duration_ms.is_not(None),
+            )
+            .group_by(StepSummaryModel.cycle_no, StepSummaryModel.sub_step)
+            .order_by(StepSummaryModel.sub_step.asc(), StepSummaryModel.cycle_no.asc())
+        )
+        for row in self.db.execute(stmt).mappings():
+            val_ms = float(row["agg_duration_ms"] or 0.0)
             out.append({
-                "cycle_no": cycle_no,
-                "sub_step": sub_step,
+                "cycle_no": row["cycle_no"],
+                "sub_step": row["sub_step"] or "unknown",
                 "duration_ms": round(val_ms, 3),
                 "duration_value": self._convert_duration(val_ms, unit),
                 "duration_unit": unit,
-                "sample_count": len(durations),
+                "sample_count": int(row["sample_count"] or 0),
             })
-        return sorted(out, key=lambda x: (x["sub_step"], x["cycle_no"]))
+        return out
 
     def get_error_clusters(self, task_id: int, offset: int = 0, limit: int = 100) -> dict[str, Any]:
         count_stmt = select(func.count()).select_from(ErrorClusterModel).where(ErrorClusterModel.task_id == task_id)
         total = int(self.db.scalar(count_stmt) or 0)
-        stmt = select(ErrorClusterModel).where(ErrorClusterModel.task_id == task_id).order_by(ErrorClusterModel.count.desc(), ErrorClusterModel.id.asc()).offset(max(0, offset)).limit(limit)
-        rows = list(self.db.scalars(stmt))
+        stmt = (
+            select(
+                ErrorClusterModel.id,
+                ErrorClusterModel.normalized_signature,
+                ErrorClusterModel.error_family,
+                ErrorClusterModel.severity,
+                ErrorClusterModel.component,
+                ErrorClusterModel.count,
+                ErrorClusterModel.representative_message,
+                ErrorClusterModel.first_seen_epoch_ms,
+                ErrorClusterModel.last_seen_epoch_ms,
+            )
+            .where(ErrorClusterModel.task_id == task_id)
+            .order_by(ErrorClusterModel.count.desc(), ErrorClusterModel.id.asc())
+            .offset(max(0, offset))
+            .limit(limit)
+        )
+        rows = self.db.execute(stmt).mappings()
         items = [{
-            "id": r.id,
-            "normalized_signature": r.normalized_signature,
-            "display_signature": r.representative_message,
-            **self._error_family_fields(r.error_family),
-            "severity": r.severity,
-            "component": r.component,
-            "count": r.count,
-            "representative_message": r.representative_message,
-            "first_seen_text": self._epoch_to_seconds(r.first_seen_epoch_ms),
-            "last_seen_text": self._epoch_to_seconds(r.last_seen_epoch_ms),
+            "id": r["id"],
+            "normalized_signature": r["normalized_signature"],
+            "display_signature": r["representative_message"],
+            **self._error_family_fields(r["error_family"]),
+            "severity": r["severity"],
+            "component": r["component"],
+            "count": r["count"],
+            "representative_message": r["representative_message"],
+            "first_seen_text": self._epoch_to_seconds(r["first_seen_epoch_ms"]),
+            "last_seen_text": self._epoch_to_seconds(r["last_seen_epoch_ms"]),
         } for r in rows]
         return {"items": items, "total": total, "offset": offset, "limit": limit}
 
     def get_error_regression_trend(self, task_id: int, signature: str | None = None, family: str | None = None, bucket: str = "day") -> list[dict[str, Any]]:
-        rows = list(self.db.scalars(select(NormalizedEventModel).where(NormalizedEventModel.task_id == task_id, NormalizedEventModel.normalized_signature.is_not(None)).order_by(NormalizedEventModel.epoch_ms.asc())))
         grouped: dict[str, int] = defaultdict(int)
-        for r in rows:
-            if signature and r.normalized_signature != signature:
+        stmt = (
+            select(
+                NormalizedEventModel.normalized_signature,
+                NormalizedEventModel.error_family,
+                NormalizedEventModel.parsed_datetime,
+            )
+            .where(
+                NormalizedEventModel.task_id == task_id,
+                NormalizedEventModel.normalized_signature.is_not(None),
+            )
+            .order_by(NormalizedEventModel.epoch_ms.asc())
+        )
+        for r in self.db.execute(stmt).mappings():
+            if signature and r["normalized_signature"] != signature:
                 continue
-            if family and r.error_family != family:
+            if family and r["error_family"] != family:
                 continue
-            if not r.parsed_datetime:
+            parsed_datetime = r["parsed_datetime"]
+            if not parsed_datetime:
                 continue
-            key = r.parsed_datetime.strftime("%Y-%m-%d" if bucket == "day" else "%Y-W%W")
+            key = parsed_datetime.strftime("%Y-%m-%d" if bucket == "day" else "%Y-W%W")
             grouped[key] += 1
         return [{"bucket": k, "count": v} for k, v in sorted(grouped.items())]
 
