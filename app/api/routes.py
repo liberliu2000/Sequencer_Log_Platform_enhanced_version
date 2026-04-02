@@ -266,8 +266,8 @@ def list_tasks(page: int = Query(default=1, ge=1), page_size: int = Query(defaul
     }
 
 
-@router.get('/tasks/{task_uuid}/status')
-def task_status(task_uuid: str, db: Session = Depends(get_db)):
+@router.get('/tasks/{task_uuid}/status-legacy')
+def task_status_legacy(task_uuid: str, db: Session = Depends(get_db)):
     cached = task_state_cache.get(task_uuid)
     if cached is not None:
         return cached
@@ -276,6 +276,63 @@ def task_status(task_uuid: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail='任务不存在')
     perf = PerformanceService().read_summary(task_uuid)
     return {'task_uuid': task.task_uuid, 'filename': task.filename, 'status': task.status, 'file_count': task.file_count, 'total_events': task.total_events, 'total_errors': task.total_errors, 'progress_percent': task.progress_percent, 'current_stage': task.current_stage, 'queue_position': task.queue_position or queue.queue_position(task.task_uuid), 'message': task.message, 'created_at': _dt_text(task.created_at), 'updated_at': _dt_text(task.updated_at), 'cpu_cores': perf.get('cpu_cores'), 'elapsed_seconds': perf.get('stage_timings', {}).get('total_seconds'), 'started_at': None, 'finished_at': None}
+
+
+@router.get('/tasks/{task_uuid}/status')
+def task_status(task_uuid: str, db: Session = Depends(get_db)):
+    repo = TaskRepository(db)
+    task = repo.get_task_by_uuid(task_uuid)
+    cached = task_state_cache.get(task_uuid) or {}
+    perf = PerformanceService().read_summary(task_uuid)
+
+    if not task and not cached:
+        raise HTTPException(status_code=404, detail='task not found')
+
+    response = {
+        'task_uuid': task_uuid,
+        'filename': getattr(task, 'filename', None),
+        'status': getattr(task, 'status', None),
+        'file_count': getattr(task, 'file_count', 0),
+        'total_events': getattr(task, 'total_events', 0),
+        'total_errors': getattr(task, 'total_errors', 0),
+        'progress_percent': getattr(task, 'progress_percent', 0),
+        'current_stage': getattr(task, 'current_stage', None),
+        'queue_position': getattr(task, 'queue_position', None),
+        'message': getattr(task, 'message', None),
+        'created_at': _dt_text(getattr(task, 'created_at', None)),
+        'updated_at': _dt_text(getattr(task, 'updated_at', None)),
+        'cpu_cores': perf.get('cpu_cores'),
+        'elapsed_seconds': (perf.get('stage_timings') or {}).get('total_seconds'),
+        'started_at': None,
+        'finished_at': None,
+        'estimated_remaining_seconds': None,
+        'estimated_finish_at': None,
+        'runtime_snapshot': {},
+        'progress_history': perf.get('progress_history', []),
+    }
+
+    response.update(cached)
+    response['task_uuid'] = task_uuid
+    response['filename'] = response.get('filename') or getattr(task, 'filename', None)
+    response['file_count'] = int(response.get('file_count') or getattr(task, 'file_count', 0) or 0)
+    response['total_events'] = int(response.get('total_events') or getattr(task, 'total_events', 0) or 0)
+    response['total_errors'] = int(response.get('total_errors') or getattr(task, 'total_errors', 0) or 0)
+    response['progress_percent'] = int(response.get('progress_percent') or 0)
+    response['queue_position'] = response.get('queue_position') or getattr(task, 'queue_position', None) or queue.queue_position(task_uuid)
+    response['cpu_cores'] = response.get('cpu_cores') or perf.get('cpu_cores')
+
+    perf_status = perf.get('status_snapshot') if isinstance(perf.get('status_snapshot'), dict) else {}
+    if perf_status and not response.get('progress_history'):
+        response['progress_history'] = perf_status.get('progress_history', [])
+    if perf_status:
+        for field in ('started_at', 'finished_at', 'elapsed_seconds', 'estimated_remaining_seconds', 'estimated_finish_at'):
+            if response.get(field) is None and perf_status.get(field) is not None:
+                response[field] = perf_status.get(field)
+
+    if response.get('status') in {'uploaded', 'queued', 'processing'}:
+        response['runtime_snapshot'] = SystemRuntimeService().current_snapshot()
+
+    return response
 
 
 @router.get('/tasks/{task_uuid}/performance-summary')

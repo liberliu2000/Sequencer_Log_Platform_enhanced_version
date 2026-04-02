@@ -10,10 +10,10 @@ from app.correlators.pairing import pair_start_end
 from app.core.settings import get_settings
 from app.db.base import Base
 from app.detectors.error_detection import annotate_errors, top_error_clusters
-from app.models.db_models import ErrorClusterModel, NormalizedEventModel, StepSummaryModel, UploadTaskModel
+from app.models.db_models import ErrorClusterModel, NormalizedEventModel, ParameterResultModel, StepSummaryModel, UploadTaskModel
 from app.schemas.common import NormalizedEvent
 from app.services.cycle_inference import infer_missing_cycles
-from app.services.cycle_service import aggregate_metric_steps, build_parameter_summaries
+from app.services.cycle_service import aggregate_metric_steps, build_parameter_summaries, build_unified_parameter_results
 from app.services.streaming_aggregation import StreamingAggregationCoordinator
 
 
@@ -278,6 +278,31 @@ def _normalize_cluster_row(row: ErrorClusterModel) -> dict:
     }
 
 
+def _normalize_parameter_result_row(row: ParameterResultModel) -> dict:
+    return {
+        "parameter_name": row.parameter_name,
+        "parameter_display_name": row.parameter_display_name,
+        "cycle": row.cycle_no,
+        "slide": row.slide,
+        "chip_name": row.chip_name,
+        "duration_seconds": row.duration_seconds,
+        "duration_ms": row.duration_ms,
+        "start_time": row.start_time_text,
+        "end_time": row.end_time_text,
+        "start_message": row.start_message,
+        "end_message": row.end_message,
+        "source_file": row.source_file,
+        "source_type": row.source_type,
+        "threshold": row.threshold,
+        "expected": row.expected,
+        "is_exceed": row.is_exceed,
+        "component": row.component,
+        "start_event_id": row.start_event_id,
+        "end_event_id": row.end_event_id,
+        "extra": orjson.loads(row.extra_json or "{}"),
+    }
+
+
 def test_streaming_aggregation_matches_existing_pipeline(tmp_path):
     db_path = tmp_path / "streaming.sqlite3"
     engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True, connect_args={"check_same_thread": False})
@@ -291,6 +316,7 @@ def test_streaming_aggregation_matches_existing_pipeline(tmp_path):
     expected_base_steps = expected_paired + expected_metric
     expected_parameter_steps = build_parameter_summaries(expected_events, expected_base_steps)
     expected_steps = expected_base_steps + expected_parameter_steps
+    expected_parameter_results = build_unified_parameter_results(expected_events, expected_base_steps)
     expected_total_errors, expected_bounds = _expected_error_bounds(expected_events)
     expected_top_clusters = top_error_clusters(expected_events, limit=200)
     expected_clusters = [
@@ -341,6 +367,7 @@ def test_streaming_aggregation_matches_existing_pipeline(tmp_path):
 
         assert result["total_errors"] == expected_total_errors
         assert result["step_summary_count"] == len(expected_steps)
+        assert result["parameter_result_count"] == len(expected_parameter_results)
         assert result["cluster_count"] == len(expected_clusters)
 
         ordered_stmt = (
@@ -378,6 +405,23 @@ def test_streaming_aggregation_matches_existing_pipeline(tmp_path):
             )
         )
         assert [_normalize_cluster_row(row) for row in stored_clusters] == expected_clusters
+
+        stored_parameter_results = list(
+            db.scalars(
+                select(ParameterResultModel)
+                .where(ParameterResultModel.task_id == task.id)
+                .order_by(
+                    ParameterResultModel.cycle_no.asc(),
+                    ParameterResultModel.parameter_name.asc(),
+                    ParameterResultModel.slide.asc(),
+                    ParameterResultModel.start_time_text.asc(),
+                    ParameterResultModel.id.asc(),
+                )
+            )
+        )
+        assert [_normalize_parameter_result_row(row) for row in stored_parameter_results] == [
+            result.model_dump(mode="json") for result in expected_parameter_results
+        ]
 
 
 def test_memory_guard_degrades_batches(tmp_path, monkeypatch):

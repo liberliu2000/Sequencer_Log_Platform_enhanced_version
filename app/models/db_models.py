@@ -109,6 +109,38 @@ class StepSummaryModel(Base):
     end_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class ParameterResultModel(Base):
+    __tablename__ = "parameter_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("upload_tasks.id"), index=True)
+    parameter_name: Mapped[str] = mapped_column(String(64), index=True)
+    parameter_display_name: Mapped[str] = mapped_column(String(128))
+    cycle_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    slide: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chip_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    start_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    end_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    start_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    end_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(32), index=True)
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_exceed: Mapped[bool] = mapped_column(Boolean, default=False)
+    component: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    start_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_parameter_results_task_param", "task_id", "parameter_name"),
+        Index("idx_parameter_results_task_cycle", "task_id", "cycle_no"),
+    )
+
+
 class ErrorClusterModel(Base):
     __tablename__ = "error_clusters"
 

@@ -14,6 +14,7 @@ from app.models.db_models import (
     ErrorClusterModel,
     LLMAnalysisResultModel,
     NormalizedEventModel,
+    ParameterResultModel,
     StepSummaryModel,
     TaskAuditLogModel,
     UploadTaskModel,
@@ -285,6 +286,21 @@ class TaskRepository:
             self.db.execute(insert(ErrorClusterModel), batch)
         self.db.commit()
 
+    def replace_parameter_results(
+        self,
+        task_id: int,
+        rows: Iterable[ParameterResultModel | dict[str, Any]],
+        batch_size: int = 500,
+    ) -> None:
+        self.db.execute(delete(ParameterResultModel).where(ParameterResultModel.task_id == task_id))
+        field_names = tuple(column.name for column in ParameterResultModel.__table__.columns if column.name != "id")
+        for batch in self._iter_chunks(
+            self._iter_insert_mappings(rows, task_id=task_id, field_names=field_names),
+            batch_size,
+        ):
+            self.db.execute(insert(ParameterResultModel), batch)
+        self.db.commit()
+
     def save_llm_result(self, row: LLMAnalysisResultModel) -> None:
         self.db.add(row)
         self.db.commit()
@@ -318,6 +334,7 @@ class TaskRepository:
 
         self.db.query(LLMAnalysisResultModel).filter(LLMAnalysisResultModel.task_id == task_id).delete()
         self.db.query(ErrorClusterModel).filter(ErrorClusterModel.task_id == task_id).delete()
+        self.db.query(ParameterResultModel).filter(ParameterResultModel.task_id == task_id).delete()
         self.db.query(StepSummaryModel).filter(StepSummaryModel.task_id == task_id).delete()
         self.db.query(NormalizedEventModel).filter(NormalizedEventModel.task_id == task_id).delete()
         self.db.query(TaskAuditLogModel).filter(TaskAuditLogModel.task_id == task_id).delete()

@@ -21,7 +21,7 @@ from app.correlators.pairing import (
     normalize_step_key,
 )
 from app.detectors.error_detection import normalize_error_signature
-from app.models.db_models import ErrorClusterModel, NormalizedEventModel, StepSummaryModel
+from app.models.db_models import ErrorClusterModel, NormalizedEventModel, ParameterResultModel, StepSummaryModel
 from app.schemas.common import ParameterResult
 from app.services.cycle_inference import CURRENT_CYCLE_HINTS, NEXT_CYCLE_HINTS
 from app.services.cycle_service import (
@@ -53,6 +53,7 @@ ProgressCallback = Callable[[str, int, str | None], None]
 EVENT_INSERT_FIELDS = tuple(column.name for column in NormalizedEventModel.__table__.columns if column.name != "id")
 STEP_INSERT_FIELDS = tuple(column.name for column in StepSummaryModel.__table__.columns if column.name != "id")
 CLUSTER_INSERT_FIELDS = tuple(column.name for column in ErrorClusterModel.__table__.columns if column.name != "id")
+PARAMETER_RESULT_INSERT_FIELDS = tuple(column.name for column in ParameterResultModel.__table__.columns if column.name != "id")
 
 
 @dataclass(slots=True)
@@ -218,6 +219,7 @@ class StreamingAggregationCoordinator:
 
     def clear_existing_outputs(self) -> None:
         self.db.execute(delete(ErrorClusterModel).where(ErrorClusterModel.task_id == self.task_id))
+        self.db.execute(delete(ParameterResultModel).where(ParameterResultModel.task_id == self.task_id))
         self.db.execute(delete(StepSummaryModel).where(StepSummaryModel.task_id == self.task_id))
         self.db.execute(delete(NormalizedEventModel).where(NormalizedEventModel.task_id == self.task_id))
         self.db.commit()
@@ -479,6 +481,11 @@ class StreamingAggregationCoordinator:
         )
         parameter_step_count = self._append_parameter_step_rows(parameter_results)
         step_summary_count += parameter_step_count
+        t0 = time.perf_counter()
+        parameter_result_count = self._persist_parameter_results(parameter_results)
+        parameter_insert_seconds = time.perf_counter() - t0
+        del parameter_results
+        gc.collect()
 
         cluster_rows = self._build_error_cluster_rows(error_counter, error_bounds, error_representatives, limit=200)
         cluster_insert_seconds = 0.0
@@ -492,11 +499,13 @@ class StreamingAggregationCoordinator:
         return {
             "total_errors": total_errors,
             "step_summary_count": step_summary_count,
+            "parameter_result_count": parameter_result_count,
             "cluster_count": len(cluster_rows),
             "timings": {
                 "stream_postprocess_seconds": round(time.perf_counter() - started, 4),
                 "db_update_events_seconds": round(update_seconds, 4),
                 "db_write_steps_seconds": round(step_insert_seconds, 4),
+                "db_write_parameter_results_seconds": round(parameter_insert_seconds, 4),
                 "db_write_clusters_seconds": round(cluster_insert_seconds, 4),
             },
             "memory_guard": self.memory_guard_report(),
@@ -537,6 +546,53 @@ class StreamingAggregationCoordinator:
         self.db.commit()
         step_buffer.clear()
         gc.collect()
+
+    def _parameter_result_to_row(self, result: ParameterResult) -> dict[str, Any]:
+        row = {field: None for field in PARAMETER_RESULT_INSERT_FIELDS if field != "task_id"}
+        row.update(
+            {
+                "parameter_name": result.parameter_name,
+                "parameter_display_name": result.parameter_display_name,
+                "cycle_no": result.cycle,
+                "slide": result.slide,
+                "chip_name": result.chip_name,
+                "duration_seconds": result.duration_seconds,
+                "duration_ms": result.duration_ms,
+                "start_time_text": result.start_time,
+                "end_time_text": result.end_time,
+                "start_message": result.start_message,
+                "end_message": result.end_message,
+                "source_file": result.source_file,
+                "source_type": result.source_type,
+                "threshold": result.threshold,
+                "expected": result.expected,
+                "is_exceed": result.is_exceed,
+                "component": result.component,
+                "start_event_id": result.start_event_id,
+                "end_event_id": result.end_event_id,
+                "extra_json": _json_text(result.extra),
+            }
+        )
+        row["task_id"] = self.task_id
+        return row
+
+    def _persist_parameter_results(self, parameter_results: list[ParameterResult]) -> int:
+        if not parameter_results:
+            return 0
+        pending: list[dict[str, Any]] = []
+        count = 0
+        for result in parameter_results:
+            pending.append(self._parameter_result_to_row(result))
+            count += 1
+            if len(pending) >= self.guard.step_insert_batch:
+                self.db.execute(insert(ParameterResultModel), pending)
+                self.db.commit()
+                pending.clear()
+                self._apply_memory_guard("parameter_result_insert")
+        if pending:
+            self.db.execute(insert(ParameterResultModel), pending)
+            self.db.commit()
+        return count
 
     def _append_parameter_step_rows(self, parameter_results: list[ParameterResult]) -> int:
         pending: list[dict[str, Any]] = []
@@ -627,9 +683,11 @@ class StreamingAggregationCoordinator:
         system_percent = None
         available_mb = None
         process_rss_mb = None
+        cpu_percent = None
 
         if psutil is not None:
             try:
+                cpu_percent = round(float(psutil.cpu_percent(interval=0.05)), 1)
                 vm = psutil.virtual_memory()
                 system_percent = round(float(vm.percent), 1)
                 available_mb = _round_mb(vm.available)
@@ -668,6 +726,7 @@ class StreamingAggregationCoordinator:
                 pass
 
         return {
+            "cpu_percent": cpu_percent,
             "system_percent": system_percent,
             "available_mb": available_mb,
             "process_rss_mb": process_rss_mb,
@@ -678,6 +737,8 @@ class StreamingAggregationCoordinator:
         reasons: list[str] = []
         limit_percent = max(0, min(int(self.settings.system_memory_soft_limit_percent), 98))
         reserve_mb = max(0, int(self.settings.system_memory_soft_reserve_mb))
+        cpu_limit_percent = max(0, min(int(self.settings.system_cpu_soft_limit_percent), 100))
+        cpu_percent = snapshot.get("cpu_percent")
         system_percent = snapshot.get("system_percent")
         available_mb = snapshot.get("available_mb")
 
@@ -685,6 +746,8 @@ class StreamingAggregationCoordinator:
             reasons.append(f"system_percent={system_percent} >= {limit_percent}")
         if reserve_mb > 0 and available_mb is not None and float(available_mb) <= reserve_mb:
             reasons.append(f"available_mb={available_mb} <= {reserve_mb}")
+        if cpu_limit_percent > 0 and cpu_percent is not None and float(cpu_percent) >= cpu_limit_percent:
+            reasons.append(f"cpu_percent={cpu_percent} >= {cpu_limit_percent}")
 
         if not reasons:
             return False

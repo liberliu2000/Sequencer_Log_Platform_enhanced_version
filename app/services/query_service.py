@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
 import mimetypes
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -12,12 +13,14 @@ from sqlalchemy.orm import Session
 
 from app.core.settings import get_settings
 from app.llm.context import ContextConfig, compress_records
-from app.models.db_models import ErrorClusterModel, LLMAnalysisResultModel, NormalizedEventModel, StepSummaryModel, TaskAuditLogModel, UploadTaskModel
-from app.schemas.common import NormalizedEvent, StepSummary
-from app.services.cycle_service import build_unified_parameter_results
-from app.services.parameter_definitions import PARAMETER_DEFINITIONS
+from app.models.db_models import ErrorClusterModel, LLMAnalysisResultModel, NormalizedEventModel, ParameterResultModel, StepSummaryModel, TaskAuditLogModel, UploadTaskModel
+from app.repositories.task_repository import TaskRepository
+from app.schemas.common import NormalizedEvent, ParameterResult, StepSummary
+from app.services.cycle_service import _definition_values, _event_time_text, _safe_seconds
+from app.services.parameter_definitions import PARAMETER_DEFINITIONS, PAIRING_RULES
 from app.services.perf_cache import TTLCache
 from app.services.performance_service import PerformanceService
+from app.services.streaming_aggregation import StreamingAggregationCoordinator
 from app.utils.error_family import get_error_family_metadata
 from app.utils.timeparse import format_seconds
 
@@ -363,14 +366,216 @@ class QueryService:
     def get_parameter_definitions(self) -> list[dict[str, Any]]:
         return [d.__dict__ for d in PARAMETER_DEFINITIONS]
 
+    def _parameter_result_row_to_dict(self, row: Any) -> dict[str, Any]:
+        extra = self._llm_extra(self._row_value(row, "extra_json"))
+        if not isinstance(extra, dict):
+            extra = {}
+        return {
+            "parameter_name": self._row_value(row, "parameter_name"),
+            "parameter_display_name": self._row_value(row, "parameter_display_name"),
+            "cycle": self._row_value(row, "cycle_no"),
+            "slide": self._row_value(row, "slide"),
+            "chip_name": self._row_value(row, "chip_name"),
+            "duration_seconds": self._row_value(row, "duration_seconds"),
+            "duration_ms": self._row_value(row, "duration_ms"),
+            "start_time": self._row_value(row, "start_time_text"),
+            "end_time": self._row_value(row, "end_time_text"),
+            "start_message": self._row_value(row, "start_message"),
+            "end_message": self._row_value(row, "end_message"),
+            "source_file": self._row_value(row, "source_file"),
+            "source_type": self._row_value(row, "source_type"),
+            "threshold": self._row_value(row, "threshold"),
+            "expected": self._row_value(row, "expected"),
+            "is_exceed": bool(self._row_value(row, "is_exceed")),
+            "component": self._row_value(row, "component"),
+            "start_event_id": self._row_value(row, "start_event_id"),
+            "end_event_id": self._row_value(row, "end_event_id"),
+            "extra": extra,
+        }
+
+    def _load_parameter_results_from_store(self, task_id: int) -> list[dict[str, Any]]:
+        stmt = (
+            select(*ParameterResultModel.__table__.c)
+            .where(ParameterResultModel.task_id == task_id)
+            .order_by(
+                ParameterResultModel.cycle_no.asc(),
+                ParameterResultModel.parameter_name.asc(),
+                ParameterResultModel.slide.asc(),
+                ParameterResultModel.start_time_text.asc(),
+                ParameterResultModel.id.asc(),
+            )
+        )
+        return [self._parameter_result_row_to_dict(row) for row in self.db.execute(stmt).mappings()]
+
+    def _load_cycle_summary_stats(self, task_id: int) -> dict[tuple[int | None, str | None], dict[str, Any]]:
+        stats: dict[tuple[int | None, str | None], dict[str, Any]] = defaultdict(
+            lambda: {
+                "min_start": None,
+                "max_end": None,
+                "duration_sum": 0.0,
+                "has_nonzero_duration": False,
+            }
+        )
+        stmt = (
+            select(
+                StepSummaryModel.cycle_no.label("cycle_no"),
+                StepSummaryModel.chip_name.label("chip_name"),
+                func.min(StepSummaryModel.start_epoch_ms).label("min_start"),
+                func.max(StepSummaryModel.end_epoch_ms).label("max_end"),
+                func.sum(StepSummaryModel.duration_ms).label("duration_sum"),
+                func.max(func.abs(func.coalesce(StepSummaryModel.duration_ms, 0))).label("max_abs_duration"),
+            )
+            .where(StepSummaryModel.task_id == task_id)
+            .group_by(StepSummaryModel.cycle_no, StepSummaryModel.chip_name)
+        )
+        for row in self.db.execute(stmt).mappings():
+            stats[(row["cycle_no"], row["chip_name"])] = {
+                "min_start": row["min_start"],
+                "max_end": row["max_end"],
+                "duration_sum": float(row["duration_sum"] or 0.0),
+                "has_nonzero_duration": bool(row["max_abs_duration"]),
+            }
+        return stats
+
+    def _parameter_result_to_mapping(self, task_id: int, result: ParameterResult) -> dict[str, Any]:
+        return {
+            "task_id": task_id,
+            "parameter_name": result.parameter_name,
+            "parameter_display_name": result.parameter_display_name,
+            "cycle_no": result.cycle,
+            "slide": result.slide,
+            "chip_name": result.chip_name,
+            "duration_seconds": result.duration_seconds,
+            "duration_ms": result.duration_ms,
+            "start_time_text": result.start_time,
+            "end_time_text": result.end_time,
+            "start_message": result.start_message,
+            "end_message": result.end_message,
+            "source_file": result.source_file,
+            "source_type": result.source_type,
+            "threshold": result.threshold,
+            "expected": result.expected,
+            "is_exceed": result.is_exceed,
+            "component": result.component,
+            "start_event_id": result.start_event_id,
+            "end_event_id": result.end_event_id,
+            "extra_json": json.dumps(result.extra or {}, ensure_ascii=False, default=str),
+        }
+
+    def _rebuild_parameter_results_from_events(self, task_id: int) -> list[dict[str, Any]]:
+        coordinator = StreamingAggregationCoordinator(self.db, task_id, self.settings)
+        pairing_open_maps = {rule.parameter_name: defaultdict(deque) for rule in PAIRING_RULES}
+        direct_duration_results: list[ParameterResult] = []
+        pairing_results: list[ParameterResult] = []
+        metric_state: dict[tuple[int | None, str | None, str], dict[str, Any]] = defaultdict(
+            lambda: {"sum_duration_ms": 0.0, "row_count": 0, "exemplar": None, "raw_duration_ms_list": []}
+        )
+        cycle_anchor_events = []
+        columns = (
+            NormalizedEventModel.id,
+            NormalizedEventModel.source_file,
+            NormalizedEventModel.parser_name,
+            NormalizedEventModel.original_time_text,
+            NormalizedEventModel.parsed_datetime,
+            NormalizedEventModel.epoch_ms,
+            NormalizedEventModel.formatted_ms,
+            NormalizedEventModel.level,
+            NormalizedEventModel.component,
+            NormalizedEventModel.module,
+            NormalizedEventModel.thread,
+            NormalizedEventModel.method_name,
+            NormalizedEventModel.class_name,
+            NormalizedEventModel.source_path,
+            NormalizedEventModel.line_no,
+            NormalizedEventModel.message,
+            NormalizedEventModel.cycle_no,
+            NormalizedEventModel.sub_step,
+            NormalizedEventModel.chip_name,
+            NormalizedEventModel.stage_name,
+            NormalizedEventModel.board_name,
+            NormalizedEventModel.event_kind,
+            NormalizedEventModel.direction,
+            NormalizedEventModel.duration_ms,
+            NormalizedEventModel.status,
+            NormalizedEventModel.error_code,
+            NormalizedEventModel.exception_type,
+            NormalizedEventModel.extra_json,
+        )
+
+        for rows in coordinator._iter_event_batches(columns=columns, limit=coordinator.scan_batch_size):
+            for row in rows:
+                event = coordinator._row_to_event(row)
+                coordinator._collect_direct_duration_result(event, direct_duration_results)
+                coordinator._consume_pairing_result(event, pairing_open_maps, pairing_results)
+                coordinator._collect_metric_state(event, metric_state)
+                if event.epoch_ms is not None and "current imaging cycle" in (event.message or "").lower():
+                    cycle_anchor_events.append(event)
+            coordinator._apply_memory_guard("query_parameter_result_rebuild")
+            gc.collect()
+
+        metric_results: list[ParameterResult] = []
+        threshold, expected = _definition_values("row_scan_metric_avg")
+        for (cycle_no, chip_name, metric_name), stats in metric_state.items():
+            row_count = int(stats["row_count"])
+            exemplar = stats["exemplar"]
+            if row_count <= 0 or exemplar is None:
+                continue
+            avg_ms = float(stats["sum_duration_ms"]) / row_count
+            metric_results.append(
+                ParameterResult(
+                    parameter_name="row_scan_metric_avg",
+                    parameter_display_name=f"row scan metric avg::{metric_name}",
+                    cycle=cycle_no,
+                    slide=None,
+                    chip_name=chip_name,
+                    duration_seconds=_safe_seconds(avg_ms),
+                    duration_ms=avg_ms,
+                    start_time=_event_time_text(exemplar),
+                    end_time=_event_time_text(exemplar),
+                    start_message=exemplar.message,
+                    end_message=exemplar.message,
+                    source_file=exemplar.source_file,
+                    source_type="metrics",
+                    threshold=threshold,
+                    expected=expected,
+                    is_exceed=False,
+                    component=exemplar.component,
+                    start_event_id=getattr(exemplar, "id", None),
+                    end_event_id=getattr(exemplar, "id", None),
+                    extra={
+                        "metric_stage": metric_name,
+                        "row_count": row_count,
+                        "raw_duration_ms_list": list(stats["raw_duration_ms_list"]),
+                    },
+                )
+            )
+
+        results = coordinator._finalize_parameter_results(
+            cycle_anchor_events=cycle_anchor_events,
+            direct_duration_results=direct_duration_results,
+            pairing_results=pairing_results,
+            metric_results=metric_results,
+            cycle_summary_stats=self._load_cycle_summary_stats(task_id),
+        )
+        TaskRepository(self.db).replace_parameter_results(
+            task_id,
+            (self._parameter_result_to_mapping(task_id, result) for result in results),
+            batch_size=max(200, int(self.settings.metrics_batch_size) * 4),
+        )
+        gc.collect()
+        return [result.model_dump(mode="json") for result in results]
+
     def get_parameter_results(self, task_id: int) -> list[dict[str, Any]]:
         key = self._cache_key(task_id, "parameter_results")
         def factory():
-            events = self._load_all_event_schemas(task_id)
-            step_rows = self.get_step_summaries(task_id, offset=0, limit=200000)["items"]
-            steps = [self._dict_to_step(r) for r in step_rows]
-            results = build_unified_parameter_results(events, steps)
-            return [r.model_dump(mode="json") for r in results]
+            stored_rows = self._load_parameter_results_from_store(task_id)
+            if stored_rows:
+                return stored_rows
+
+            task = self.db.get(UploadTaskModel, task_id)
+            if task is not None and str(task.status or "").lower() not in {"completed", "failed", "error"}:
+                return []
+            return self._rebuild_parameter_results_from_events(task_id)
         return self._cached(key, factory)
 
     def get_parameter_series(self, task_id: int, parameter_name: str, unit: str = "s") -> list[dict[str, Any]]:
@@ -901,14 +1106,20 @@ class QueryService:
         if not file_path.exists() or not file_path.is_file():
             raise ValueError("文件不存在")
         mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        raw = file_path.read_bytes()[: 1024 * 128]
+        with file_path.open("rb") as handle:
+            raw = handle.read(1024 * 128)
         binary = b"\x00" in raw
         if binary:
             return {"relative_path": relative_path, "mime_type": mime, "encoding": None, "binary": True, "line_count": 1, "preview": [raw[: min(len(raw), 256)].hex(" ")]}
         for encoding in ["utf-8", "utf-8-sig", "gbk", "latin1"]:
             try:
-                text = file_path.read_text(encoding=encoding, errors="replace")
-                lines = text.splitlines()[:max_lines]
+                lines: list[str] = []
+                with file_path.open("r", encoding=encoding, errors="replace") as handle:
+                    for _ in range(max_lines):
+                        line = handle.readline()
+                        if not line:
+                            break
+                        lines.append(line.rstrip("\r\n"))
                 return {"relative_path": relative_path, "mime_type": mime, "encoding": encoding, "binary": False, "line_count": len(lines), "preview": lines}
             except Exception:
                 continue

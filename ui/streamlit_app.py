@@ -5,6 +5,7 @@ import math
 import os
 import re
 import textwrap
+from datetime import datetime
 from html import escape
 from typing import Any, cast
 
@@ -1288,26 +1289,156 @@ def render_homepage_performance_summary(perf_summary: JsonDict, status: JsonDict
     )
 
 
+def _parse_iso_text(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _format_duration_text(seconds: Any) -> str:
+    try:
+        total_seconds = float(seconds)
+    except (TypeError, ValueError):
+        return "-"
+    if not math.isfinite(total_seconds) or total_seconds < 0:
+        return "-"
+    if total_seconds < 1:
+        return f"{total_seconds:.2f}s"
+    days, remainder = divmod(int(round(total_seconds)), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts[:3])
+
+
+def _format_datetime_text(value: Any) -> str:
+    dt = _parse_iso_text(value)
+    if dt is None:
+        return "-"
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_task_active(status: JsonDict) -> bool:
+    return str(status.get("status") or "").lower() in {"uploaded", "queued", "processing"}
+
+
+def _render_dashboard_progress_card_content(task_uuid: str, status: JsonDict) -> None:
+    progress_value = max(0, min(100, int(status.get("progress_percent") or 0)))
+    runtime_snapshot = status.get("runtime_snapshot") if isinstance(status.get("runtime_snapshot"), dict) else {}
+    history = status.get("progress_history") if isinstance(status.get("progress_history"), list) else []
+    file_label = status.get("filename") or task_uuid
+    current_stage = status.get("current_stage") or "-"
+    elapsed_seconds = status.get("elapsed_seconds")
+    eta_seconds = status.get("estimated_remaining_seconds")
+    finish_at = status.get("estimated_finish_at")
+
+    st.markdown("#### 实时文件处理进度")
+    left, right = st.columns([1.35, 1.0], gap="large")
+    with left:
+        st.caption(f"任务 / 文件: {file_label}")
+        st.progress(progress_value)
+        stage_cols = st.columns(2, gap="medium")
+        stage_cols[0].metric("当前阶段", current_stage)
+        stage_cols[1].metric("处理状态", status.get("status", "-"))
+        if status.get("message"):
+            st.caption(str(status.get("message")))
+    with right:
+        metric_cols = st.columns(2, gap="small")
+        metric_cols[0].metric("已用时间", _format_duration_text(elapsed_seconds))
+        metric_cols[1].metric("预计剩余", _format_duration_text(eta_seconds))
+        metric_cols = st.columns(2, gap="small")
+        metric_cols[0].metric("预计结束", _format_datetime_text(finish_at))
+        metric_cols[1].metric("进度", f"{progress_value}%")
+        cpu_percent = ((runtime_snapshot.get("cpu") or {}).get("percent")) if runtime_snapshot else None
+        mem_percent = ((runtime_snapshot.get("memory") or {}).get("percent")) if runtime_snapshot else None
+        if cpu_percent is not None or mem_percent is not None:
+            st.caption(
+                f"Runtime snapshot: CPU {cpu_percent if cpu_percent is not None else '-'}% | "
+                f"Memory {mem_percent if mem_percent is not None else '-'}%"
+            )
+
+    if history:
+        history_rows = []
+        for row in reversed(history[-10:]):
+            history_rows.append(
+                {
+                    "时间": _format_datetime_text(row.get("timestamp")),
+                    "阶段": row.get("current_stage") or "-",
+                    "状态": row.get("status") or "-",
+                    "进度": f"{int(row.get('progress_percent') or 0)}%",
+                    "说明": row.get("message") or "",
+                }
+            )
+        with st.expander("处理历史", expanded=not _is_task_active(status)):
+            safe_dataframe(pd.DataFrame(history_rows), use_container_width=True, height=240)
+
+
+def render_dashboard_progress_card(task_uuid: str, status: JsonDict) -> None:
+    refresh_seconds = max(2, int(os.getenv("STREAMLIT_PROGRESS_REFRESH_SECONDS", "3")))
+    auto_refresh_key = f"dashboard_progress_auto::{task_uuid}"
+    st.session_state[auto_refresh_key] = _is_task_active(status)
+    fragment_fn = getattr(st, "fragment", None)
+
+    if callable(fragment_fn):
+        @fragment_fn(run_every=refresh_seconds if st.session_state.get(auto_refresh_key) else None)
+        def _fragment() -> None:
+            ok_live, live_status = api_get(f"/tasks/{task_uuid}/status", live=True)
+            payload = live_status if ok_live and isinstance(live_status, dict) else status
+            active_now = _is_task_active(payload)
+            if st.session_state.get(auto_refresh_key) != active_now:
+                st.session_state[auto_refresh_key] = active_now
+                st.rerun()
+            _render_dashboard_progress_card_content(task_uuid, cast(JsonDict, payload))
+
+        _fragment()
+        return
+
+    _render_dashboard_progress_card_content(task_uuid, status)
+    if st.button("刷新进度", key=f"progress_refresh::{task_uuid}"):
+        clear_cached_api_get()
+        st.rerun()
+
+
 def _api_base() -> str:
     return st.session_state.get("api_base", DEFAULT_API_BASE)
 
 
-@st.cache_data(show_spinner=False, ttl=15)
-def cached_api_get(path: str, params_json: str = "") -> Any:
+def _request_api_get(path: str, params_json: str = "") -> Any:
     params = json.loads(params_json) if params_json else {}
     resp = requests.get(f"{_api_base()}{path}", params=params, headers=_auth_headers(), timeout=120)
     resp.raise_for_status()
     return resp.json()
 
 
+@st.cache_data(show_spinner=False, ttl=15)
+def cached_api_get(path: str, params_json: str = "") -> Any:
+    return _request_api_get(path, params_json)
+
+
 def clear_cached_api_get() -> None:
     cast(Any, cached_api_get).clear()
 
 
-def api_get(path: str, **params: Any) -> tuple[bool, Any]:
+def api_get(path: str, live: bool = False, **params: Any) -> tuple[bool, Any]:
     try:
         key = json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)
-        return True, cached_api_get(path, key)
+        return True, (_request_api_get(path, key) if live else cached_api_get(path, key))
     except requests.HTTPError as exc:
         try:
             detail = exc.response.json()
@@ -2502,7 +2633,7 @@ elif page == "首页 / 仪表盘":
         st.info("请先在左侧选择任务 UUID。")
     else:
         ok, data = api_get(f"/tasks/{task_uuid}/dashboard")
-        ok_status, status = api_get(f"/tasks/{task_uuid}/status")
+        ok_status, status = api_get(f"/tasks/{task_uuid}/status", live=True)
         ok_perf, perf = api_get(f"/tasks/{task_uuid}/performance-summary")
         if ok and ok_status:
             perf_summary = perf if ok_perf and isinstance(perf, dict) else {}
@@ -2520,6 +2651,7 @@ elif page == "首页 / 仪表盘":
                     {"icon": "review", "label": "唯一错误数", "value": unique_error_count, "note": "去重后的错误簇数量", "tone": "#DCEBFA"},
                 ],
             )
+            render_dashboard_progress_card(task_uuid, cast(JsonDict, status))
             render_dashboard_snapshot(
                 status.get("progress_percent", 0),
                 f"当前阶段: {status.get('current_stage') or ('已完成' if status.get('status') == 'completed' else '等待状态同步')}",
@@ -2593,7 +2725,7 @@ elif page == "文件上传":
             else:
                 st.error(result)
     if task_uuid:
-        ok, status = api_get(f"/tasks/{task_uuid}/status")
+        ok, status = api_get(f"/tasks/{task_uuid}/status", live=True)
         if ok:
             st.markdown("### 当前任务进度")
             st.progress(int(status.get("progress_percent", 0)))

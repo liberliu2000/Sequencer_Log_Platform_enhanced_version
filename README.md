@@ -1,5 +1,47 @@
 # Sequencer Log Platform Enhanced Version
 
+## 全链路防崩优化与实时进度面板（2026-04-02）
+
+本次更新在不改变任何最终输出结果、数据精度、图表内容和业务逻辑的前提下，补齐了“流式后处理与聚合”以及查询/导出链路的低内存优化，并在仪表盘新增了实时任务进度面板。
+
+### 后端优化
+
+- `app/services/streaming_aggregation.py`
+  - 流式后处理完成后，直接把完整 `ParameterResult` 批量落库到新表 `parameter_results`，后续查询、导出、绘图不再重复扫描全量事件。
+  - 资源守卫从“仅内存”扩展为“CPU + 内存”联合降级，达到阈值时自动缩小批量大小、触发 `gc.collect()` 并短暂让出 CPU。
+  - 保留原有 `step_summaries`、`error_clusters` 和仪表盘统计口径，最终结果与优化前完全一致。
+
+- `app/services/query_service.py`
+  - `get_parameter_results()` 优先读取轻量结果表；旧任务若还没有结果表数据，则使用数据库顺序扫描 + 增量聚合流式回填一次，避免再把 `normalized_events` 全量反序列化进内存。
+  - `preview_task_file()` 改为只读取头部字节做二进制判断，并按行流式预览文本，避免大日志整文件读入。
+
+- `app/services/export_service.py`
+  - `export_events_csv()` 改为分页流式写 CSV，避免导出时一次性构造超大列表。
+
+- `app/services/system_runtime_service.py`
+  - 新增 CPU 软阈值 `system_cpu_soft_limit_percent`，调度守卫同时考虑 CPU 和内存压力。
+  - 新增 `adaptive_cpu_allocation()`，任务启动前会根据系统负载自动降低并发核数，适配低核轻量服务器。
+
+- `app/services/ingestion_service.py`
+  - 任务开始时会记录自适应 CPU 分配结果，性能摘要中会保留 `runtime_allocation`、`progress_history` 和最终 `status_snapshot`。
+  - 成功 / 失败都会把进度历史持久化到 `data/performance/<task_uuid>.json`，任务完成后仍可在仪表盘回看历史。
+
+- `app/services/task_state_cache.py`
+  - 状态缓存新增 `filename`、`total_events`、`total_errors`、`estimated_remaining_seconds`、`estimated_finish_at`、`progress_history`、`runtime_snapshot`。
+  - ETA 基于最近进度斜率动态估算，并保留轻量历史缓冲，避免常驻大对象。
+
+### 仪表盘新增能力
+
+- `ui/streamlit_app.py`
+  - 仪表盘页新增“实时文件处理进度”卡片，展示当前文件 / 任务名、当前阶段、`st.progress`、已用时间、预计剩余时间、预计结束时间、状态和最近处理历史。
+  - `/tasks/{task_uuid}/status` 改为实时请求，不走 15 秒缓存；处理中的任务使用局部自动刷新，不影响原有布局。
+
+### 兼容性与验证
+
+- 新增轻量结果表：`parameter_results`
+- 旧任务首次查询参数结果时会自动流式回填，不需要前端改动
+- 全量测试已通过：`64 passed`
+
 ## 主进程汇总解析结果防崩修复（2026-04-02）
 
 - `app/services/streaming_aggregation.py`

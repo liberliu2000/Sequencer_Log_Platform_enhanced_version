@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 from threading import Lock, Thread
-import time
 from typing import Callable
 
 from app.core.settings import get_settings
@@ -26,8 +26,8 @@ class TaskQueue:
         if self._started:
             return
         self._started = True
-        t = Thread(target=self._consume, daemon=True, name="sequencer-queue-dispatcher")
-        t.start()
+        dispatcher = Thread(target=self._consume, daemon=True, name="sequencer-queue-dispatcher")
+        dispatcher.start()
 
     def _consume(self) -> None:
         while True:
@@ -53,9 +53,10 @@ class TaskQueue:
                     task_state_cache.update(
                         task_uuid,
                         status="queued",
-                        current_stage="等待内存窗口",
+                        current_stage="waiting_for_resource_window",
                         queue_position=self.queue_position(task_uuid),
-                        message=f"{guard.get('summary')}；运行中的分析任务不会被中断。",
+                        message=f"{guard.get('summary')}; running tasks stay uninterrupted.",
+                        runtime_snapshot={"guard": guard},
                     )
                     time.sleep(max(2, int(guard.get("guard_wait_seconds") or 5)))
             finally:

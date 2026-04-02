@@ -71,8 +71,10 @@ class Settings(BaseSettings):
     lightweight_mode: bool = True
     ui_auto_refresh_seconds: int = 5
     performance_log_enabled: bool = True
+    task_progress_history_limit: int = 48
     system_memory_soft_limit_percent: int = 88
     system_memory_soft_reserve_mb: int = 2048
+    system_cpu_soft_limit_percent: int = 92
     system_memory_guard_wait_seconds: int = 5
 
     default_time_rounding: Literal["truncate", "round"] = "truncate"

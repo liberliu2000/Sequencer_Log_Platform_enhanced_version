@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 from sqlalchemy.orm import Session
@@ -21,9 +22,8 @@ class ExportService:
         self.query = QueryService(db)
 
     def export_events_csv(self, task_id: int, task_uuid: str) -> str:
-        rows = self.query.list_events(task_id=task_id, limit=100000, offset=0)["items"]
         output = Path(self.settings.export_dir) / f"{task_uuid}_events.csv"
-        self._write_csv(output, rows)
+        self._write_csv_stream(output, self._iter_event_rows(task_id))
         return str(output)
 
     def export_error_report_csv(self, task_id: int, task_uuid: str) -> str:
@@ -156,6 +156,19 @@ class ExportService:
         payload["parameter_series"] = param_series
         return payload
 
+    def _iter_event_rows(self, task_id: int, page_size: int = 2000) -> Iterator[dict[str, Any]]:
+        offset = 0
+        while True:
+            payload = self.query.list_events(task_id=task_id, limit=page_size, offset=offset)
+            rows = payload.get("items") or []
+            if not rows:
+                break
+            for row in rows:
+                yield row
+            if len(rows) < page_size:
+                break
+            offset += len(rows)
+
     def _build_html(self, payload: dict, task_uuid: str) -> str:
         px, pio = self._plotly()
         def section(title: str, content: str, sid: str) -> str:
@@ -275,6 +288,20 @@ class ExportService:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             for row in rows:
+                writer.writerow({k: cls._safe_value(v) for k, v in row.items()})
+
+    @classmethod
+    def _write_csv_stream(cls, output: Path, rows: Iterable[dict[str, Any]]) -> None:
+        iterator = iter(rows)
+        first = next(iterator, None)
+        if first is None:
+            output.write_text('', encoding='utf-8')
+            return
+        with output.open('w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(first.keys()))
+            writer.writeheader()
+            writer.writerow({k: cls._safe_value(v) for k, v in first.items()})
+            for row in iterator:
                 writer.writerow({k: cls._safe_value(v) for k, v in row.items()})
 
     @classmethod
