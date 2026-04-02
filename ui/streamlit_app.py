@@ -5,6 +5,8 @@ import math
 import os
 import re
 import textwrap
+import hashlib
+import inspect
 from datetime import datetime
 from html import escape
 from typing import Any, cast
@@ -96,6 +98,15 @@ def _format_metric_value(value: Any) -> str:
 DEFAULT_CARD_TONES = ["#052659", "#0B5CAD", "#D96B3B", "#DCEBFA", "#6D8FB6", "#F3E1A6"]
 DEFAULT_BADGE_TONES = ["#052659", "#DCEBFA", "#D96B3B", "#E7EFF8"]
 JsonDict = dict[str, Any]
+PROGRESS_STAGE_FLOW = ["uploaded", "parsing", "summary", "postprocess", "completed"]
+PROGRESS_STAGE_META = {
+    "uploaded": {"label": "上传", "aliases": ("uploaded", "queued", "discover", "prescan", "prepare", "upload", "workspace", "input")},
+    "parsing": {"label": "解析", "aliases": ("parse", "parser", "parsing")},
+    "summary": {"label": "汇总", "aliases": ("merge", "normalize", "cycle_context", "context", "summary", "aggregate")},
+    "postprocess": {"label": "后处理", "aliases": ("postprocess", "cluster", "materializ", "finaliz", "dashboard", "error_prep")},
+    "completed": {"label": "完成", "aliases": ("completed", "finished", "success")},
+}
+_SAFE_DATAFRAME_CALL_COUNTS: dict[str, int] = {}
 
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -771,6 +782,268 @@ def inject_design_system(mode: str = "light"):
             word-break: break-word;
         }
 
+        .dashboard-progress-panel {
+            position: relative;
+            overflow: hidden;
+            border-radius: 28px;
+            border: 1px solid rgba(84, 131, 179, 0.22);
+            background:
+                radial-gradient(circle at top right, rgba(193, 232, 255, 0.92) 0%, rgba(193, 232, 255, 0) 36%),
+                linear-gradient(135deg, rgba(3, 27, 58, 0.96) 0%, rgba(8, 44, 91, 0.96) 52%, rgba(17, 71, 130, 0.9) 100%);
+            box-shadow: 0 18px 42px rgba(5, 38, 89, 0.22);
+            margin: 0.4rem 0 1rem;
+        }
+
+        .dashboard-progress-panel::before {
+            content: "";
+            position: absolute;
+            inset: -40% auto auto -10%;
+            width: 220px;
+            height: 220px;
+            border-radius: 999px;
+            background: radial-gradient(circle, rgba(193, 232, 255, 0.32) 0%, rgba(193, 232, 255, 0) 72%);
+            pointer-events: none;
+        }
+
+        .dashboard-progress-hero {
+            position: relative;
+            padding: 1.15rem 1.2rem 0.9rem;
+            border-bottom: 1px solid rgba(193, 232, 255, 0.12);
+        }
+
+        .dashboard-progress-topline {
+            color: rgba(193, 232, 255, 0.88);
+            font-size: 0.76rem;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .dashboard-progress-heading-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.9rem;
+            margin-top: 0.72rem;
+        }
+
+        .dashboard-progress-heading {
+            color: #F8FBFF;
+            font-size: clamp(1.18rem, 1.8vw, 1.7rem);
+            font-weight: 700;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+
+        .dashboard-progress-badge {
+            flex: 0 0 auto;
+            padding: 0.48rem 0.8rem;
+            border-radius: 999px;
+            background: rgba(193, 232, 255, 0.15);
+            border: 1px solid rgba(193, 232, 255, 0.22);
+            color: #F8FBFF;
+            font-family: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif;
+            font-size: 1.05rem;
+            font-weight: 700;
+            min-width: 4.8rem;
+            text-align: center;
+            backdrop-filter: blur(8px);
+        }
+
+        .dashboard-progress-subline {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            align-items: center;
+            margin-top: 0.65rem;
+            color: #F8FBFF;
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        .dashboard-progress-subline span {
+            color: rgba(193, 232, 255, 0.84);
+            font-size: 0.84rem;
+            font-weight: 500;
+        }
+
+        .dashboard-progress-track-shell {
+            position: relative;
+            width: 100%;
+            height: 0.95rem;
+            margin-top: 0.95rem;
+            border-radius: 999px;
+            background: rgba(193, 232, 255, 0.12);
+            overflow: hidden;
+        }
+
+        .dashboard-progress-track-fill {
+            position: relative;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #7EE0FF 0%, #92BFFF 38%, #F8FBFF 100%);
+            box-shadow: 0 0 18px rgba(126, 224, 255, 0.45);
+        }
+
+        .dashboard-progress-track-fill::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(120deg, rgba(255, 255, 255, 0) 15%, rgba(255, 255, 255, 0.55) 48%, rgba(255, 255, 255, 0) 85%);
+            transform: translateX(-100%);
+            animation: dashboard-progress-scan 2.8s linear infinite;
+        }
+
+        @keyframes dashboard-progress-scan {
+            to {
+                transform: translateX(100%);
+            }
+        }
+
+        .dashboard-progress-message-rich {
+            margin-top: 0.85rem;
+            color: rgba(244, 250, 255, 0.86);
+            font-size: 0.92rem;
+            line-height: 1.55;
+        }
+
+        .dashboard-progress-stage-row {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 0.55rem;
+            margin-top: 1rem;
+        }
+
+        .dashboard-stage-pill {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            min-height: 3rem;
+            padding: 0.72rem 0.7rem;
+            border-radius: 18px;
+            border: 1px solid rgba(193, 232, 255, 0.12);
+            background: rgba(255, 255, 255, 0.06);
+            color: rgba(244, 250, 255, 0.72);
+        }
+
+        .dashboard-stage-pill.completed {
+            background: rgba(126, 224, 255, 0.16);
+            border-color: rgba(126, 224, 255, 0.34);
+            color: #F8FBFF;
+        }
+
+        .dashboard-stage-pill.active {
+            background: rgba(248, 251, 255, 0.16);
+            border-color: rgba(248, 251, 255, 0.34);
+            color: #F8FBFF;
+            box-shadow: 0 0 22px rgba(248, 251, 255, 0.12);
+        }
+
+        .dashboard-stage-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.72rem;
+            height: 1.72rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.14);
+            font-size: 0.8rem;
+            font-weight: 700;
+            flex: 0 0 auto;
+        }
+
+        .dashboard-stage-name {
+            font-size: 0.88rem;
+            font-weight: 600;
+            line-height: 1.25;
+        }
+
+        .dashboard-progress-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.75rem;
+            padding: 1rem 1.2rem 0.85rem;
+        }
+
+        .dashboard-progress-stat-card {
+            min-height: 5.35rem;
+            padding: 0.88rem 0.92rem;
+            border-radius: 20px;
+            border: 1px solid rgba(193, 232, 255, 0.16);
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(10px);
+        }
+
+        .dashboard-progress-stat-label {
+            color: rgba(193, 232, 255, 0.84);
+            font-size: 0.74rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .dashboard-progress-stat-value {
+            margin-top: 0.48rem;
+            color: #F8FBFF;
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+
+        .dashboard-progress-runtime {
+            padding: 0 1.2rem 1rem;
+            color: rgba(193, 232, 255, 0.84);
+            font-size: 0.86rem;
+        }
+
+        .dashboard-progress-history-shell {
+            padding: 0 1.2rem 1.15rem;
+        }
+
+        .dashboard-progress-history-title {
+            color: rgba(244, 250, 255, 0.92);
+            font-size: 0.92rem;
+            font-weight: 700;
+            margin-bottom: 0.62rem;
+        }
+
+        .dashboard-progress-history-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 0.62rem;
+        }
+
+        .dashboard-progress-history-card {
+            padding: 0.72rem 0.78rem;
+            border-radius: 16px;
+            border: 1px solid rgba(193, 232, 255, 0.14);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .dashboard-progress-history-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            color: rgba(193, 232, 255, 0.8);
+            font-size: 0.72rem;
+        }
+
+        .dashboard-progress-history-stage {
+            margin-top: 0.45rem;
+            color: #F8FBFF;
+            font-size: 0.88rem;
+            font-weight: 700;
+        }
+
+        .dashboard-progress-history-note {
+            margin-top: 0.32rem;
+            color: rgba(244, 250, 255, 0.76);
+            font-size: 0.78rem;
+            line-height: 1.45;
+        }
+
         .section-card {
             background: linear-gradient(180deg, rgba(255, 255, 255, 0.97) 0%, rgba(241, 249, 255, 0.96) 100%);
             border: 1px solid var(--line);
@@ -1089,6 +1362,15 @@ def inject_design_system(mode: str = "light"):
             .dashboard-snapshot {
                 grid-template-columns: 1fr;
             }
+
+            .dashboard-progress-stage-row,
+            .dashboard-progress-history-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .dashboard-progress-stats-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         @media (max-width: 720px) {
@@ -1110,6 +1392,21 @@ def inject_design_system(mode: str = "light"):
             }
 
             .dashboard-insight-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .dashboard-progress-heading-row,
+            .dashboard-progress-subline {
+                align-items: flex-start;
+            }
+
+            .dashboard-progress-heading-row {
+                flex-direction: column;
+            }
+
+            .dashboard-progress-stage-row,
+            .dashboard-progress-history-grid,
+            .dashboard-progress-stats-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -1389,6 +1686,183 @@ def _render_dashboard_progress_card_content(task_uuid: str, status: JsonDict) ->
             safe_dataframe(pd.DataFrame(history_rows), use_container_width=True, height=240)
 
 
+def _normalize_progress_stage(status: JsonDict) -> str:
+    raw_stage = str(status.get("current_stage") or "").strip().lower()
+    runtime_status = str(status.get("status") or "").strip().lower()
+    progress_value = max(0, min(100, int(status.get("progress_percent") or 0)))
+
+    if runtime_status == "completed" or progress_value >= 100:
+        return "completed"
+
+    for stage_key, meta in PROGRESS_STAGE_META.items():
+        if stage_key == "completed":
+            continue
+        aliases = cast(tuple[str, ...], meta.get("aliases") or ())
+        if any(alias in raw_stage for alias in aliases):
+            return stage_key
+
+    if runtime_status in {"uploaded", "queued"} or progress_value < 20:
+        return "uploaded"
+    if progress_value < 68:
+        return "parsing"
+    if progress_value < 84:
+        return "summary"
+    return "postprocess"
+
+
+def _progress_stage_label(stage_key: str) -> str:
+    meta = PROGRESS_STAGE_META.get(stage_key) or {}
+    return str(meta.get("label") or stage_key or "-")
+
+
+def _compact_stage_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    return re.sub(r"[_\s]+", " ", text)
+
+
+def _detect_active_file_label(task_uuid: str, status: JsonDict) -> str:
+    fallback = str(status.get("filename") or task_uuid or "-").strip() or "-"
+    message = str(status.get("message") or "").strip()
+    if not message:
+        return fallback
+
+    explicit_patterns = [
+        r"checking archive/file:\s*(?P<name>.+)$",
+        r"^(?P<name>.+?)\s*\[[^\]]+\]$",
+        r"^(?P<name>.+?)\s+retried serially$",
+    ]
+    for pattern in explicit_patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            value = str(match.group("name") or "").strip(" .")
+            if value:
+                return value
+
+    file_match = re.search(r"([^\s\\/:*?\"<>|]+?\.(?:csv|log|txt|zip|7z|tar|jsonl?|gz|tsv|xlsx?))", message, re.IGNORECASE)
+    if file_match:
+        value = str(file_match.group(1) or "").strip()
+        if value:
+            return value
+    return fallback
+
+
+def _render_dashboard_progress_card_content(task_uuid: str, status: JsonDict) -> None:
+    progress_value = max(0, min(100, int(status.get("progress_percent") or 0)))
+    runtime_snapshot = status.get("runtime_snapshot") if isinstance(status.get("runtime_snapshot"), dict) else {}
+    history = status.get("progress_history") if isinstance(status.get("progress_history"), list) else []
+    current_stage_key = _normalize_progress_stage(status)
+    current_stage_label = _progress_stage_label(current_stage_key)
+    current_stage = _compact_stage_text(status.get("current_stage"))
+    active_file = _detect_active_file_label(task_uuid, status)
+    elapsed_seconds = status.get("elapsed_seconds")
+    eta_seconds = status.get("estimated_remaining_seconds")
+    finish_at = status.get("estimated_finish_at")
+    status_text = str(status.get("status") or "-").strip() or "-"
+    message_text = str(status.get("message") or "").strip() or "系统正在持续刷新任务状态。"
+    cpu_percent = ((runtime_snapshot.get("cpu") or {}).get("percent")) if runtime_snapshot else None
+    mem_percent = ((runtime_snapshot.get("memory") or {}).get("percent")) if runtime_snapshot else None
+
+    stage_items: list[str] = []
+    active_index = PROGRESS_STAGE_FLOW.index(current_stage_key) if current_stage_key in PROGRESS_STAGE_FLOW else 0
+    for index, stage_key in enumerate(PROGRESS_STAGE_FLOW):
+        state = "pending"
+        if index < active_index:
+            state = "completed"
+        elif stage_key == current_stage_key:
+            state = "active"
+        stage_items.append(
+            _html_block(
+                f"""
+                <div class="dashboard-stage-pill {state}">
+                    <span class="dashboard-stage-index">{index + 1}</span>
+                    <span class="dashboard-stage-name">{escape(_progress_stage_label(stage_key))}</span>
+                </div>
+                """
+            )
+        )
+
+    metric_cards = [
+        ("当前处理文件名", active_file),
+        ("当前处理阶段", current_stage_label),
+        ("已用时间", _format_duration_text(elapsed_seconds)),
+        ("预计剩余时间", _format_duration_text(eta_seconds)),
+        ("预计结束时间", _format_datetime_text(finish_at)),
+        ("任务状态", status_text),
+    ]
+    metric_html = "".join(
+        _html_block(
+            f"""
+            <article class="dashboard-progress-stat-card">
+                <div class="dashboard-progress-stat-label">{escape(label)}</div>
+                <div class="dashboard-progress-stat-value">{escape(value)}</div>
+            </article>
+            """
+        )
+        for label, value in metric_cards
+    )
+
+    history_html = ""
+    if history:
+        history_items: list[str] = []
+        for row in reversed(history[-5:]):
+            row_payload = cast(JsonDict, row if isinstance(row, dict) else {})
+            row_stage = _progress_stage_label(_normalize_progress_stage(row_payload))
+            history_items.append(
+                _html_block(
+                    f"""
+                    <article class="dashboard-progress-history-card">
+                        <div class="dashboard-progress-history-top">
+                            <span>{escape(_format_datetime_text(row_payload.get("timestamp")))}</span>
+                            <strong>{escape(f"{int(row_payload.get('progress_percent') or 0)}%")}</strong>
+                        </div>
+                        <div class="dashboard-progress-history-stage">{escape(row_stage)}</div>
+                        <div class="dashboard-progress-history-note">{escape(_compact_stage_text(row_payload.get("message") or row_payload.get("current_stage") or "-"))}</div>
+                    </article>
+                    """
+                )
+            )
+        history_html = (
+            '<div class="dashboard-progress-history-shell">'
+            '<div class="dashboard-progress-history-title">最近处理轨迹</div>'
+            f'<div class="dashboard-progress-history-grid">{"".join(history_items)}</div>'
+            "</div>"
+        )
+
+    runtime_caption = ""
+    if cpu_percent is not None or mem_percent is not None:
+        runtime_caption = (
+            f"CPU {cpu_percent if cpu_percent is not None else '-'}% · "
+            f"Memory {mem_percent if mem_percent is not None else '-'}%"
+        )
+
+    html = "".join(
+        [
+            '<section class="dashboard-progress-panel">',
+            '<div class="dashboard-progress-hero">',
+            '<div class="dashboard-progress-topline">实时文件处理进度</div>',
+            '<div class="dashboard-progress-heading-row">',
+            f'<div class="dashboard-progress-heading">{escape(active_file)}</div>',
+            f'<div class="dashboard-progress-badge">{progress_value}%</div>',
+            "</div>",
+            f'<div class="dashboard-progress-subline">阶段：{escape(current_stage_label)}<span>{escape(current_stage)}</span></div>',
+            '<div class="dashboard-progress-track-shell">',
+            f'<div class="dashboard-progress-track-fill" style="width: {progress_value}%"></div>',
+            "</div>",
+            f'<div class="dashboard-progress-message-rich">{escape(message_text)}</div>',
+            f'<div class="dashboard-progress-stage-row">{"".join(stage_items)}</div>',
+            "</div>",
+            f'<div class="dashboard-progress-stats-grid">{metric_html}</div>',
+            f'<div class="dashboard-progress-runtime">{escape(runtime_caption or "等待资源状态快照...")}</div>',
+            history_html,
+            "</section>",
+        ]
+    )
+    st.markdown("#### 实时文件处理进度")
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def render_dashboard_progress_card(task_uuid: str, status: JsonDict) -> None:
     refresh_seconds = max(2, int(os.getenv("STREAMLIT_PROGRESS_REFRESH_SECONDS", "3")))
     auto_refresh_key = f"dashboard_progress_auto::{task_uuid}"
@@ -1556,7 +2030,47 @@ def _safe_cell(value: Any):
     return str(value)
 
 
-def safe_dataframe(data, *, use_container_width=True, height=None):
+def _auto_widget_key(prefix: str) -> str:
+    frame = inspect.currentframe()
+    caller = frame.f_back.f_back if frame and frame.f_back and frame.f_back.f_back else None
+    signature = f"{prefix}:unknown"
+    if caller is not None:
+        signature = f"{prefix}:{caller.f_code.co_filename}:{caller.f_lineno}"
+    count = _SAFE_DATAFRAME_CALL_COUNTS.get(signature, 0) + 1
+    _SAFE_DATAFRAME_CALL_COUNTS[signature] = count
+    return f"{prefix}:{hashlib.sha1(f'{signature}:{count}'.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _apply_dataframe_filters(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    filtered = df
+    if len(df) <= 2000:
+        with st.expander("表格工具", expanded=False):
+            search_col, field_col, value_col = st.columns([1.35, 1.0, 1.05], gap="small")
+            search_text = str(search_col.text_input("搜索", key=f"{key}::search", placeholder="全文搜索当前表格")).strip()
+            column_options = ["全部列"] + [str(col) for col in df.columns]
+            filter_column = str(field_col.selectbox("筛选列", column_options, key=f"{key}::filter_col"))
+            filter_value = str(value_col.text_input("筛选值", key=f"{key}::filter_value", placeholder="按列包含匹配")).strip()
+
+        if search_text:
+            search_mask = pd.Series(False, index=filtered.index)
+            for column in filtered.columns:
+                series = filtered[column].astype(str)
+                search_mask = search_mask | series.str.contains(re.escape(search_text), case=False, na=False)
+            filtered = filtered.loc[search_mask]
+
+        if filter_column != "全部列" and filter_value:
+            filtered = filtered.loc[
+                filtered[filter_column].astype(str).str.contains(re.escape(filter_value), case=False, na=False)
+            ]
+
+    st.caption(f"显示 {len(filtered):,} / {len(df):,} 行，支持列头排序、滚动、搜索和按列过滤。")
+    return filtered
+
+
+def safe_dataframe(data, *, use_container_width=True, height=None, key: str | None = None, enable_toolbar: bool = True):
     try:
         df = data.copy() if isinstance(data, pd.DataFrame) else pd.DataFrame(data).copy()
     except Exception:
@@ -1567,7 +2081,9 @@ def safe_dataframe(data, *, use_container_width=True, height=None):
             df[col] = df[col].map(_safe_cell)
         except Exception:
             df[col] = df[col].astype(str)
-    st.dataframe(df, use_container_width=use_container_width, height=height)
+    widget_key = key or _auto_widget_key("df")
+    view_df = _apply_dataframe_filters(df, widget_key) if enable_toolbar else df
+    st.dataframe(view_df, use_container_width=use_container_width, height=height, hide_index=True)
 
 
 def safe_json(data):
@@ -1802,6 +2318,86 @@ def _chart_theme(mode: str | None) -> dict[str, str]:
     }
 
 
+def _axis_values_from_traces(fig, axis_name: str) -> list[Any]:
+    values: list[Any] = []
+    for trace in fig.data:
+        trace_axis = str(getattr(trace, f"{axis_name}axis", None) or axis_name)
+        if trace_axis != axis_name:
+            continue
+        raw_values = getattr(trace, axis_name, None)
+        if raw_values is None:
+            continue
+        if isinstance(raw_values, (str, bytes)):
+            values.append(raw_values)
+            continue
+        try:
+            values.extend(list(raw_values))
+        except TypeError:
+            values.append(raw_values)
+    return [value for value in values if value is not None and not (isinstance(value, float) and math.isnan(value))]
+
+
+def _category_axis_labels(values: list[Any]) -> list[str]:
+    labels: list[str] = []
+    for value in values:
+        if value is None or pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text not in labels:
+            labels.append(text)
+    return labels
+
+
+def _apply_axis_density(fig, *, theme, height: int | None) -> None:
+    chart_height = height or 460
+    x_values = _axis_values_from_traces(fig, "x")
+    y_values = _axis_values_from_traces(fig, "y")
+    x_axis = getattr(fig.layout, "xaxis", None)
+    y_axis = getattr(fig.layout, "yaxis", None)
+
+    if x_axis is not None:
+        x_type = str(getattr(x_axis, "type", "") or "").lower()
+        x_labels = _category_axis_labels(x_values)
+        if x_type == "date":
+            fig.update_xaxes(
+                nticks=max(5, min(12, math.ceil(chart_height / 52))),
+                tickformatstops=[
+                    dict(dtickrange=[None, 1000], value="%H:%M:%S.%L"),
+                    dict(dtickrange=[1000, 60000], value="%H:%M:%S"),
+                    dict(dtickrange=[60000, 3600000], value="%H:%M"),
+                    dict(dtickrange=[3600000, 86400000], value="%m-%d %H:%M"),
+                    dict(dtickrange=[86400000, None], value="%Y-%m-%d"),
+                ],
+            )
+        elif x_labels:
+            max_labels = 10
+            tick_step = max(1, math.ceil(len(x_labels) / max_labels))
+            longest_label = max(len(label) for label in x_labels)
+            tick_angle = -45 if longest_label > 16 or len(x_labels) > max_labels else (-25 if longest_label > 9 else 0)
+            fig.update_xaxes(
+                ticklabelstep=tick_step,
+                tickangle=tick_angle,
+                tickfont=dict(color=theme.ink, size=11 if tick_step > 1 else 12),
+            )
+        else:
+            fig.update_xaxes(nticks=max(5, min(11, math.ceil(chart_height / 58))))
+
+    if y_axis is not None:
+        y_type = str(getattr(y_axis, "type", "") or "").lower()
+        y_labels = _category_axis_labels(y_values)
+        if y_type == "category" or y_labels:
+            max_labels = max(5, min(22, math.floor(chart_height / 28)))
+            tick_step = max(1, math.ceil(len(y_labels) / max_labels)) if y_labels else 1
+            longest_label = max((len(label) for label in y_labels), default=0)
+            fig.update_yaxes(
+                ticklabelstep=tick_step,
+                tickangle=0 if longest_label <= 30 else -18,
+                tickfont=dict(color=theme.ink, size=11 if tick_step > 1 else 12),
+            )
+        else:
+            fig.update_yaxes(nticks=max(5, min(10, math.ceil(chart_height / 60))))
+
+
 def render_fig(
     fig,
     key: str | None = None,
@@ -1861,9 +2457,14 @@ def render_fig(
             bgcolor="rgba(0,0,0,0)",
             title_text="",
             font=dict(color=theme.ink),
+            itemclick="toggle",
+            itemdoubleclick="toggleothers",
         ),
         uniformtext=dict(minsize=10, mode="hide"),
         hoverlabel=dict(bgcolor=chart_theme["hover_bgcolor"], bordercolor=theme.accent_soft, font=dict(color=theme.ink)),
+        hovermode="closest",
+        dragmode="pan",
+        modebar=dict(bgcolor="rgba(0,0,0,0)", color=theme.ink_muted if hasattr(theme, "ink_muted") else theme.ink, activecolor=theme.accent),
     )
     fig.update_layout(
         polar=dict(
@@ -1895,6 +2496,11 @@ def render_fig(
         zeroline=False,
         tickfont=dict(color=theme.ink),
         title_font=dict(color=theme.ink),
+        fixedrange=False,
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikedash="dot",
     )
     fig.update_yaxes(
         automargin=True,
@@ -1904,7 +2510,9 @@ def render_fig(
         zeroline=False,
         tickfont=dict(color=theme.ink),
         title_font=dict(color=theme.ink),
+        fixedrange=False,
     )
+    _apply_axis_density(fig, theme=theme, height=height)
     for trace in fig.data:
         trace_type = str(getattr(trace, "type", "") or "")
         if trace_type in {"pie", "sunburst", "treemap", "funnelarea"}:
@@ -1922,7 +2530,18 @@ def render_fig(
             )
         else:
             trace.update(textfont=dict(color=theme.ink))
-    st.plotly_chart(fig, use_container_width=True, key=key, config={"responsive": True, "displayModeBar": False, "displaylogo": False, "scrollZoom": False})
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=key,
+        config={
+            "responsive": True,
+            "displayModeBar": "hover",
+            "displaylogo": False,
+            "scrollZoom": True,
+            "doubleClick": "reset+autosize",
+        },
+    )
 
 
 def render_substep_cycle_facets(df: pd.DataFrame, value_col: str = "duration_value", facet_wrap: int = 2, key: str | None = None):
@@ -1948,6 +2567,130 @@ def render_substep_cycle_facets(df: pd.DataFrame, value_col: str = "duration_val
     plot_df = plot_df[plot_df["sub_step"].isin(top_substeps)]
     fig = px.line(plot_df, x="cycle_no", y=value_col, color="sub_step", markers=True)
     render_fig(fig, key=key, height=480, title="Substep-Cycle 趋势", title_x=0.02, title_y=0.965)
+
+
+def _timeline_base_track(value: Any) -> str:
+    return re.sub(r"\s+\|\s+lane\s+\d+$", "", str(value or "").strip(), flags=re.IGNORECASE)
+
+
+def _timeline_lane_index(value: Any) -> int:
+    match = re.search(r"\|\s+lane\s+(\d+)$", str(value or "").strip(), re.IGNORECASE)
+    return int(match.group(1)) if match else 1
+
+
+def _build_timeline_track_order(df: pd.DataFrame, order_mode: str) -> list[str]:
+    if df.empty:
+        return []
+    sort_columns = ["start", "component_display", "sub_step", "track"]
+    if order_mode == "cycle":
+        sort_columns = ["cycle_no", "component_display", "track_lane", "start", "sub_step", "track"]
+    order_df = df.sort_values(sort_columns, na_position="last").copy()
+    return list(dict.fromkeys(order_df["track"].astype(str).tolist()))
+
+
+def _align_timeline_error_tracks(timeline_df: pd.DataFrame, error_df: pd.DataFrame) -> pd.DataFrame:
+    if timeline_df.empty or error_df.empty:
+        return error_df
+
+    candidates = timeline_df[["track", "base_track", "component_display", "cycle_no", "start", "end"]].copy()
+    aligned_tracks: list[str] = []
+    for row in error_df.itertuples(index=False):
+        same_cycle = candidates[
+            (candidates["component_display"].astype(str) == str(getattr(row, "component_display", "")))
+            & (candidates["cycle_no"].fillna(-1) == (getattr(row, "cycle_no", None) if getattr(row, "cycle_no", None) is not None else -1))
+        ]
+        if same_cycle.empty:
+            same_cycle = candidates[candidates["base_track"].astype(str) == str(getattr(row, "base_track", ""))]
+        if same_cycle.empty:
+            aligned_tracks.append(str(getattr(row, "track", "") or ""))
+            continue
+
+        hit = same_cycle[(same_cycle["start"] <= row.time) & (same_cycle["end"] >= row.time)]
+        if not hit.empty:
+            aligned_tracks.append(str(hit.sort_values(["start", "track"]).iloc[0]["track"]))
+            continue
+
+        distances = same_cycle.copy()
+        distances["_distance"] = distances.apply(
+            lambda item: min(abs((item["start"] - row.time).total_seconds()), abs((item["end"] - row.time).total_seconds())),
+            axis=1,
+        )
+        aligned_tracks.append(str(distances.sort_values(["_distance", "start", "track"]).iloc[0]["track"]))
+
+    output = error_df.copy()
+    output["track"] = aligned_tracks
+    return output
+
+
+def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, order_mode: str, show_error_points: bool):
+    working_df = df.copy()
+    working_df["component_display"] = working_df["component"].fillna("未知组件").astype(str)
+    working_df["track"] = working_df["track"].fillna("未知轨道").astype(str)
+    working_df["base_track"] = working_df["track"].map(_timeline_base_track)
+    working_df["track_lane"] = working_df["track"].map(_timeline_lane_index)
+    working_df = working_df.sort_values(["cycle_no", "component_display", "track_lane", "start", "end"], na_position="last")
+    track_order = _build_timeline_track_order(working_df, order_mode)
+
+    fig = px.timeline(
+        working_df,
+        x_start="start",
+        x_end="end",
+        y="track",
+        color="component_display",
+        category_orders={"track": track_order},
+        custom_data=["component_display", "sub_step", "cycle_no", "start_time_sec", "end_time_sec", "duration_ms", "message", "track"],
+    )
+    fig.update_traces(
+        selector=dict(type="bar"),
+        opacity=0.92,
+        marker_line_width=1,
+        marker_line_color="rgba(255,255,255,0.32)",
+        hovertemplate=(
+            "组件: %{customdata[0]}<br>"
+            "子步骤: %{customdata[1]}<br>"
+            "Cycle: %{customdata[2]}<br>"
+            "开始: %{customdata[3]}<br>"
+            "结束: %{customdata[4]}<br>"
+            "时长(ms): %{customdata[5]}<br>"
+            "轨道: %{customdata[7]}<br>"
+            "说明: %{customdata[6]}<extra></extra>"
+        ),
+    )
+    fig.update_yaxes(categoryorder="array", categoryarray=list(reversed(track_order)), autorange="reversed")
+    fig.update_layout(legend_title_text="", bargap=0.24)
+
+    error_output = error_df.copy()
+    if show_error_points and not error_output.empty:
+        error_output["component_display"] = error_output["component"].fillna("未知组件").astype(str)
+        error_output["base_track"] = error_output["track"].map(_timeline_base_track)
+        error_output = _align_timeline_error_tracks(working_df, error_output)
+        for severity_value, severity_group in error_output.groupby("severity", dropna=False):
+            severity_text = str(severity_value or "unknown")
+            fig.add_trace(
+                go.Scatter(
+                    x=severity_group["time"],
+                    y=severity_group["track"],
+                    mode="markers",
+                    name=f"错误点 · {severity_text}",
+                    marker={
+                        "size": 11,
+                        "symbol": "diamond",
+                        "color": ERROR_SEVERITY_COLORS.get(severity_text.lower(), ERROR_SEVERITY_COLORS["unknown"]),
+                        "line": {"width": 1, "color": "#FFFFFF"},
+                    },
+                    customdata=severity_group[["time_text", "normalized_signature", "error_family_display", "severity", "component_display", "message", "track"]].to_numpy(),
+                    hovertemplate=(
+                        "时间: %{customdata[0]}<br>"
+                        "错误签名: %{customdata[1]}<br>"
+                        "错误家族: %{customdata[2]}<br>"
+                        "严重级别: %{customdata[3]}<br>"
+                        "组件: %{customdata[4]}<br>"
+                        "轨道: %{customdata[6]}<br>"
+                        "消息: %{customdata[5]}<extra></extra>"
+                    ),
+                )
+            )
+    return fig, error_output, track_order
 
 
 def paged_table(path: str, *, params: dict | None = None, page_key: str, page_size_key: str, title: str, default_page_size: int = 100, max_page_size: int = 500):
@@ -2813,8 +3556,8 @@ elif page == "事件流时间轴":
                         ].copy()
                         error_df["time"] = pd.to_datetime(error_df["time"], errors="coerce")
                         error_df = error_df.dropna(subset=["time"]).copy()
-                    fig = px.timeline(df, x_start="start", x_end="end", y="track", color="sub_step", hover_data=["sub_step", "cycle_no", "start_time_sec", "end_time_sec", "duration_ms", "component", "module", "message"])
-                    if show_error_points and not error_df.empty:
+                    fig, error_df, track_order_values = build_movement_timeline_figure(df, error_df, order_mode=track_order, show_error_points=show_error_points)
+                    if False and show_error_points and not error_df.empty:
                         for severity_value, severity_group in error_df.groupby("severity", dropna=False):
                             severity_text = str(severity_value or "unknown")
                             fig.add_trace(
