@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.security import (
@@ -339,7 +340,12 @@ class AuthService:
         if user.status != USER_STATUS_APPROVED:
             return None
         session.last_seen_at = now
-        self.db.commit()
+        try:
+            self.db.commit()
+        except OperationalError:
+            # If SQLite is briefly write-locked, keep authentication successful
+            # and skip this best-effort metadata update.
+            self.db.rollback()
         return user
 
     def logout(self, *, token: str) -> None:

@@ -5,12 +5,19 @@
 - Production web UI is `frontend/` (Next.js). The optimization and repair for dashboard progress, timeline/gantt rendering, table interaction, and chart interaction have now been implemented in:
   - `frontend/components/platform-shared.tsx`
   - `frontend/components/log-platform-console.tsx`
+- Backend SQLite lock mitigation is now implemented in:
+  - `app/db/session.py`
+  - `app/services/auth_service.py`
+  - `tests/test_auth_service.py`
 - Dashboard home now includes a real-time visual processing panel with current file, stage, progress, elapsed time, ETA, and estimated finish time, with lightweight polling only while a task is actively running.
 - Timeline / gantt rendering now uses the backend's original time fields for display alignment, supports multi-cycle switching, zoom, pan, box-zoom, hover detail, and component/track highlighting without changing backend calculations.
 - Shared line charts and data tables now support hover detail, legend toggle, wheel zoom, box-zoom, pan, sorting, filtering, search, and denser-axis auto-thinning for better readability on low-memory servers.
+- SQLite connections now use a busy timeout plus WAL mode for file-backed databases, and auth session `last_seen_at` updates are best-effort so transient lock contention no longer escalates into HTTP 500 responses.
 - Validation:
   - `cd frontend && npm run lint`
   - `cd frontend && npm run build`
+  - `pytest tests/test_auth_service.py -q`
+  - `pytest tests/test_api_basic.py -q`
 
 ## 仪表盘可视化进度与时间轴交互修复（2026-04-02）
 
