@@ -68,6 +68,7 @@ import {
   MetricCard,
   NoticeBanner,
   PaginationBar,
+  ProcessingProgressPanel,
   SectionTitle,
   SimpleLineChart,
   StatusBadge,
@@ -2130,6 +2131,21 @@ export function LogPlatformConsole() {
         return activeTimelineFamilies.includes(family) && activeTimelineSeverities.includes(severity);
       })
     : [];
+
+  useEffect(() => {
+    if (!isAuthenticated || page !== "dashboard" || !selectedTaskUuid) {
+      return;
+    }
+    const runtimeStatus = String(statusData.status || "").toLowerCase();
+    if (!["uploaded", "queued", "processing", "running"].includes(runtimeStatus)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void Promise.all([loadDashboard(), loadSystemRuntime()]).catch(showError);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [isAuthenticated, page, selectedTaskUuid, statusData.status]);
+
   const errorFamilyRows = useMemo(() => {
     const groups = new Map<string, { label: string; description: string; value: number }>();
     errorItems.forEach((row) => {
@@ -2409,6 +2425,7 @@ export function LogPlatformConsole() {
             helper="基于服务数据目录所在磁盘统计当前占用。"
           />
         </div>
+        <ProcessingProgressPanel status={statusData} />
         <Card>
           <CardContent className="space-y-4 pt-6">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -2652,6 +2669,7 @@ export function LogPlatformConsole() {
         </Card>
         <SimpleLineChart
           title={`Cycle 总耗时趋势 (${performanceUnit})`}
+          key={`cycle-summary-${selectedTaskUuid}-${performanceUnit}-${cycleSummaryRows.length}`}
           rows={cycleSummaryRows}
           xKey="cycle_no"
           yKey="total_duration_value"
@@ -2728,8 +2746,10 @@ export function LogPlatformConsole() {
         </Card>
         <TimelineChart
           title="按 Cycle / 全程查看各组件运动时间轴"
+          key={`timeline-${selectedTaskUuid}-${timelineCycleNo || "all"}-${timelineTrackOrder}-${timelineRows.length}-${filteredTimelineErrors.length}`}
           rows={timelineRows}
           errors={filteredTimelineErrors}
+          orderMode={timelineTrackOrder === "cycle" ? "cycle" : "default"}
         />
         {timelineShowDetails ? (
           <DataTable
@@ -2851,7 +2871,7 @@ export function LogPlatformConsole() {
             />
           );
         })}
-        <SimpleLineChart title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="cycle" yKey="duration_value" seriesKey="sub_step" />
+        <SimpleLineChart key={`substep-series-${selectedTaskUuid}-${parameterUnit}`} title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="cycle" yKey="duration_value" seriesKey="sub_step" />
         <SimpleLineChart title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="cycle" yKey="duration_value" seriesKey="metric_stage" />
         <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
           <input type="checkbox" checked={parameterShowMetricTable} onChange={(event) => setParameterShowMetricTable(event.target.checked)} />

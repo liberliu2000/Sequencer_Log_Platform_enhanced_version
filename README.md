@@ -1,5 +1,17 @@
 # Sequencer Log Platform Enhanced Version
 
+## 2026-04-02 Next Frontend Sync
+
+- Production web UI is `frontend/` (Next.js). The optimization and repair for dashboard progress, timeline/gantt rendering, table interaction, and chart interaction have now been implemented in:
+  - `frontend/components/platform-shared.tsx`
+  - `frontend/components/log-platform-console.tsx`
+- Dashboard home now includes a real-time visual processing panel with current file, stage, progress, elapsed time, ETA, and estimated finish time, with lightweight polling only while a task is actively running.
+- Timeline / gantt rendering now uses the backend's original time fields for display alignment, supports multi-cycle switching, zoom, pan, box-zoom, hover detail, and component/track highlighting without changing backend calculations.
+- Shared line charts and data tables now support hover detail, legend toggle, wheel zoom, box-zoom, pan, sorting, filtering, search, and denser-axis auto-thinning for better readability on low-memory servers.
+- Validation:
+  - `cd frontend && npm run lint`
+  - `cd frontend && npm run build`
+
 ## 仪表盘可视化进度与时间轴交互修复（2026-04-02）
 
 本次更新聚焦前端显示层与交互层优化，严格保持原有计算逻辑、数据结构、输出结果与数据精度不变，适配小内存服务器，代码可直接替换运行。
