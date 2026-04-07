@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from app.parsers.base import BaseParser
-from app.schemas.common import RawLogRecord
+from app.schemas.common import build_raw_log_record
 from app.utils.files import read_text_stream
 
 ERROR_RE = re.compile(
@@ -29,15 +29,15 @@ class ErrorLogParser(BaseParser):
             score += 15
         return score
 
-    def parse(self, path: Path):
+    def parse(self, path: Path, *, encoding: str | None = None):
         buffer: list[str] = []
         current_header: dict | None = None
-        for line in read_text_stream(path):
+        for line in read_text_stream(path, encoding=encoding):
             m = ERROR_RE.match(line)
             if m:
                 if current_header:
                     raw_text = "\n".join(buffer) if buffer else current_header["msg"]
-                    yield RawLogRecord(
+                    yield build_raw_log_record(
                         source_file=path.name,
                         parser_name=self.name,
                         raw_text=raw_text,
@@ -55,7 +55,7 @@ class ErrorLogParser(BaseParser):
                 buffer.append(line)
         if current_header:
             raw_text = "\n".join(buffer) if buffer else current_header["msg"]
-            yield RawLogRecord(
+            yield build_raw_log_record(
                 source_file=path.name,
                 parser_name=self.name,
                 raw_text=raw_text,

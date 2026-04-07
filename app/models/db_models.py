@@ -65,7 +65,14 @@ class NormalizedEventModel(Base):
     raw_text: Mapped[str] = mapped_column(Text)
     cycle_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     sub_step: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    instrument_scope: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    side_scope: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    side_group: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     chip_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    chip_position: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    chuck_no: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    slot_no: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    stage_key: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     stage_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     board_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     event_kind: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -81,12 +88,16 @@ class NormalizedEventModel(Base):
     cycle_infer_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cycle_infer_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
     cycle_infer_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    side_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    side_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     task = relationship("UploadTaskModel", back_populates="events")
 
     __table_args__ = (
         Index("idx_event_task_time", "task_id", "epoch_ms"),
         Index("idx_event_task_sig", "task_id", "normalized_signature"),
+        Index("idx_event_task_side", "task_id", "side_scope"),
+        Index("idx_event_task_chip", "task_id", "chip_name"),
     )
 
 
@@ -99,7 +110,14 @@ class StepSummaryModel(Base):
     parameter_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sub_step: Mapped[str] = mapped_column(String(256), index=True)
     component: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    instrument_scope: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    side_scope: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    side_group: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     chip_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    chip_position: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    chuck_no: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    slot_no: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    stage_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
     start_epoch_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_epoch_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -107,6 +125,50 @@ class StepSummaryModel(Base):
     is_over_threshold: Mapped[bool] = mapped_column(Boolean, default=False)
     start_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
     end_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    side_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    side_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ParameterResultModel(Base):
+    __tablename__ = "parameter_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("upload_tasks.id"), index=True)
+    parameter_name: Mapped[str] = mapped_column(String(64), index=True)
+    parameter_display_name: Mapped[str] = mapped_column(String(128))
+    cycle_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    slide: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    instrument_scope: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    side_scope: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    side_group: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    chip_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    chip_position: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    chuck_no: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    slot_no: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    stage_key: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    start_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    end_time_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    start_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    end_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(32), index=True)
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_exceed: Mapped[bool] = mapped_column(Boolean, default=False)
+    component: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    start_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    side_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    side_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_parameter_results_task_param", "task_id", "parameter_name"),
+        Index("idx_parameter_results_task_cycle", "task_id", "cycle_no"),
+        Index("idx_parameter_results_task_side", "task_id", "side_scope"),
+    )
 
 
 class ErrorClusterModel(Base):
@@ -147,7 +209,7 @@ class UserModel(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
-    status: Mapped[str] = mapped_column(String(32), default="pending_verification", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending_admin_approval", index=True)
     is_reviewer: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     force_password_change: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -177,6 +239,18 @@ class UserSessionModel(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AnnouncementModel(Base):
+    __tablename__ = "announcements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    summary: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[str] = mapped_column(String(64), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 

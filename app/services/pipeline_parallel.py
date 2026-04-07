@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import traceback
 import uuid
 from dataclasses import asdict, dataclass
@@ -9,9 +8,12 @@ from typing import Iterable
 
 import orjson
 
-from app.normalizers.event_normalizer import normalize_record
+from app.normalizers.event_normalizer import normalize_record_fast
 from app.parsers.registry import ParserRegistry
 from app.utils.files import detect_encoding
+
+
+CHUNKABLE_PARSERS = {"service_log"}
 
 
 @dataclass(slots=True)
@@ -23,6 +25,7 @@ class PrescanFileResult:
     encoding: str
     parser_name: str
     supported: bool
+    chunk_capable: bool
     skip_reason: str | None = None
 
 
@@ -31,6 +34,10 @@ class ParseWorkerInput:
     path: str
     output_path: str
     parser_name_hint: str | None = None
+    encoding_hint: str | None = None
+    chunk_start: int | None = None
+    chunk_end: int | None = None
+    chunk_index: int = 0
 
 
 @dataclass(slots=True)
@@ -40,16 +47,20 @@ class ParseWorkerResult:
     parser_name: str
     event_count: int
     ok: bool
+    chunk_index: int = 0
+    chunk_start: int | None = None
+    chunk_end: int | None = None
+    bytes_processed: int = 0
     error: str | None = None
     traceback_text: str | None = None
     elapsed_seconds: float | None = None
 
 
 PIPELINE_STAGE_PLAN: list[dict] = [
-    {"stage": "discover", "mode": "serial", "reason": "目录扫描、去重与压缩包展开需要集中控制，避免临时目录冲突。"},
-    {"stage": "prescan", "mode": "thread", "reason": "文件头读取、编码识别、parser 评分以 I/O 为主，适合线程池。"},
-    {"stage": "parse_normalize", "mode": "process", "reason": "单文件解析、规则匹配、标准事件生成属于 CPU 密集阶段，适合多进程。"},
-    {"stage": "aggregate", "mode": "serial", "reason": "跨文件关联、最终聚合、SQLite 写入统一放到主进程，保证一致性。"},
+    {"stage": "discover", "mode": "serial", "reason": "archive expansion and workspace preparation remain centralized"},
+    {"stage": "prescan", "mode": "thread", "reason": "lightweight I/O and parser scoring scale well with threads"},
+    {"stage": "parse_normalize", "mode": "process", "reason": "regex, time parsing, and normalization are CPU-heavy"},
+    {"stage": "aggregate", "mode": "serial", "reason": "SQLite stays single-writer while the main process streams and batches writes"},
 ]
 
 
@@ -65,10 +76,12 @@ def prescan_file(path_str: str) -> dict:
         parser = registry.choose(path)
         parser_name = parser.name
         supported = True
+        chunk_capable = bool(getattr(parser, "supports_parallel_chunks", False))
         skip_reason = None
     except Exception as exc:
         parser_name = "unknown"
         supported = False
+        chunk_capable = False
         skip_reason = str(exc)
 
     return asdict(
@@ -80,6 +93,7 @@ def prescan_file(path_str: str) -> dict:
             encoding=encoding,
             parser_name=parser_name,
             supported=supported,
+            chunk_capable=chunk_capable and parser_name in CHUNKABLE_PARSERS,
             skip_reason=skip_reason,
         )
     )
@@ -93,16 +107,25 @@ def parse_file_to_jsonl(payload: dict) -> dict:
     output_path = Path(ctx.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
+    bytes_processed = 0
 
     try:
         registry = ParserRegistry()
-        parser_name, generator = registry.parse_file(path)
+        parser_name, generator = registry.parse_file(
+            path,
+            parser_name_hint=ctx.parser_name_hint,
+            encoding_hint=ctx.encoding_hint,
+            chunk_start=ctx.chunk_start,
+            chunk_end=ctx.chunk_end,
+        )
         count = 0
         with output_path.open("wb") as fw:
             for record in generator:
-                event = normalize_record(record).model_dump()
-                fw.write(orjson.dumps(event))
+                event = normalize_record_fast(record)
+                raw = orjson.dumps(event)
+                fw.write(raw)
                 fw.write(b"\n")
+                bytes_processed += len(raw) + 1
                 count += 1
         return asdict(
             ParseWorkerResult(
@@ -111,6 +134,10 @@ def parse_file_to_jsonl(payload: dict) -> dict:
                 parser_name=parser_name,
                 event_count=count,
                 ok=True,
+                chunk_index=ctx.chunk_index,
+                chunk_start=ctx.chunk_start,
+                chunk_end=ctx.chunk_end,
+                bytes_processed=bytes_processed,
                 elapsed_seconds=round(time.perf_counter() - started, 4),
             )
         )
@@ -122,6 +149,10 @@ def parse_file_to_jsonl(payload: dict) -> dict:
                 parser_name=ctx.parser_name_hint or "unknown",
                 event_count=0,
                 ok=False,
+                chunk_index=ctx.chunk_index,
+                chunk_start=ctx.chunk_start,
+                chunk_end=ctx.chunk_end,
+                bytes_processed=bytes_processed,
                 error=str(exc),
                 traceback_text=traceback.format_exc(limit=8),
                 elapsed_seconds=round(time.perf_counter() - started, 4),
@@ -135,9 +166,90 @@ def iter_batches(items: list, batch_size: int) -> Iterable[list]:
         yield items[idx : idx + batch_size]
 
 
-def build_worker_output_path(intermediate_dir: Path, file_path: Path) -> Path:
+def build_worker_output_path(intermediate_dir: Path, file_path: Path, *, chunk_index: int = 0) -> Path:
     safe_stem = file_path.stem[:80] if file_path.stem else "file"
-    return intermediate_dir / f"{safe_stem}_{uuid.uuid4().hex}.jsonl"
+    suffix = f"_part{chunk_index:05d}" if chunk_index > 0 else ""
+    return intermediate_dir / f"{safe_stem}{suffix}_{uuid.uuid4().hex}.jsonl"
+
+
+def build_parse_dispatch_items(
+    prescanned_files: list[dict],
+    *,
+    streaming_enabled: bool,
+    chunk_bytes: int,
+    max_chunks_per_file: int,
+) -> list[dict]:
+    items: list[dict] = []
+    chunk_bytes = max(1, int(chunk_bytes or 1))
+    max_chunks_per_file = max(1, int(max_chunks_per_file or 1))
+
+    for file_order, item in enumerate(prescanned_files):
+        size_bytes = max(0, int(item.get("size_bytes") or 0))
+        chunk_capable = bool(item.get("chunk_capable"))
+        if streaming_enabled and chunk_capable and size_bytes > chunk_bytes:
+            chunk_count = min(max_chunks_per_file, max(2, (size_bytes + chunk_bytes - 1) // chunk_bytes))
+            boundaries = [int(round(size_bytes * idx / chunk_count)) for idx in range(chunk_count + 1)]
+            for chunk_index in range(chunk_count):
+                start = boundaries[chunk_index]
+                end = boundaries[chunk_index + 1]
+                items.append(
+                    {
+                        **item,
+                        "dispatch_order": file_order,
+                        "chunk_index": chunk_index,
+                        "chunk_start": start,
+                        "chunk_end": end,
+                        "size_bytes": max(1, end - start),
+                        "dispatch_kind": "chunk",
+                    }
+                )
+        else:
+            items.append(
+                {
+                    **item,
+                    "dispatch_order": file_order,
+                    "chunk_index": 0,
+                    "chunk_start": None,
+                    "chunk_end": None,
+                    "dispatch_kind": "file",
+                }
+            )
+    return items
+
+
+def parse_item_weight(item: dict) -> int:
+    try:
+        size_bytes = int(item.get("size_bytes") or 0)
+    except (AttributeError, TypeError, ValueError):
+        size_bytes = 0
+    return max(1, size_bytes)
+
+
+def prioritize_parse_dispatch(items: list[dict]) -> list[dict]:
+    """
+    Dispatch larger work units first to reduce tail latency at the end of the parse stage.
+    """
+
+    return sorted(
+        items,
+        key=lambda item: (
+            -parse_item_weight(item),
+            str(item.get("path") or ""),
+            int(item.get("chunk_index") or 0),
+        ),
+    )
+
+
+def compute_weighted_progress(
+    completed_weight: int,
+    total_weight: int,
+    start_percent: int,
+    span_percent: int,
+) -> int:
+    if total_weight <= 0:
+        return max(0, min(100, int(start_percent)))
+    ratio = min(max(completed_weight / total_weight, 0.0), 1.0)
+    return max(0, min(100, int(start_percent) + int(ratio * int(span_percent))))
 
 
 def resolve_parallel_workers(requested_cpu_cores: int | None, available_cpu_count: int, configured_max: int) -> int:
@@ -147,11 +259,11 @@ def resolve_parallel_workers(requested_cpu_cores: int | None, available_cpu_coun
 
 
 def compute_optimal_parse_chunks(total_files: int, workers: int, configured_batch_size: int) -> int:
-    """
-    尽量让每个 worker 持续有活干，但避免提交过碎任务造成调度开销过高。
-    """
     if total_files <= 0:
         return 1
     workers = max(1, workers)
-    target = max(workers * 2, configured_batch_size)
+    prefetch_floor = workers * 2
+    prefetch_cap = max(prefetch_floor, workers * 4)
+    requested = max(1, int(configured_batch_size or prefetch_floor))
+    target = min(max(prefetch_floor, requested), prefetch_cap)
     return max(1, min(total_files, target))

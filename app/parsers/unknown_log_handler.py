@@ -189,8 +189,12 @@ class UnknownLogHandler:
         with self._lock:
             payload = asdict(obs)
             payload["extracted_timestamp"] = obs.timestamp
-            self._append_jsonl(self.pool_jsonl, payload)
-            clusters = self._load_clusters()
+            try:
+                self._append_jsonl(self.pool_jsonl, payload)
+                clusters = self._load_clusters()
+            except OSError:
+                # Unknown-log learning is auxiliary; it must never break primary parsing.
+                return
             cluster = clusters.get(obs.signature)
 
             if cluster is None:
@@ -234,8 +238,10 @@ class UnknownLogHandler:
                 cluster.setdefault("review_status", "pending_review")
                 cluster.setdefault("review_history", [])
                 cluster.setdefault("representative_timestamp", obs.timestamp)
-
-            self._save_clusters(clusters)
+            try:
+                self._save_clusters(clusters)
+            except OSError:
+                return
 
     def _build_context_example(self, obs: UnknownLogObservation) -> dict[str, Any]:
         return {

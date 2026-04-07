@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from app.parsers.base import BaseParser
-from app.schemas.common import RawLogRecord
+from app.schemas.common import build_raw_log_record
 from app.utils.files import read_text_stream
 from app.utils.timeparse import extract_first_datetime
 
@@ -21,14 +21,14 @@ class RunErrorParser(BaseParser):
             score += 60
         return score
 
-    def parse(self, path: Path):
+    def parse(self, path: Path, *, encoding: str | None = None):
         buffer: list[str] = []
         current_time: str | None = None
         level = "ERROR"
-        for line in read_text_stream(path):
+        for line in read_text_stream(path, encoding=encoding):
             ts = extract_first_datetime(line)
             if ts and HEADER_RE.search(line) and buffer:
-                yield RawLogRecord(
+                yield build_raw_log_record(
                     source_file=path.name,
                     parser_name=self.name,
                     raw_text="\n".join(buffer),
@@ -47,7 +47,7 @@ class RunErrorParser(BaseParser):
             if buffer:
                 buffer.append(line)
         if buffer:
-            yield RawLogRecord(
+            yield build_raw_log_record(
                 source_file=path.name,
                 parser_name=self.name,
                 raw_text="\n".join(buffer),

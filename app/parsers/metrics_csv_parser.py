@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 
 from app.parsers.base import BaseParser
-from app.schemas.common import RawLogRecord
+from app.schemas.common import build_raw_log_record
 from app.utils.files import detect_encoding
 from app.utils.text import infer_chip_name, infer_cycle_from_text
 
@@ -24,8 +24,8 @@ class MetricsCsvParser(BaseParser):
             score += 40
         return score
 
-    def parse(self, path: Path):
-        encoding = detect_encoding(path)
+    def parse(self, path: Path, *, encoding: str | None = None):
+        encoding = encoding or detect_encoding(path)
         with path.open("r", encoding=encoding, errors="replace", newline="") as f:
             reader = csv.DictReader(f)
             for idx, row in enumerate(reader, start=1):
@@ -43,7 +43,7 @@ class MetricsCsvParser(BaseParser):
 
                 if component == "ImagingMetrics":
                     for metric_name, metric_value in row.items():
-                        yield RawLogRecord(
+                        yield build_raw_log_record(
                             source_file=path.name,
                             parser_name=self.name,
                             raw_text=source_hint,
@@ -62,7 +62,7 @@ class MetricsCsvParser(BaseParser):
                         )
                 else:
                     text = " | ".join(f"{k}={v}" for k, v in row.items())
-                    yield RawLogRecord(
+                    yield build_raw_log_record(
                         source_file=path.name,
                         parser_name=self.name,
                         raw_text=text,

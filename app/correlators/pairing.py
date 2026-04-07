@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from functools import lru_cache
 
 from app.core.settings import get_settings
 from app.schemas.common import NormalizedEvent, StepSummary
 from app.utils.rules import load_yaml
 
 
+@lru_cache(maxsize=32768)
 def normalize_step_key(name: str | None) -> str | None:
     if not name:
         return None
@@ -21,8 +23,8 @@ def normalize_step_key(name: str | None) -> str | None:
     return text.strip(" -_<>.,:")
 
 
-def build_group_key(event: NormalizedEvent) -> tuple[str | None, int | None, str | None]:
-    return (event.component, event.cycle_no, event.chip_name)
+def build_group_key(event: NormalizedEvent) -> tuple[str | None, int | None, str | None, str | None]:
+    return (event.component, event.cycle_no, event.side_scope, event.chip_name)
 
 
 MAX_PAIR_GAP_MS = 20 * 60 * 1000
@@ -39,7 +41,7 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
         by_group[key].append(event)
 
     summaries: list[StepSummary] = []
-    for (component, cycle_no, chip_name), group in by_group.items():
+    for (component, cycle_no, side_scope, chip_name), group in by_group.items():
         active: dict[str, list[NormalizedEvent]] = defaultdict(list)
         for event in group:
             step_key = normalize_step_key(event.sub_step or event.message)
@@ -68,7 +70,14 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                             cycle_no=cycle_no,
                             sub_step=step_key,
                             component=component,
+                            instrument_scope=event.instrument_scope or start_event.instrument_scope,
+                            side_scope=side_scope or event.side_scope or start_event.side_scope,
+                            side_group=event.side_group or start_event.side_group,
                             chip_name=chip_name or event.chip_name or start_event.chip_name,
+                            chip_position=event.chip_position or start_event.chip_position,
+                            chuck_no=event.chuck_no or start_event.chuck_no,
+                            slot_no=event.slot_no or start_event.slot_no,
+                            stage_key=event.stage_key or start_event.stage_key,
                             start_epoch_ms=start_event.epoch_ms,
                             end_epoch_ms=event.epoch_ms,
                             duration_ms=duration_ms,
@@ -76,6 +85,8 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                             is_over_threshold=bool(duration_ms and threshold_ms and duration_ms > threshold_ms),
                             start_time_text=start_event.formatted_ms,
                             end_time_text=event.formatted_ms,
+                            side_confidence=max(float(event.side_confidence or 0.0), float(start_event.side_confidence or 0.0)) or None,
+                            side_evidence={**start_event.side_evidence, **event.side_evidence},
                         )
                     )
                 elif event.duration_ms is not None and event.epoch_ms is not None:
@@ -87,7 +98,14 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                             cycle_no=cycle_no,
                             sub_step=step_key,
                             component=component,
+                            instrument_scope=event.instrument_scope,
+                            side_scope=side_scope or event.side_scope,
+                            side_group=event.side_group,
                             chip_name=chip_name or event.chip_name,
+                            chip_position=event.chip_position,
+                            chuck_no=event.chuck_no,
+                            slot_no=event.slot_no,
+                            stage_key=event.stage_key,
                             start_epoch_ms=start_epoch_ms,
                             end_epoch_ms=event.epoch_ms,
                             duration_ms=event.duration_ms,
@@ -95,6 +113,8 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                             is_over_threshold=bool(event.duration_ms and threshold_ms and event.duration_ms > threshold_ms),
                             start_time_text=None,
                             end_time_text=event.formatted_ms,
+                            side_confidence=event.side_confidence,
+                            side_evidence=event.side_evidence,
                         )
                     )
                 continue
@@ -106,7 +126,14 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                         cycle_no=cycle_no,
                         sub_step=step_key,
                         component=component,
+                        instrument_scope=event.instrument_scope,
+                        side_scope=side_scope or event.side_scope,
+                        side_group=event.side_group,
                         chip_name=chip_name or event.chip_name,
+                        chip_position=event.chip_position,
+                        chuck_no=event.chuck_no,
+                        slot_no=event.slot_no,
+                        stage_key=event.stage_key,
                         start_epoch_ms=None,
                         end_epoch_ms=event.epoch_ms,
                         duration_ms=event.duration_ms,
@@ -114,6 +141,8 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                         is_over_threshold=bool(event.duration_ms and threshold_ms and event.duration_ms > threshold_ms),
                         start_time_text=None,
                         end_time_text=event.formatted_ms,
+                        side_confidence=event.side_confidence,
+                        side_evidence=event.side_evidence,
                     )
                 )
 
@@ -125,7 +154,14 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                         cycle_no=cycle_no,
                         sub_step=step_key,
                         component=component,
+                        instrument_scope=start_event.instrument_scope,
+                        side_scope=side_scope or start_event.side_scope,
+                        side_group=start_event.side_group,
                         chip_name=chip_name or start_event.chip_name,
+                        chip_position=start_event.chip_position,
+                        chuck_no=start_event.chuck_no,
+                        slot_no=start_event.slot_no,
+                        stage_key=start_event.stage_key,
                         start_epoch_ms=start_event.epoch_ms,
                         end_epoch_ms=None,
                         duration_ms=None,
@@ -133,6 +169,8 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                         is_over_threshold=False,
                         start_time_text=start_event.formatted_ms,
                         end_time_text=None,
+                        side_confidence=start_event.side_confidence,
+                        side_evidence=start_event.side_evidence,
                     )
                 )
     return summaries
@@ -150,6 +188,8 @@ def _is_pairable(start_event: NormalizedEvent, end_event: NormalizedEvent) -> bo
     if start_event.cycle_no is not None and end_event.cycle_no is not None and start_event.cycle_no != end_event.cycle_no:
         return False
     if start_event.chip_name and end_event.chip_name and start_event.chip_name != end_event.chip_name:
+        return False
+    if start_event.side_scope and end_event.side_scope and start_event.side_scope != end_event.side_scope:
         return False
     if start_event.epoch_ms is not None and end_event.epoch_ms is not None:
         return 0 <= (end_event.epoch_ms - start_event.epoch_ms) <= MAX_PAIR_GAP_MS

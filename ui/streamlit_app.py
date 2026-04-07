@@ -4,9 +4,21 @@ import json
 import math
 import os
 import re
+import sys
 import textwrap
+import hashlib
+import inspect
+from datetime import datetime
 from html import escape
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+project_root_str = str(PROJECT_ROOT)
+if project_root_str not in sys.path:
+    sys.path.insert(0, project_root_str)
 
 from app.core.bootstrap import bootstrap_for_local_run
 bootstrap_for_local_run()
@@ -32,6 +44,7 @@ ERROR_SEVERITY_COLORS = {
     "info": "#5B7C99",
     "unknown": "#7A7A7A",
 }
+_ACTIVE_SCOPE_PARAMS: dict[str, Any] = {}
 PAGE_META = {
     "首页 / 仪表盘": {"title": "首页总览", "icon": "dashboard", "description": "集中查看任务状态、问题密度、组件分布与关键处理指标。"},
     "历史项目中心": {"title": "历史项目中心", "icon": "archive", "description": "浏览已有任务记录，快速切换不同项目并回看历史分析结果。"},
@@ -95,6 +108,36 @@ def _format_metric_value(value: Any) -> str:
 DEFAULT_CARD_TONES = ["#052659", "#0B5CAD", "#D96B3B", "#DCEBFA", "#6D8FB6", "#F3E1A6"]
 DEFAULT_BADGE_TONES = ["#052659", "#DCEBFA", "#D96B3B", "#E7EFF8"]
 JsonDict = dict[str, Any]
+PROGRESS_STAGE_FLOW = ["uploaded", "parsing", "summary", "postprocess", "completed"]
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+UTC_TZ = ZoneInfo("UTC")
+ADMIN_ENV_PRIORITY_KEYS = [
+    "LLM_ENABLED",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_MODEL",
+    "LLM_TIMEOUT_SECONDS",
+    "LLM_MAX_RETRIES",
+    "LLM_PREVIEW_TIMEOUT_SECONDS",
+    "LLM_PREVIEW_MAX_RETRIES",
+    "LLM_PREVIEW_CACHE_TTL_SECONDS",
+    "LLM_DIAGNOSIS_UI_TIMEOUT_SECONDS",
+    "LLM_CONTEXT_MAX_TOKEN_BUDGET",
+    "SYSTEM_MEMORY_SOFT_LIMIT_PERCENT",
+    "SYSTEM_MEMORY_SOFT_RESERVE_MB",
+    "SYSTEM_CPU_SOFT_LIMIT_PERCENT",
+    "SYSTEM_MEMORY_GUARD_WAIT_SECONDS",
+    "MAX_UPLOAD_MB",
+    "CHUNK_SIZE",
+]
+PROGRESS_STAGE_META = {
+    "uploaded": {"label": "上传", "aliases": ("uploaded", "queued", "discover", "prescan", "prepare", "upload", "workspace", "input")},
+    "parsing": {"label": "解析", "aliases": ("parse", "parser", "parsing")},
+    "summary": {"label": "汇总", "aliases": ("merge", "normalize", "cycle_context", "context", "summary", "aggregate")},
+    "postprocess": {"label": "后处理", "aliases": ("postprocess", "cluster", "materializ", "finaliz", "dashboard", "error_prep")},
+    "completed": {"label": "完成", "aliases": ("completed", "finished", "success")},
+}
+_SAFE_DATAFRAME_CALL_COUNTS: dict[str, int] = {}
 
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -194,6 +237,17 @@ def _derive_readable_tint(background: str, ink: str, *, target: str, preferred_r
     if best_ratio >= fallback_ratio:
         return best_candidate
     return ink
+
+
+def _dropna_frame(df: pd.DataFrame, *subset: str) -> pd.DataFrame:
+    # Pandas works here, but Pylance can misread the overloaded subset signature.
+    return cast(pd.DataFrame, df.dropna(subset=cast(Any, tuple(subset))))
+
+
+def _safe_len(value: Any) -> int:
+    if isinstance(value, (str, list, tuple, set, dict)):
+        return len(value)
+    return 0
 
 
 def _tone_vars(background: str) -> dict[str, str]:
@@ -371,6 +425,13 @@ def inject_design_system(mode: str = "light"):
         [data-testid="stSidebar"] .stSelectbox svg {
             color: #021024 !important;
             fill: #021024 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stBaseButton-header"] svg,
+        [data-testid="stSidebar"] [data-testid="stBaseButton-headerNoPadding"] svg {
+            color: #F4FBFF !important;
+            fill: currentColor !important;
+            stroke: currentColor !important;
         }
 
         [data-testid="stSidebar"] [data-baseweb="radio"] label,
@@ -553,6 +614,33 @@ def inject_design_system(mode: str = "light"):
             border-radius: 22px;
             box-shadow: var(--shadow);
             overflow: hidden;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stExpander"] summary svg {
+            color: #0B5CAD !important;
+            fill: currentColor !important;
+            stroke: currentColor !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] [data-testid="stExpander"] label,
+        [data-testid="stSidebar"] [data-testid="stExpander"] .stTextInput label p {
+            color: #04101F !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stExpander"]:has(input[type="checkbox"]) [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] [data-testid="stExpander"]:has(input[type="checkbox"]) label,
+        [data-testid="stSidebar"] [data-testid="stExpander"]:has(input[type="checkbox"]) span {
+            color: #B42318 !important;
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stExpander"]:has(input[type="checkbox"]) .stButton > button,
+        [data-testid="stSidebar"] [data-testid="stExpander"]:has(input[type="checkbox"]) [data-testid="stBaseButton-secondary"] > button,
+        [data-testid="stSidebar"] [data-testid="stExpander"]:has(input[type="checkbox"]) [data-testid="stBaseButton-secondary"] button {
+            background: linear-gradient(180deg, #FFF4F2 0%, #FFD9D4 100%) !important;
+            border-color: #D92D20 !important;
+            color: #B42318 !important;
         }
 
         [data-testid="stDataFrame"],
@@ -768,6 +856,268 @@ def inject_design_system(mode: str = "light"):
             font-weight: 700;
             line-height: 1.45;
             word-break: break-word;
+        }
+
+        .dashboard-progress-panel {
+            position: relative;
+            overflow: hidden;
+            border-radius: 28px;
+            border: 1px solid rgba(84, 131, 179, 0.22);
+            background:
+                radial-gradient(circle at top right, rgba(193, 232, 255, 0.92) 0%, rgba(193, 232, 255, 0) 36%),
+                linear-gradient(135deg, rgba(3, 27, 58, 0.96) 0%, rgba(8, 44, 91, 0.96) 52%, rgba(17, 71, 130, 0.9) 100%);
+            box-shadow: 0 18px 42px rgba(5, 38, 89, 0.22);
+            margin: 0.4rem 0 1rem;
+        }
+
+        .dashboard-progress-panel::before {
+            content: "";
+            position: absolute;
+            inset: -40% auto auto -10%;
+            width: 220px;
+            height: 220px;
+            border-radius: 999px;
+            background: radial-gradient(circle, rgba(193, 232, 255, 0.32) 0%, rgba(193, 232, 255, 0) 72%);
+            pointer-events: none;
+        }
+
+        .dashboard-progress-hero {
+            position: relative;
+            padding: 1.15rem 1.2rem 0.9rem;
+            border-bottom: 1px solid rgba(193, 232, 255, 0.12);
+        }
+
+        .dashboard-progress-topline {
+            color: rgba(193, 232, 255, 0.88);
+            font-size: 0.76rem;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .dashboard-progress-heading-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.9rem;
+            margin-top: 0.72rem;
+        }
+
+        .dashboard-progress-heading {
+            color: #F8FBFF;
+            font-size: clamp(1.18rem, 1.8vw, 1.7rem);
+            font-weight: 700;
+            line-height: 1.25;
+            word-break: break-word;
+        }
+
+        .dashboard-progress-badge {
+            flex: 0 0 auto;
+            padding: 0.48rem 0.8rem;
+            border-radius: 999px;
+            background: rgba(193, 232, 255, 0.15);
+            border: 1px solid rgba(193, 232, 255, 0.22);
+            color: #F8FBFF;
+            font-family: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif;
+            font-size: 1.05rem;
+            font-weight: 700;
+            min-width: 4.8rem;
+            text-align: center;
+            backdrop-filter: blur(8px);
+        }
+
+        .dashboard-progress-subline {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            align-items: center;
+            margin-top: 0.65rem;
+            color: #F8FBFF;
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        .dashboard-progress-subline span {
+            color: rgba(193, 232, 255, 0.84);
+            font-size: 0.84rem;
+            font-weight: 500;
+        }
+
+        .dashboard-progress-track-shell {
+            position: relative;
+            width: 100%;
+            height: 0.95rem;
+            margin-top: 0.95rem;
+            border-radius: 999px;
+            background: rgba(193, 232, 255, 0.12);
+            overflow: hidden;
+        }
+
+        .dashboard-progress-track-fill {
+            position: relative;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #7EE0FF 0%, #92BFFF 38%, #F8FBFF 100%);
+            box-shadow: 0 0 18px rgba(126, 224, 255, 0.45);
+        }
+
+        .dashboard-progress-track-fill::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(120deg, rgba(255, 255, 255, 0) 15%, rgba(255, 255, 255, 0.55) 48%, rgba(255, 255, 255, 0) 85%);
+            transform: translateX(-100%);
+            animation: dashboard-progress-scan 2.8s linear infinite;
+        }
+
+        @keyframes dashboard-progress-scan {
+            to {
+                transform: translateX(100%);
+            }
+        }
+
+        .dashboard-progress-message-rich {
+            margin-top: 0.85rem;
+            color: rgba(244, 250, 255, 0.86);
+            font-size: 0.92rem;
+            line-height: 1.55;
+        }
+
+        .dashboard-progress-stage-row {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 0.55rem;
+            margin-top: 1rem;
+        }
+
+        .dashboard-stage-pill {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            min-height: 3rem;
+            padding: 0.72rem 0.7rem;
+            border-radius: 18px;
+            border: 1px solid rgba(193, 232, 255, 0.12);
+            background: rgba(255, 255, 255, 0.06);
+            color: rgba(244, 250, 255, 0.72);
+        }
+
+        .dashboard-stage-pill.completed {
+            background: rgba(126, 224, 255, 0.16);
+            border-color: rgba(126, 224, 255, 0.34);
+            color: #F8FBFF;
+        }
+
+        .dashboard-stage-pill.active {
+            background: rgba(248, 251, 255, 0.16);
+            border-color: rgba(248, 251, 255, 0.34);
+            color: #F8FBFF;
+            box-shadow: 0 0 22px rgba(248, 251, 255, 0.12);
+        }
+
+        .dashboard-stage-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.72rem;
+            height: 1.72rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.14);
+            font-size: 0.8rem;
+            font-weight: 700;
+            flex: 0 0 auto;
+        }
+
+        .dashboard-stage-name {
+            font-size: 0.88rem;
+            font-weight: 600;
+            line-height: 1.25;
+        }
+
+        .dashboard-progress-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.75rem;
+            padding: 1rem 1.2rem 0.85rem;
+        }
+
+        .dashboard-progress-stat-card {
+            min-height: 5.35rem;
+            padding: 0.88rem 0.92rem;
+            border-radius: 20px;
+            border: 1px solid rgba(193, 232, 255, 0.16);
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(10px);
+        }
+
+        .dashboard-progress-stat-label {
+            color: rgba(193, 232, 255, 0.84);
+            font-size: 0.74rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .dashboard-progress-stat-value {
+            margin-top: 0.48rem;
+            color: #F8FBFF;
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+
+        .dashboard-progress-runtime {
+            padding: 0 1.2rem 1rem;
+            color: rgba(193, 232, 255, 0.84);
+            font-size: 0.86rem;
+        }
+
+        .dashboard-progress-history-shell {
+            padding: 0 1.2rem 1.15rem;
+        }
+
+        .dashboard-progress-history-title {
+            color: rgba(244, 250, 255, 0.92);
+            font-size: 0.92rem;
+            font-weight: 700;
+            margin-bottom: 0.62rem;
+        }
+
+        .dashboard-progress-history-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 0.62rem;
+        }
+
+        .dashboard-progress-history-card {
+            padding: 0.72rem 0.78rem;
+            border-radius: 16px;
+            border: 1px solid rgba(193, 232, 255, 0.14);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .dashboard-progress-history-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            color: rgba(193, 232, 255, 0.8);
+            font-size: 0.72rem;
+        }
+
+        .dashboard-progress-history-stage {
+            margin-top: 0.45rem;
+            color: #F8FBFF;
+            font-size: 0.88rem;
+            font-weight: 700;
+        }
+
+        .dashboard-progress-history-note {
+            margin-top: 0.32rem;
+            color: rgba(244, 250, 255, 0.76);
+            font-size: 0.78rem;
+            line-height: 1.45;
         }
 
         .section-card {
@@ -1088,6 +1438,15 @@ def inject_design_system(mode: str = "light"):
             .dashboard-snapshot {
                 grid-template-columns: 1fr;
             }
+
+            .dashboard-progress-stage-row,
+            .dashboard-progress-history-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .dashboard-progress-stats-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         @media (max-width: 720px) {
@@ -1109,6 +1468,21 @@ def inject_design_system(mode: str = "light"):
             }
 
             .dashboard-insight-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .dashboard-progress-heading-row,
+            .dashboard-progress-subline {
+                align-items: flex-start;
+            }
+
+            .dashboard-progress-heading-row {
+                flex-direction: column;
+            }
+
+            .dashboard-progress-stage-row,
+            .dashboard-progress-history-grid,
+            .dashboard-progress-stats-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -1272,6 +1646,9 @@ def render_dashboard_snapshot(progress_percent: Any, stage: str, message: str, i
 
 def render_homepage_performance_summary(perf_summary: JsonDict, status: JsonDict):
     stage_timings = cast(JsonDict, perf_summary.get("stage_timings", {})) if isinstance(perf_summary, dict) else {}
+    throughput = cast(JsonDict, perf_summary.get("throughput", {})) if isinstance(perf_summary, dict) else {}
+    tuning = cast(JsonDict, perf_summary.get("tuning", {})) if isinstance(perf_summary, dict) else {}
+    recommendations = perf_summary.get("recommendations", []) if isinstance(perf_summary, dict) else []
     cpu_cores = perf_summary.get("cpu_cores") or status.get("cpu_cores") or "-"
     total_seconds = stage_timings.get("total_seconds") or status.get("elapsed_seconds") or "-"
     parse_seconds = stage_timings.get("parse_seconds") or stage_timings.get("prescan_seconds") or "-"
@@ -1286,28 +1663,763 @@ def render_homepage_performance_summary(perf_summary: JsonDict, status: JsonDict
             {"icon": "dashboard", "label": "聚合阶段(秒)", "value": aggregate_seconds, "note": "聚合与归并阶段耗时", "tone": "#F3E1A6"},
         ]
     )
+    if throughput:
+        st.markdown("#### 吞吐指标")
+        render_stat_cards(
+            [
+                {"icon": "stream", "label": "总体 lines/s", "value": throughput.get("overall_lines_per_sec") or throughput.get("lines_per_sec"), "note": "全流程吞吐", "tone": "#0B5CAD"},
+                {"icon": "settings", "label": "解析 lines/s", "value": throughput.get("parse_lines_per_sec"), "note": "仅解析阶段吞吐", "tone": "#E7EFF8"},
+                {"icon": "file", "label": "files/s", "value": throughput.get("files_per_sec"), "note": "文件处理吞吐", "tone": "#DCEBFA"},
+                {"icon": "dashboard", "label": "dispatch/s", "value": throughput.get("dispatch_units_per_sec"), "note": "任务切片调度吞吐", "tone": "#F3E1A6"},
+            ]
+        )
+    if tuning:
+        st.markdown("#### 任务调优参数")
+        st.json(tuning)
+    if recommendations:
+        st.markdown("#### 优化建议")
+        for item in recommendations:
+            st.caption(f"- {item}")
+
+
+def _parse_iso_text(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    to_pydatetime = getattr(value, "to_pydatetime", None)
+    if callable(to_pydatetime):
+        try:
+            converted = to_pydatetime()
+            if isinstance(converted, datetime):
+                return converted
+        except Exception:
+            pass
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _format_duration_text(seconds: Any) -> str:
+    try:
+        total_seconds = float(seconds)
+    except (TypeError, ValueError):
+        return "-"
+    if not math.isfinite(total_seconds) or total_seconds < 0:
+        return "-"
+    if total_seconds < 1:
+        return f"{total_seconds:.2f}s"
+    days, remainder = divmod(int(round(total_seconds)), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts[:3])
+
+
+def _format_datetime_text(value: Any) -> str:
+    dt = _parse_iso_text(value)
+    if dt is None:
+        return "-"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC_TZ)
+    return dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _display_datetime_text(value: Any, fallback: str = "-") -> str:
+    formatted = _format_datetime_text(value)
+    if formatted != "-":
+        return formatted
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _format_mb_or_gb(value: Any) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if not math.isfinite(amount) or amount < 0:
+        return "-"
+    if amount >= 1024:
+        return f"{amount / 1024:.2f} GB"
+    if amount >= 100:
+        return f"{amount:.0f} MB"
+    return f"{amount:.1f} MB"
+
+
+def _format_gb_text(value: Any) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if not math.isfinite(amount) or amount < 0:
+        return "-"
+    if amount >= 100:
+        return f"{amount:.0f} GB"
+    if amount >= 10:
+        return f"{amount:.1f} GB"
+    return f"{amount:.2f} GB"
+
+
+def _format_percent_text(value: Any) -> str:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if not math.isfinite(percent) or percent < 0:
+        return "-"
+    return f"{percent:.1f}%"
+
+
+def _env_sort_key(item: JsonDict) -> tuple[int, int, str]:
+    key = str(item.get("key") or "")
+    if key in ADMIN_ENV_PRIORITY_KEYS:
+        return (0, ADMIN_ENV_PRIORITY_KEYS.index(key), key)
+    if key.startswith("LLM_"):
+        return (1, 0, key)
+    if key.startswith("SYSTEM_"):
+        return (2, 0, key)
+    return (3, 0, key)
+
+
+def _env_lookup(items: list[JsonDict], key: str) -> JsonDict:
+    for item in items:
+        if str(item.get("key") or "") == key:
+            return item
+    return {}
+
+
+def render_system_pressure_summary(runtime_snapshot: JsonDict) -> None:
+    cpu = cast(JsonDict, runtime_snapshot.get("cpu") or {})
+    memory = cast(JsonDict, runtime_snapshot.get("memory") or {})
+    disk = cast(JsonDict, runtime_snapshot.get("disk") or {})
+    guard = cast(JsonDict, runtime_snapshot.get("guard") or {})
+    policy = cast(JsonDict, runtime_snapshot.get("policy") or {})
+    blocked = bool(guard.get("blocked"))
+
+    st.markdown("#### 当前计算压力")
+    render_stat_cards(
+        [
+            {
+                "icon": "settings",
+                "label": "CPU 使用率",
+                "value": _format_percent_text(cpu.get("percent")),
+                "note": f"逻辑核 {cpu.get('logical_cores') or '-'} / 物理核 {cpu.get('physical_cores') or '-'}",
+                "tone": "#D96B3B" if blocked else "#052659",
+            },
+            {
+                "icon": "dashboard",
+                "label": "内存使用率",
+                "value": _format_percent_text(memory.get("percent")),
+                "note": f"已用 {_format_mb_or_gb(memory.get('used_mb'))} / 总计 {_format_mb_or_gb(memory.get('total_mb'))}",
+                "tone": "#DCEBFA",
+            },
+            {
+                "icon": "stream",
+                "label": "可用内存",
+                "value": _format_mb_or_gb(memory.get("available_mb")),
+                "note": f"保留阈值 {policy.get('memory_soft_reserve_mb') or '-'} MB",
+                "tone": "#E7EFF8",
+            },
+            {
+                "icon": "file",
+                "label": "磁盘空闲",
+                "value": _format_gb_text(disk.get("free_gb")),
+                "note": f"数据目录占用 {_format_percent_text(disk.get('percent'))}",
+                "tone": "#F3E1A6",
+            },
+            {
+                "icon": "alert",
+                "label": "新任务调度",
+                "value": "延迟派发" if blocked else "允许派发",
+                "note": f"CPU 软阈值 {policy.get('cpu_soft_limit_percent') or '-'}% / 内存软阈值 {policy.get('memory_soft_limit_percent') or '-'}%",
+                "tone": "#D96B3B" if blocked else "#0B5CAD",
+            },
+        ]
+    )
+    if blocked:
+        st.warning(str(guard.get("summary") or "当前资源压力较高，新任务会延迟调度。"))
+    else:
+        st.caption(str(guard.get("summary") or "当前资源状态正常。"))
+    st.caption(f"采样时间: {_format_datetime_text(runtime_snapshot.get('collected_at'))}")
+
+
+def _render_upload_perf_controls(*, key_prefix: str) -> JsonDict:
+    cpu_cap = max(1, os.cpu_count() or 4)
+    with st.expander("Performance tuning", expanded=False):
+        st.caption("These options apply to the current upload task only.")
+        c1, c2 = st.columns(2, gap="medium")
+        max_workers = c1.number_input(
+            "Max workers",
+            min_value=1,
+            max_value=cpu_cap,
+            value=min(32, cpu_cap),
+            step=1,
+            key=f"{key_prefix}_max_workers",
+        )
+        file_level_workers = c2.number_input(
+            "File-level workers",
+            min_value=1,
+            max_value=cpu_cap,
+            value=min(16, cpu_cap),
+            step=1,
+            key=f"{key_prefix}_file_level_workers",
+        )
+        c3, c4 = st.columns(2, gap="medium")
+        chunk_size_mb = c3.number_input(
+            "Chunk size (MB)",
+            min_value=1,
+            max_value=1024,
+            value=16,
+            step=1,
+            key=f"{key_prefix}_chunk_size_mb",
+        )
+        db_batch_size = c4.number_input(
+            "DB batch size",
+            min_value=100,
+            max_value=200000,
+            value=5000,
+            step=100,
+            key=f"{key_prefix}_db_batch_size",
+        )
+        c5, c6 = st.columns(2, gap="medium")
+        max_parse_chunks_per_file = c5.number_input(
+            "Max chunks / file",
+            min_value=1,
+            max_value=256,
+            value=64,
+            step=1,
+            key=f"{key_prefix}_max_parse_chunks_per_file",
+        )
+        enable_process_pool = c6.checkbox(
+            "Enable process pool",
+            value=True,
+            key=f"{key_prefix}_enable_process_pool",
+        )
+        enable_streaming_parse = st.checkbox(
+            "Enable chunked streaming parse",
+            value=True,
+            key=f"{key_prefix}_enable_streaming_parse",
+        )
+
+    return {
+        "max_workers": int(max_workers),
+        "file_level_workers": min(int(file_level_workers), int(max_workers)),
+        "streaming_parse_chunk_bytes": int(chunk_size_mb) * 1024 * 1024,
+        "max_parse_chunks_per_file": int(max_parse_chunks_per_file),
+        "db_batch_size": int(db_batch_size),
+        "enable_process_pool": str(bool(enable_process_pool)).lower(),
+        "enable_streaming_parse": str(bool(enable_streaming_parse)).lower(),
+    }
+
+
+def render_dashboard_upload_panel(*, panel_key: str = "dashboard") -> None:
+    default_cpu_cores = min(32, max(1, os.cpu_count() or 4))
+    st.markdown("#### 文件上传")
+    st.caption("上传入口已并入仪表盘，前端不再额外限制业务上传大小。")
+    with st.form(f"{panel_key}_upload_form"):
+        uploaded = st.file_uploader(
+            "支持多文件与压缩包上传(zip / 7z / tar)",
+            accept_multiple_files=True,
+            key=f"{panel_key}_file_uploader",
+            help="如仍遇到 Streamlit 上传限制，请同步调整 server.maxUploadSize。",
+        )
+        cpu_cores = st.number_input(
+            "并行处理 CPU 核心数",
+            min_value=1,
+            max_value=max(1, os.cpu_count() or 4),
+            value=default_cpu_cores,
+            step=1,
+            key=f"{panel_key}_cpu_cores",
+        )
+        perf_controls = _render_upload_perf_controls(key_prefix=f"{panel_key}_upload")
+        submitted = st.form_submit_button("开始批量分析并上传", use_container_width=True)
+
+    if not submitted:
+        return
+    if not uploaded:
+        st.warning("请先选择至少一个文件。")
+        return
+
+    with st.spinner("正在上传并提交后台任务，请勿重复点击..."):
+        files_payload = [("files", (f.name, f.getvalue(), f.type or "application/octet-stream")) for f in uploaded]
+        ok, result = api_post("/tasks/upload", files=files_payload, data={"cpu_cores": int(cpu_cores), **perf_controls})
+    if ok:
+        st.session_state["latest_task_uuid"] = result.get("task_uuid", "")
+        st.session_state["dashboard_upload_notice"] = result.get("message") or "任务已提交。"
+        clear_cached_api_get()
+        st.rerun()
+    else:
+        st.error(result)
+
+
+def render_admin_env_config_panel(llm_cfg: JsonDict) -> None:
+    st.markdown("#### Env 配置")
+    st.caption("仅管理员可编辑。修改会直接写入项目根目录 `.env`，后续接口读取将使用新值。")
+
+    ok_env, env_payload = api_get("/config/env", live=True)
+    if not ok_env:
+        st.error(env_payload)
+        return
+    ok_runtime, runtime_payload = api_get("/system/runtime", live=True)
+    items = sorted(
+        [cast(JsonDict, row) for row in cast(list[Any], env_payload.get("items") or []) if isinstance(row, dict)],
+        key=_env_sort_key,
+    )
+    if not items:
+        st.info("当前未读取到可编辑的 env 项。")
+        return
+
+    llm_enabled_item = _env_lookup(items, "LLM_ENABLED")
+    llm_base_url_item = _env_lookup(items, "LLM_BASE_URL")
+    llm_api_key_item = _env_lookup(items, "LLM_API_KEY")
+    llm_model_item = _env_lookup(items, "LLM_MODEL")
+    render_info_tiles(
+        [
+            {
+                "label": "LLM 调用状态",
+                "value": llm_enabled_item.get("display_value") if llm_enabled_item else llm_cfg.get("enabled"),
+                "note": "对应 `LLM_ENABLED`，用于控制是否真正触发大模型调用",
+            },
+            {
+                "label": "LLM URL",
+                "value": llm_base_url_item.get("value") if llm_base_url_item else llm_cfg.get("base_url"),
+                "note": "对应 `LLM_BASE_URL`",
+            },
+            {
+                "label": "LLM API Key",
+                "value": llm_api_key_item.get("display_value") if llm_api_key_item else "",
+                "note": "对应 `LLM_API_KEY`，敏感字段以掩码展示",
+            },
+            {
+                "label": "LLM 模型",
+                "value": llm_model_item.get("value") if llm_model_item else llm_cfg.get("model"),
+                "note": "对应 `LLM_MODEL`",
+            },
+            {
+                "label": "Env 总项数",
+                "value": len(items),
+                "note": "支持在下方搜索、编辑和恢复默认值",
+            },
+            {
+                "label": "运行时状态",
+                "value": "资源健康" if ok_runtime and not bool((runtime_payload.get("guard") or {}).get("blocked")) else "存在压力",
+                "note": "用于辅助判断 LLM 与任务并发是否受资源影响",
+            },
+        ],
+        columns=3,
+    )
+
+    if ok_runtime and isinstance(runtime_payload, dict):
+        with st.expander("查看当前运行时资源状态", expanded=False):
+            render_system_pressure_summary(cast(JsonDict, runtime_payload))
+
+    search_text = st.text_input("搜索 env 键", key="admin_env_search", placeholder="例如 LLM_ / SYSTEM_ / SMTP_")
+    filtered_items = [
+        item for item in items
+        if not search_text or search_text.lower() in str(item.get("key") or "").lower()
+    ]
+    if not filtered_items:
+        st.info("没有匹配的 env 键。")
+        return
+
+    picked_key = st.selectbox(
+        "选择要编辑的 env 键",
+        [str(item.get("key") or "") for item in filtered_items],
+        key="admin_env_selected_key",
+    )
+    selected_item = next(item for item in filtered_items if str(item.get("key") or "") == picked_key)
+
+    render_info_tiles(
+        [
+            {"label": "当前值", "value": selected_item.get("display_value") if selected_item.get("is_sensitive") else selected_item.get("value")},
+            {"label": "默认值", "value": selected_item.get("default_display_value") if selected_item.get("is_sensitive") else selected_item.get("default_value")},
+            {"label": "已偏离默认", "value": selected_item.get("is_modified"), "note": "可通过恢复默认快速回滚"},
+        ],
+        columns=3,
+    )
+
+    with st.form(f"admin_env_edit_form::{picked_key}"):
+        if bool(selected_item.get("is_sensitive")):
+            edited_value = st.text_input("新的值", value=str(selected_item.get("value") or ""), type="password")
+        else:
+            edited_value = st.text_area("新的值", value=str(selected_item.get("value") or ""), height=120)
+        save_clicked = st.form_submit_button("保存当前 env 项", type="primary")
+        reset_clicked = st.form_submit_button("恢复默认值", disabled=not bool(selected_item.get("has_default")))
+
+    if save_clicked:
+        ok_save, save_resp = api_put(f"/config/env/{picked_key}", {"value": edited_value})
+        if ok_save:
+            st.success(f"{picked_key} 已更新。")
+            clear_cached_api_get()
+            st.rerun()
+        else:
+            st.error(save_resp)
+    if reset_clicked:
+        ok_reset, reset_resp = api_post(f"/config/env/{picked_key}/reset", json={}, timeout=30)
+        if ok_reset:
+            st.success(f"{picked_key} 已恢复默认值。")
+            clear_cached_api_get()
+            st.rerun()
+        else:
+            st.error(reset_resp)
+
+    safe_dataframe(
+        [
+            {
+                "key": item.get("key"),
+                "current_value": item.get("display_value") if item.get("is_sensitive") else item.get("value"),
+                "default_value": item.get("default_display_value") if item.get("is_sensitive") else item.get("default_value"),
+                "is_modified": item.get("is_modified"),
+                "is_sensitive": item.get("is_sensitive"),
+            }
+            for item in filtered_items
+        ],
+        use_container_width=True,
+        height=320,
+        key="admin_env_items_table",
+    )
+
+
+def _is_task_active(status: JsonDict) -> bool:
+    return str(status.get("status") or "").lower() in {"uploaded", "queued", "processing"}
+
+
+def _streamlit_version_tuple() -> tuple[int, ...]:
+    raw_version = str(getattr(st, "__version__", "") or "").strip()
+    parts: list[int] = []
+    for piece in raw_version.split("."):
+        match = re.match(r"(\d+)", piece)
+        if not match:
+            break
+        parts.append(int(match.group(1)))
+    return tuple(parts)
+
+
+def _use_fragment_progress_refresh() -> bool:
+    env_value = str(os.getenv("STREAMLIT_ENABLE_FRAGMENT_PROGRESS", "")).strip().lower()
+    if env_value in {"1", "true", "yes", "on"}:
+        return True
+    if env_value in {"0", "false", "no", "off"}:
+        return False
+    return _streamlit_version_tuple() >= (1, 41, 0)
+
+
+def _render_dashboard_progress_card_content(task_uuid: str, status: JsonDict) -> None:
+    progress_value = max(0, min(100, int(status.get("progress_percent") or 0)))
+    runtime_snapshot = status.get("runtime_snapshot") if isinstance(status.get("runtime_snapshot"), dict) else {}
+    history = status.get("progress_history") if isinstance(status.get("progress_history"), list) else []
+    file_label = status.get("filename") or task_uuid
+    current_stage = status.get("current_stage") or "-"
+    elapsed_seconds = status.get("elapsed_seconds")
+    eta_seconds = status.get("estimated_remaining_seconds")
+    finish_at = status.get("estimated_finish_at")
+
+    st.markdown("#### 实时文件处理进度")
+    left, right = st.columns([1.35, 1.0], gap="large")
+    with left:
+        st.caption(f"任务 / 文件: {file_label}")
+        st.progress(progress_value)
+        stage_cols = st.columns(2, gap="medium")
+        stage_cols[0].metric("当前阶段", current_stage)
+        stage_cols[1].metric("处理状态", status.get("status", "-"))
+        if status.get("message"):
+            st.caption(str(status.get("message")))
+    with right:
+        metric_cols = st.columns(2, gap="small")
+        metric_cols[0].metric("已用时间", _format_duration_text(elapsed_seconds))
+        metric_cols[1].metric("预计剩余", _format_duration_text(eta_seconds))
+        metric_cols = st.columns(2, gap="small")
+        metric_cols[0].metric("预计结束", _format_datetime_text(finish_at))
+        metric_cols[1].metric("进度", f"{progress_value}%")
+        cpu_percent = ((runtime_snapshot.get("cpu") or {}).get("percent")) if runtime_snapshot else None
+        mem_percent = ((runtime_snapshot.get("memory") or {}).get("percent")) if runtime_snapshot else None
+        if cpu_percent is not None or mem_percent is not None:
+            st.caption(
+                f"Runtime snapshot: CPU {cpu_percent if cpu_percent is not None else '-'}% | "
+                f"Memory {mem_percent if mem_percent is not None else '-'}%"
+            )
+
+    if history:
+        history_rows = []
+        for row in reversed(history[-10:]):
+            history_rows.append(
+                {
+                    "时间": _format_datetime_text(row.get("timestamp")),
+                    "阶段": row.get("current_stage") or "-",
+                    "状态": row.get("status") or "-",
+                    "进度": f"{int(row.get('progress_percent') or 0)}%",
+                    "说明": row.get("message") or "",
+                }
+            )
+        with st.expander("处理历史", expanded=not _is_task_active(status)):
+            safe_dataframe(pd.DataFrame(history_rows), use_container_width=True, height=240)
+
+
+def _normalize_progress_stage(status: JsonDict) -> str:
+    raw_stage = str(status.get("current_stage") or "").strip().lower()
+    runtime_status = str(status.get("status") or "").strip().lower()
+    progress_value = max(0, min(100, int(status.get("progress_percent") or 0)))
+
+    if runtime_status == "completed" or progress_value >= 100:
+        return "completed"
+
+    for stage_key, meta in PROGRESS_STAGE_META.items():
+        if stage_key == "completed":
+            continue
+        aliases = cast(tuple[str, ...], meta.get("aliases") or ())
+        if any(alias in raw_stage for alias in aliases):
+            return stage_key
+
+    if runtime_status in {"uploaded", "queued"} or progress_value < 20:
+        return "uploaded"
+    if progress_value < 68:
+        return "parsing"
+    if progress_value < 84:
+        return "summary"
+    return "postprocess"
+
+
+def _progress_stage_label(stage_key: str) -> str:
+    meta = PROGRESS_STAGE_META.get(stage_key) or {}
+    return str(meta.get("label") or stage_key or "-")
+
+
+def _compact_stage_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    return re.sub(r"[_\s]+", " ", text)
+
+
+def _detect_active_file_label(task_uuid: str, status: JsonDict) -> str:
+    fallback = str(status.get("filename") or task_uuid or "-").strip() or "-"
+    message = str(status.get("message") or "").strip()
+    if not message:
+        return fallback
+
+    explicit_patterns = [
+        r"checking archive/file:\s*(?P<name>.+)$",
+        r"^(?P<name>.+?)\s*\[[^\]]+\]$",
+        r"^(?P<name>.+?)\s+retried serially$",
+    ]
+    for pattern in explicit_patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            value = str(match.group("name") or "").strip(" .")
+            if value:
+                return value
+
+    file_match = re.search(r"([^\s\\/:*?\"<>|]+?\.(?:csv|log|txt|zip|7z|tar|jsonl?|gz|tsv|xlsx?))", message, re.IGNORECASE)
+    if file_match:
+        value = str(file_match.group(1) or "").strip()
+        if value:
+            return value
+    return fallback
+
+
+def _render_dashboard_progress_card_content(task_uuid: str, status: JsonDict) -> None:
+    progress_value = max(0, min(100, int(status.get("progress_percent") or 0)))
+    runtime_snapshot = status.get("runtime_snapshot") if isinstance(status.get("runtime_snapshot"), dict) else {}
+    history = status.get("progress_history") if isinstance(status.get("progress_history"), list) else []
+    current_stage_key = _normalize_progress_stage(status)
+    current_stage_label = _progress_stage_label(current_stage_key)
+    current_stage = _compact_stage_text(status.get("current_stage"))
+    active_file = _detect_active_file_label(task_uuid, status)
+    elapsed_seconds = status.get("elapsed_seconds")
+    eta_seconds = status.get("estimated_remaining_seconds")
+    started_at = status.get("started_at") or status.get("created_at")
+    finished_at = status.get("finished_at")
+    finish_at = status.get("estimated_finish_at")
+    status_text = str(status.get("status") or "-").strip() or "-"
+    message_text = str(status.get("message") or "").strip() or "系统正在持续刷新任务状态。"
+    cpu_percent = ((runtime_snapshot.get("cpu") or {}).get("percent")) if runtime_snapshot else None
+    mem_percent = ((runtime_snapshot.get("memory") or {}).get("percent")) if runtime_snapshot else None
+
+    stage_items: list[str] = []
+    active_index = PROGRESS_STAGE_FLOW.index(current_stage_key) if current_stage_key in PROGRESS_STAGE_FLOW else 0
+    for index, stage_key in enumerate(PROGRESS_STAGE_FLOW):
+        state = "pending"
+        if index < active_index:
+            state = "completed"
+        elif stage_key == current_stage_key:
+            state = "active"
+        stage_items.append(
+            _html_block(
+                f"""
+                <div class="dashboard-stage-pill {state}">
+                    <span class="dashboard-stage-index">{index + 1}</span>
+                    <span class="dashboard-stage-name">{escape(_progress_stage_label(stage_key))}</span>
+                </div>
+                """
+            )
+        )
+
+    metric_cards = [
+        ("当前处理文件名", active_file),
+        ("当前处理阶段", current_stage_label),
+        ("已用时间", _format_duration_text(elapsed_seconds)),
+        ("预计剩余时间", _format_duration_text(eta_seconds)),
+        ("预计结束时间", _format_datetime_text(finish_at)),
+        ("任务状态", status_text),
+    ]
+    metric_cards = [
+        ("任务状态", status_text),
+        ("当前阶段", current_stage_label),
+        ("开始时间", _format_datetime_text(started_at)),
+        ("预计结束时间", _format_datetime_text(finish_at if _is_task_active(status) else (finished_at or finish_at))),
+        ("实际用时", _format_duration_text(elapsed_seconds)),
+        ("预计剩余时间", _format_duration_text(eta_seconds)),
+    ]
+    metric_html = "".join(
+        _html_block(
+            f"""
+            <article class="dashboard-progress-stat-card">
+                <div class="dashboard-progress-stat-label">{escape(label)}</div>
+                <div class="dashboard-progress-stat-value">{escape(value)}</div>
+            </article>
+            """
+        )
+        for label, value in metric_cards
+    )
+
+    history_html = ""
+    if history:
+        history_items: list[str] = []
+        for row in reversed(history[-5:]):
+            row_payload = cast(JsonDict, row if isinstance(row, dict) else {})
+            row_stage = _progress_stage_label(_normalize_progress_stage(row_payload))
+            history_items.append(
+                _html_block(
+                    f"""
+                    <article class="dashboard-progress-history-card">
+                        <div class="dashboard-progress-history-top">
+                            <span>{escape(_format_datetime_text(row_payload.get("timestamp")))}</span>
+                            <strong>{escape(f"{int(row_payload.get('progress_percent') or 0)}%")}</strong>
+                        </div>
+                        <div class="dashboard-progress-history-stage">{escape(row_stage)}</div>
+                        <div class="dashboard-progress-history-note">{escape(_compact_stage_text(row_payload.get("message") or row_payload.get("current_stage") or "-"))}</div>
+                    </article>
+                    """
+                )
+            )
+        history_html = (
+            '<div class="dashboard-progress-history-shell">'
+            '<div class="dashboard-progress-history-title">最近处理轨迹</div>'
+            f'<div class="dashboard-progress-history-grid">{"".join(history_items)}</div>'
+            "</div>"
+        )
+
+    runtime_caption = ""
+    if cpu_percent is not None or mem_percent is not None:
+        runtime_caption = (
+            f"CPU {cpu_percent if cpu_percent is not None else '-'}% · "
+            f"Memory {mem_percent if mem_percent is not None else '-'}%"
+        )
+
+    html = "".join(
+        [
+            '<section class="dashboard-progress-panel">',
+            '<div class="dashboard-progress-hero">',
+            '<div class="dashboard-progress-topline">实时文件处理进度</div>',
+            '<div class="dashboard-progress-heading-row">',
+            f'<div class="dashboard-progress-heading">{escape(active_file)}</div>',
+            f'<div class="dashboard-progress-badge">{progress_value}%</div>',
+            "</div>",
+            f'<div class="dashboard-progress-subline">阶段：{escape(current_stage_label)}<span>{escape(current_stage)}</span></div>',
+            '<div class="dashboard-progress-track-shell">',
+            f'<div class="dashboard-progress-track-fill" style="width: {progress_value}%"></div>',
+            "</div>",
+            f'<div class="dashboard-progress-message-rich">{escape(message_text)}</div>',
+            f'<div class="dashboard-progress-stage-row">{"".join(stage_items)}</div>',
+            "</div>",
+            f'<div class="dashboard-progress-stats-grid">{metric_html}</div>',
+            f'<div class="dashboard-progress-runtime">{escape(runtime_caption or "等待资源状态快照...")}</div>',
+            history_html,
+            "</section>",
+        ]
+    )
+    st.markdown("#### 实时文件处理进度")
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_dashboard_progress_card(task_uuid: str, status: JsonDict) -> None:
+    refresh_seconds = max(2, int(os.getenv("STREAMLIT_PROGRESS_REFRESH_SECONDS", "3")))
+    auto_refresh_key = f"dashboard_progress_auto::{task_uuid}"
+    st.session_state[auto_refresh_key] = _is_task_active(status)
+    fragment_fn = getattr(st, "fragment", None)
+    allow_fragment_refresh = callable(fragment_fn) and _use_fragment_progress_refresh()
+
+    if allow_fragment_refresh:
+        @fragment_fn(run_every=refresh_seconds if st.session_state.get(auto_refresh_key) else None)
+        def _fragment() -> None:
+            ok_live, live_status = api_get(f"/tasks/{task_uuid}/status", live=True)
+            payload = live_status if ok_live and isinstance(live_status, dict) else status
+            active_now = _is_task_active(payload)
+            if st.session_state.get(auto_refresh_key) != active_now:
+                st.session_state[auto_refresh_key] = active_now
+                st.rerun()
+            _render_dashboard_progress_card_content(task_uuid, cast(JsonDict, payload))
+
+        _fragment()
+        return
+
+    payload = status
+    if _is_task_active(status):
+        ok_live, live_status = api_get(f"/tasks/{task_uuid}/status", live=True)
+        if ok_live and isinstance(live_status, dict):
+            payload = cast(JsonDict, live_status)
+
+    _render_dashboard_progress_card_content(task_uuid, payload)
+    if _is_task_active(payload) and not allow_fragment_refresh:
+        st.caption(
+            "Auto refresh is disabled on this Streamlit version to avoid fragment DOM errors. "
+            "Use the refresh button while the task is running."
+        )
+    if st.button("刷新进度", key=f"progress_refresh::{task_uuid}"):
+        clear_cached_api_get()
+        st.rerun()
 
 
 def _api_base() -> str:
     return st.session_state.get("api_base", DEFAULT_API_BASE)
 
 
-@st.cache_data(show_spinner=False, ttl=15)
-def cached_api_get(path: str, params_json: str = "") -> Any:
+def _request_api_get(path: str, params_json: str = "") -> Any:
     params = json.loads(params_json) if params_json else {}
     resp = requests.get(f"{_api_base()}{path}", params=params, headers=_auth_headers(), timeout=120)
     resp.raise_for_status()
     return resp.json()
 
 
+@st.cache_data(show_spinner=False, ttl=15)
+def cached_api_get(path: str, params_json: str = "") -> Any:
+    return _request_api_get(path, params_json)
+
+
 def clear_cached_api_get() -> None:
     cast(Any, cached_api_get).clear()
 
 
-def api_get(path: str, **params: Any) -> tuple[bool, Any]:
+def api_get(path: str, live: bool = False, **params: Any) -> tuple[bool, Any]:
     try:
+        params = {**_ACTIVE_SCOPE_PARAMS, **params}
         key = json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)
-        return True, cached_api_get(path, key)
+        return True, (_request_api_get(path, key) if live else cached_api_get(path, key))
     except requests.HTTPError as exc:
         try:
             detail = exc.response.json()
@@ -1316,6 +2428,90 @@ def api_get(path: str, **params: Any) -> tuple[bool, Any]:
         return False, f"GET {path} 失败: HTTP {exc.response.status_code} | {detail}"
     except Exception as exc:
         return False, f"GET {path} 失败: {exc}"
+
+
+def _query_params_for_link(params: dict[str, Any] | None = None) -> str:
+    cleaned: dict[str, str] = {}
+    for key, value in (params or {}).items():
+        if value in (None, "", [], ()):
+            continue
+        if isinstance(value, (list, tuple, set)):
+            text = ",".join(str(item) for item in value if item not in (None, ""))
+            if not text:
+                continue
+            cleaned[key] = text
+        else:
+            cleaned[key] = str(value)
+    token = str(st.session_state.get("auth_token") or "").strip()
+    if token:
+        cleaned["access_token"] = token
+    return urlencode(cleaned, doseq=False)
+
+
+def _scope_catalog(task_uuid: str) -> dict[str, Any]:
+    ok, payload = api_get(f"/tasks/{task_uuid}/scope-catalog")
+    if ok and isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def render_scope_filter_panel(task_uuid: str, key_prefix: str) -> dict[str, Any]:
+    global _ACTIVE_SCOPE_PARAMS
+    catalog = _scope_catalog(task_uuid)
+    sides = [item for item in catalog.get("sides", []) if isinstance(item, dict)]
+    chips = [item for item in catalog.get("chips", []) if isinstance(item, dict)]
+    if not sides and not chips:
+        st.caption("当前任务尚未识别到可用的运行边位或芯片，将按整机显示。")
+        return {}
+
+    side_value_to_label = {str(item.get("value")): str(item.get("label") or item.get("value") or "") for item in sides}
+    chip_value_to_label = {str(item.get("value")): str(item.get("label") or item.get("value") or "") for item in chips}
+    side_values = list(side_value_to_label.keys())
+    chip_values = list(chip_value_to_label.keys())
+    side_default = [value for value in side_values if value != "__UNASSIGNED__"] or side_values
+    chip_default = [value for value in chip_values if value != "__UNASSIGNED__"] or chip_values
+
+    st.markdown("### 运行范围筛选")
+    mode = st.radio(
+        "选择查看范围",
+        ["whole", "side", "chip"],
+        horizontal=True,
+        key=f"{key_prefix}_scope_mode",
+        format_func=lambda value: {"whole": "整机", "side": "按边位", "chip": "按芯片"}.get(value, value),
+    )
+
+    params: dict[str, Any] = {}
+    c1, c2 = st.columns([1.3, 2.7], gap="medium")
+    with c1:
+        instrument_scope = catalog.get("instrument_scope") or "Whole Instrument"
+        st.caption(f"Instrument: {instrument_scope}")
+        st.caption(f"已识别 {len(side_values)} 个边位 / {len(chip_values)} 个芯片")
+    with c2:
+        if mode == "side":
+            selected_sides = st.multiselect(
+                "边位多选",
+                side_values,
+                default=st.session_state.get(f"{key_prefix}_side_values", side_default),
+                key=f"{key_prefix}_side_values",
+                format_func=lambda value: side_value_to_label.get(str(value), str(value)),
+            )
+            if selected_sides:
+                params["side_scope"] = ",".join(str(value) for value in selected_sides)
+        elif mode == "chip":
+            selected_chips = st.multiselect(
+                "芯片多选",
+                chip_values,
+                default=st.session_state.get(f"{key_prefix}_chip_values", chip_default),
+                key=f"{key_prefix}_chip_values",
+                format_func=lambda value: chip_value_to_label.get(str(value), str(value)),
+            )
+            if selected_chips:
+                params["chip_name"] = ",".join(str(value) for value in selected_chips)
+        else:
+            st.caption("整机模式下将同时显示全部边位和芯片。")
+    st.session_state[f"{key_prefix}_scope_params"] = params
+    _ACTIVE_SCOPE_PARAMS = dict(params)
+    return params
 
 
 def _auth_headers(headers: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1415,8 +2611,17 @@ def render_review_actions(entity_label: str, review_path: str, *, reviewer_key: 
 def _safe_cell(value: Any):
     if value is None:
         return None
-    if isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str):
+        text = value.strip()
+        if text and ("T" in text or text.endswith("Z") or re.search(r"[+-]\d{2}:\d{2}$", text)):
+            parsed = _parse_iso_text(text)
+            if parsed is not None:
+                return _display_datetime_text(parsed, fallback=value)
         return value
+    if isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return _display_datetime_text(value)
     if isinstance(value, (list, tuple, dict)):
         try:
             return json.dumps(value, ensure_ascii=False, default=str)
@@ -1425,7 +2630,47 @@ def _safe_cell(value: Any):
     return str(value)
 
 
-def safe_dataframe(data, *, use_container_width=True, height=None):
+def _auto_widget_key(prefix: str) -> str:
+    frame = inspect.currentframe()
+    caller = frame.f_back.f_back if frame and frame.f_back and frame.f_back.f_back else None
+    signature = f"{prefix}:unknown"
+    if caller is not None:
+        signature = f"{prefix}:{caller.f_code.co_filename}:{caller.f_lineno}"
+    count = _SAFE_DATAFRAME_CALL_COUNTS.get(signature, 0) + 1
+    _SAFE_DATAFRAME_CALL_COUNTS[signature] = count
+    return f"{prefix}:{hashlib.sha1(f'{signature}:{count}'.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _apply_dataframe_filters(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    filtered = df
+    if len(df) <= 2000:
+        with st.expander("表格工具", expanded=False):
+            search_col, field_col, value_col = st.columns([1.35, 1.0, 1.05], gap="small")
+            search_text = str(search_col.text_input("搜索", key=f"{key}::search", placeholder="全文搜索当前表格")).strip()
+            column_options = ["全部列"] + [str(col) for col in df.columns]
+            filter_column = str(field_col.selectbox("筛选列", column_options, key=f"{key}::filter_col"))
+            filter_value = str(value_col.text_input("筛选值", key=f"{key}::filter_value", placeholder="按列包含匹配")).strip()
+
+        if search_text:
+            search_mask = pd.Series(False, index=filtered.index)
+            for column in filtered.columns:
+                series = filtered[column].astype(str)
+                search_mask = search_mask | series.str.contains(re.escape(search_text), case=False, na=False)
+            filtered = filtered.loc[search_mask]
+
+        if filter_column != "全部列" and filter_value:
+            filtered = filtered.loc[
+                filtered[filter_column].astype(str).str.contains(re.escape(filter_value), case=False, na=False)
+            ]
+
+    st.caption(f"显示 {len(filtered):,} / {len(df):,} 行，支持列头排序、滚动、搜索和按列过滤。")
+    return filtered
+
+
+def safe_dataframe(data, *, use_container_width=True, height=None, key: str | None = None, enable_toolbar: bool = True):
     try:
         df = data.copy() if isinstance(data, pd.DataFrame) else pd.DataFrame(data).copy()
     except Exception:
@@ -1436,7 +2681,9 @@ def safe_dataframe(data, *, use_container_width=True, height=None):
             df[col] = df[col].map(_safe_cell)
         except Exception:
             df[col] = df[col].astype(str)
-    st.dataframe(df, use_container_width=use_container_width, height=height)
+    widget_key = key or _auto_widget_key("df")
+    view_df = _apply_dataframe_filters(df, widget_key) if enable_toolbar else df
+    st.dataframe(view_df, use_container_width=use_container_width, height=height, hide_index=True)
 
 
 def safe_json(data):
@@ -1671,6 +2918,86 @@ def _chart_theme(mode: str | None) -> dict[str, str]:
     }
 
 
+def _axis_values_from_traces(fig, axis_name: str) -> list[Any]:
+    values: list[Any] = []
+    for trace in fig.data:
+        trace_axis = str(getattr(trace, f"{axis_name}axis", None) or axis_name)
+        if trace_axis != axis_name:
+            continue
+        raw_values = getattr(trace, axis_name, None)
+        if raw_values is None:
+            continue
+        if isinstance(raw_values, (str, bytes)):
+            values.append(raw_values)
+            continue
+        try:
+            values.extend(list(raw_values))
+        except TypeError:
+            values.append(raw_values)
+    return [value for value in values if value is not None and not (isinstance(value, float) and math.isnan(value))]
+
+
+def _category_axis_labels(values: list[Any]) -> list[str]:
+    labels: list[str] = []
+    for value in values:
+        if value is None or pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text not in labels:
+            labels.append(text)
+    return labels
+
+
+def _apply_axis_density(fig, *, theme, height: int | None) -> None:
+    chart_height = height or 460
+    x_values = _axis_values_from_traces(fig, "x")
+    y_values = _axis_values_from_traces(fig, "y")
+    x_axis = getattr(fig.layout, "xaxis", None)
+    y_axis = getattr(fig.layout, "yaxis", None)
+
+    if x_axis is not None:
+        x_type = str(getattr(x_axis, "type", "") or "").lower()
+        x_labels = _category_axis_labels(x_values)
+        if x_type == "date":
+            fig.update_xaxes(
+                nticks=max(5, min(12, math.ceil(chart_height / 52))),
+                tickformatstops=[
+                    dict(dtickrange=[None, 1000], value="%H:%M:%S.%L"),
+                    dict(dtickrange=[1000, 60000], value="%H:%M:%S"),
+                    dict(dtickrange=[60000, 3600000], value="%H:%M"),
+                    dict(dtickrange=[3600000, 86400000], value="%m-%d %H:%M"),
+                    dict(dtickrange=[86400000, None], value="%Y-%m-%d"),
+                ],
+            )
+        elif x_labels:
+            max_labels = 10
+            tick_step = max(1, math.ceil(len(x_labels) / max_labels))
+            longest_label = max(len(label) for label in x_labels)
+            tick_angle = -45 if longest_label > 16 or len(x_labels) > max_labels else (-25 if longest_label > 9 else 0)
+            fig.update_xaxes(
+                ticklabelstep=tick_step,
+                tickangle=tick_angle,
+                tickfont=dict(color=theme.ink, size=11 if tick_step > 1 else 12),
+            )
+        else:
+            fig.update_xaxes(nticks=max(5, min(11, math.ceil(chart_height / 58))))
+
+    if y_axis is not None:
+        y_type = str(getattr(y_axis, "type", "") or "").lower()
+        y_labels = _category_axis_labels(y_values)
+        if y_type == "category" or y_labels:
+            max_labels = max(5, min(22, math.floor(chart_height / 28)))
+            tick_step = max(1, math.ceil(len(y_labels) / max_labels)) if y_labels else 1
+            longest_label = max((len(label) for label in y_labels), default=0)
+            fig.update_yaxes(
+                ticklabelstep=tick_step,
+                tickangle=0 if longest_label <= 30 else -18,
+                tickfont=dict(color=theme.ink, size=11 if tick_step > 1 else 12),
+            )
+        else:
+            fig.update_yaxes(nticks=max(5, min(10, math.ceil(chart_height / 60))))
+
+
 def render_fig(
     fig,
     key: str | None = None,
@@ -1730,9 +3057,14 @@ def render_fig(
             bgcolor="rgba(0,0,0,0)",
             title_text="",
             font=dict(color=theme.ink),
+            itemclick="toggle",
+            itemdoubleclick="toggleothers",
         ),
         uniformtext=dict(minsize=10, mode="hide"),
         hoverlabel=dict(bgcolor=chart_theme["hover_bgcolor"], bordercolor=theme.accent_soft, font=dict(color=theme.ink)),
+        hovermode="closest",
+        dragmode="pan",
+        modebar=dict(bgcolor="rgba(0,0,0,0)", color=theme.ink_muted if hasattr(theme, "ink_muted") else theme.ink, activecolor=theme.accent),
     )
     fig.update_layout(
         polar=dict(
@@ -1764,6 +3096,11 @@ def render_fig(
         zeroline=False,
         tickfont=dict(color=theme.ink),
         title_font=dict(color=theme.ink),
+        fixedrange=False,
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikedash="dot",
     )
     fig.update_yaxes(
         automargin=True,
@@ -1773,7 +3110,9 @@ def render_fig(
         zeroline=False,
         tickfont=dict(color=theme.ink),
         title_font=dict(color=theme.ink),
+        fixedrange=False,
     )
+    _apply_axis_density(fig, theme=theme, height=height)
     for trace in fig.data:
         trace_type = str(getattr(trace, "type", "") or "")
         if trace_type in {"pie", "sunburst", "treemap", "funnelarea"}:
@@ -1791,22 +3130,128 @@ def render_fig(
             )
         else:
             trace.update(textfont=dict(color=theme.ink))
-    st.plotly_chart(fig, use_container_width=True, key=key, config={"responsive": True, "displayModeBar": False, "displaylogo": False, "scrollZoom": False})
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=key,
+        config={
+            "responsive": True,
+            "displayModeBar": "hover",
+            "displaylogo": False,
+            "scrollZoom": True,
+            "doubleClick": "reset+autosize",
+        },
+    )
+
+
+def _resolve_low_value_reference(df: pd.DataFrame, preference: str) -> tuple[str | None, float | None]:
+    expected_value = None
+    threshold_value = None
+    if "expected_value" in df.columns:
+        expected_series = pd.to_numeric(df["expected_value"], errors="coerce").dropna()
+        if not expected_series.empty:
+            expected_value = float(expected_series.iloc[0])
+    if "threshold_value" in df.columns:
+        threshold_series = pd.to_numeric(df["threshold_value"], errors="coerce").dropna()
+        if not threshold_series.empty:
+            threshold_value = float(threshold_series.iloc[0])
+
+    if preference == "优先阈值":
+        if threshold_value is not None:
+            return "阈值", threshold_value
+        if expected_value is not None:
+            return "期望值", expected_value
+        return None, None
+
+    if expected_value is not None:
+        return "期望值", expected_value
+    if threshold_value is not None:
+        return "阈值", threshold_value
+    return None, None
+
+
+def build_parameter_trend_figure(
+    df: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str,
+    low_value_preference: str,
+    highlight_low_points: bool,
+    hide_low_points: bool,
+) -> tuple[go.Figure | None, dict[str, Any]]:
+    plot_df = df.copy()
+    plot_df[y_col] = pd.to_numeric(plot_df[y_col], errors="coerce")
+    plot_df = _dropna_frame(plot_df, x_col, y_col)
+    if plot_df.empty:
+        return None, {"hidden_low_count": 0, "low_reference_label": None, "low_reference_value": None}
+
+    low_reference_label, low_reference_value = _resolve_low_value_reference(plot_df, low_value_preference)
+    hidden_low_count = 0
+    if hide_low_points and low_reference_value is not None:
+        original_count = len(plot_df)
+        plot_df = plot_df[plot_df[y_col] >= low_reference_value].copy()
+        hidden_low_count = max(0, original_count - len(plot_df))
+        if plot_df.empty:
+            return None, {
+                "hidden_low_count": hidden_low_count,
+                "low_reference_label": low_reference_label,
+                "low_reference_value": low_reference_value,
+            }
+
+    marker_colors = None
+    if highlight_low_points and low_reference_value is not None:
+        marker_colors = ["#D94841" if value < low_reference_value else "#0B5CAD" for value in plot_df[y_col].tolist()]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df[x_col],
+            y=plot_df[y_col],
+            mode="lines+markers",
+            line=dict(color="#0B5CAD", width=2.5),
+            marker=dict(
+                size=9,
+                color=marker_colors or "#0B5CAD",
+                line=dict(color="white", width=0.8),
+            ),
+            customdata=plot_df[["duration_unit"]].to_numpy() if "duration_unit" in plot_df.columns else None,
+            hovertemplate="%{x}<br>%{y:.4f}%{customdata[0]}<extra></extra>" if "duration_unit" in plot_df.columns else None,
+            showlegend=False,
+        )
+    )
+
+    if "threshold_value" in plot_df.columns:
+        threshold_series = pd.to_numeric(plot_df["threshold_value"], errors="coerce").dropna()
+        if not threshold_series.empty:
+            fig.add_hline(y=float(threshold_series.iloc[0]), line_dash="dash", line_color="#D94841")
+    if "expected_value" in plot_df.columns:
+        expected_series = pd.to_numeric(plot_df["expected_value"], errors="coerce").dropna()
+        if not expected_series.empty:
+            fig.add_hline(y=float(expected_series.iloc[0]), line_dash="dot", line_color="#1E8E6A")
+
+    return fig, {
+        "hidden_low_count": hidden_low_count,
+        "low_reference_label": low_reference_label,
+        "low_reference_value": low_reference_value,
+    }
 
 
 def render_substep_cycle_facets(df: pd.DataFrame, value_col: str = "duration_value", facet_wrap: int = 2, key: str | None = None):
+    if "cycle_no" not in df.columns and "cycle" in df.columns:
+        df = df.copy()
+        df["cycle_no"] = df["cycle"]
     required_cols = {"cycle_no", "sub_step", value_col}
     missing = required_cols - set(df.columns)
     if missing:
         st.warning(f"无法绘制分面图，缺少字段: {', '.join(sorted(missing))}")
         return
-    plot_df = df[["cycle_no", "sub_step", value_col]].copy().dropna(subset=["cycle_no", "sub_step", value_col])
+    plot_df = _dropna_frame(df[["cycle_no", "sub_step", value_col]].copy(), "cycle_no", "sub_step", value_col)
     if plot_df.empty:
         st.info("当前筛选条件下没有可用于绘制 Substep-Cycle 趋势图的数据。")
         return
     plot_df["cycle_no"] = pd.to_numeric(plot_df["cycle_no"], errors="coerce")
     plot_df[value_col] = pd.to_numeric(plot_df[value_col], errors="coerce")
-    plot_df = plot_df.dropna(subset=["cycle_no", value_col]).sort_values(by=["sub_step", "cycle_no"])
+    plot_df = _dropna_frame(plot_df, "cycle_no", value_col).sort_values(by=["sub_step", "cycle_no"])
     top_substeps_df = (
         plot_df.groupby("sub_step", as_index=False)
         .agg(**{value_col: (value_col, "mean")})
@@ -1817,6 +3262,245 @@ def render_substep_cycle_facets(df: pd.DataFrame, value_col: str = "duration_val
     plot_df = plot_df[plot_df["sub_step"].isin(top_substeps)]
     fig = px.line(plot_df, x="cycle_no", y=value_col, color="sub_step", markers=True)
     render_fig(fig, key=key, height=480, title="Substep-Cycle 趋势", title_x=0.02, title_y=0.965)
+
+
+def _timeline_base_track(value: Any) -> str:
+    return re.sub(r"\s+\|\s+lane\s+\d+$", "", str(value or "").strip(), flags=re.IGNORECASE)
+
+
+def _timeline_lane_index(value: Any) -> int:
+    match = re.search(r"\|\s+lane\s+(\d+)$", str(value or "").strip(), re.IGNORECASE)
+    return int(match.group(1)) if match else 1
+
+
+def _build_timeline_track_order(df: pd.DataFrame, order_mode: str) -> list[str]:
+    if df.empty:
+        return []
+    sort_columns = ["start", "component_display", "sub_step", "track"]
+    if order_mode == "cycle":
+        sort_columns = ["cycle_no", "component_display", "track_lane", "start", "sub_step", "track"]
+    order_df = df.sort_values(sort_columns, na_position="last").copy()
+    return list(dict.fromkeys(order_df["track"].astype(str).tolist()))
+
+
+def _align_timeline_error_tracks(timeline_df: pd.DataFrame, error_df: pd.DataFrame) -> pd.DataFrame:
+    if timeline_df.empty or error_df.empty:
+        return error_df
+
+    candidates = timeline_df[["track", "base_track", "component_display", "cycle_no", "start", "end"]].copy()
+    aligned_tracks: list[str] = []
+    for row in error_df.itertuples(index=False):
+        same_cycle = candidates[
+            (candidates["component_display"].astype(str) == str(getattr(row, "component_display", "")))
+            & (candidates["cycle_no"].fillna(-1) == (getattr(row, "cycle_no", None) if getattr(row, "cycle_no", None) is not None else -1))
+        ]
+        if same_cycle.empty:
+            same_cycle = candidates[candidates["base_track"].astype(str) == str(getattr(row, "base_track", ""))]
+        if same_cycle.empty:
+            aligned_tracks.append(str(getattr(row, "track", "") or ""))
+            continue
+
+        hit = same_cycle[(same_cycle["start"] <= row.time) & (same_cycle["end"] >= row.time)]
+        if not hit.empty:
+            aligned_tracks.append(str(hit.sort_values(["start", "track"]).iloc[0]["track"]))
+            continue
+
+        distances = same_cycle.copy()
+        distances["_distance"] = distances.apply(
+            lambda item: min(abs((item["start"] - row.time).total_seconds()), abs((item["end"] - row.time).total_seconds())),
+            axis=1,
+        )
+        aligned_tracks.append(str(distances.sort_values(["_distance", "start", "track"]).iloc[0]["track"]))
+
+    output = error_df.copy()
+    output["track"] = aligned_tracks
+    return output
+
+
+def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, order_mode: str, show_error_points: bool):
+    working_df = df.copy()
+    working_df["component_display"] = working_df["component"].fillna("未知组件").astype(str)
+    working_df["track"] = working_df["track"].fillna("未知轨道").astype(str)
+    working_df["base_track"] = working_df["track"].map(_timeline_base_track)
+    working_df["track_lane"] = working_df["track"].map(_timeline_lane_index)
+    working_df = working_df.sort_values(["cycle_no", "component_display", "track_lane", "start", "end"], na_position="last")
+    track_order = _build_timeline_track_order(working_df, order_mode)
+
+    fig = px.timeline(
+        working_df,
+        x_start="start",
+        x_end="end",
+        y="track",
+        color="component_display",
+        category_orders={"track": track_order},
+        custom_data=["component_display", "sub_step", "cycle_no", "start_time_sec", "end_time_sec", "duration_ms", "message", "track"],
+    )
+    fig.update_traces(
+        selector=dict(type="bar"),
+        opacity=0.92,
+        marker_line_width=1,
+        marker_line_color="rgba(255,255,255,0.32)",
+        hovertemplate=(
+            "组件: %{customdata[0]}<br>"
+            "子步骤: %{customdata[1]}<br>"
+            "Cycle: %{customdata[2]}<br>"
+            "开始: %{customdata[3]}<br>"
+            "结束: %{customdata[4]}<br>"
+            "时长(ms): %{customdata[5]}<br>"
+            "轨道: %{customdata[7]}<br>"
+            "说明: %{customdata[6]}<extra></extra>"
+        ),
+    )
+    fig.update_yaxes(categoryorder="array", categoryarray=list(reversed(track_order)), autorange="reversed")
+    fig.update_layout(legend_title_text="", bargap=0.24)
+
+    error_output = error_df.copy()
+    if show_error_points and not error_output.empty:
+        error_output["component_display"] = error_output["component"].fillna("未知组件").astype(str)
+        error_output["base_track"] = error_output["track"].map(_timeline_base_track)
+        error_output = _align_timeline_error_tracks(working_df, error_output)
+        for severity_value, severity_group in error_output.groupby("severity", dropna=False):
+            severity_text = str(severity_value or "unknown")
+            fig.add_trace(
+                go.Scatter(
+                    x=severity_group["time"],
+                    y=severity_group["track"],
+                    mode="markers",
+                    name=f"错误点 · {severity_text}",
+                    marker={
+                        "size": 11,
+                        "symbol": "diamond",
+                        "color": ERROR_SEVERITY_COLORS.get(severity_text.lower(), ERROR_SEVERITY_COLORS["unknown"]),
+                        "line": {"width": 1, "color": "#FFFFFF"},
+                    },
+                    customdata=severity_group[["time_text", "normalized_signature", "error_family_display", "severity", "component_display", "message", "track"]].to_numpy(),
+                    hovertemplate=(
+                        "时间: %{customdata[0]}<br>"
+                        "错误签名: %{customdata[1]}<br>"
+                        "错误家族: %{customdata[2]}<br>"
+                        "严重级别: %{customdata[3]}<br>"
+                        "组件: %{customdata[4]}<br>"
+                        "轨道: %{customdata[6]}<br>"
+                        "消息: %{customdata[5]}<extra></extra>"
+                    ),
+                )
+            )
+    return fig, error_output, track_order
+
+
+def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, order_mode: str, show_error_points: bool):
+    working_df = df.copy()
+    working_df["component_display"] = working_df.get("component", pd.Series(dtype=object)).fillna("未知组件").astype(str)
+    working_df["side_display"] = working_df.get("side_scope", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+    working_df["chip_display"] = working_df.get("chip_name", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+    working_df["track"] = working_df["track"].fillna("未知轨道").astype(str)
+    working_df["base_track"] = working_df["track"].map(_timeline_base_track)
+    working_df["track_lane"] = working_df["track"].map(_timeline_lane_index)
+    working_df["chuck_no"] = working_df.get("chuck_no", pd.Series(dtype=object)).fillna("").astype(str)
+    working_df["source_file"] = working_df.get("source_file", pd.Series(dtype=object)).fillna("").astype(str)
+    working_df = working_df.sort_values(["cycle_no", "side_display", "component_display", "track_lane", "start", "end"], na_position="last")
+    track_order = _build_timeline_track_order(working_df, order_mode)
+    color_field = "side_display" if working_df["side_display"].nunique(dropna=False) > 1 else "component_display"
+
+    fig = px.timeline(
+        working_df,
+        x_start="start",
+        x_end="end",
+        y="track",
+        color=color_field,
+        category_orders={"track": track_order},
+        custom_data=[
+            "component_display",
+            "side_display",
+            "chip_display",
+            "sub_step",
+            "cycle_no",
+            "start_time_sec",
+            "end_time_sec",
+            "duration_ms",
+            "chuck_no",
+            "source_file",
+            "message",
+            "track",
+        ],
+    )
+    fig.update_traces(
+        selector=dict(type="bar"),
+        opacity=0.92,
+        marker_line_width=1,
+        marker_line_color="rgba(255,255,255,0.32)",
+        hovertemplate=(
+            "组件: %{customdata[0]}<br>"
+            "边位: %{customdata[1]}<br>"
+            "芯片: %{customdata[2]}<br>"
+            "子步骤: %{customdata[3]}<br>"
+            "Cycle: %{customdata[4]}<br>"
+            "开始: %{customdata[5]}<br>"
+            "结束: %{customdata[6]}<br>"
+            "时长(ms): %{customdata[7]}<br>"
+            "Chuck: %{customdata[8]}<br>"
+            "Source: %{customdata[9]}<br>"
+            "轨道: %{customdata[11]}<br>"
+            "消息: %{customdata[10]}<extra></extra>"
+        ),
+    )
+    fig.update_yaxes(categoryorder="array", categoryarray=list(reversed(track_order)), autorange="reversed")
+    fig.update_layout(legend_title_text="", bargap=0.24)
+
+    error_output = error_df.copy()
+    if show_error_points and not error_output.empty:
+        error_output["component_display"] = error_output.get("component", pd.Series(dtype=object)).fillna("未知组件").astype(str)
+        error_output["side_display"] = error_output.get("side_scope", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+        error_output["chip_display"] = error_output.get("chip_name", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+        error_output["chuck_no"] = error_output.get("chuck_no", pd.Series(dtype=object)).fillna("").astype(str)
+        error_output["source_file"] = error_output.get("source_file", pd.Series(dtype=object)).fillna("").astype(str)
+        error_output["base_track"] = error_output["track"].map(_timeline_base_track)
+        error_output = _align_timeline_error_tracks(working_df, error_output)
+        for severity_value, severity_group in error_output.groupby("severity", dropna=False):
+            severity_text = str(severity_value or "unknown")
+            fig.add_trace(
+                go.Scatter(
+                    x=severity_group["time"],
+                    y=severity_group["track"],
+                    mode="markers",
+                    name=f"错误点 · {severity_text}",
+                    marker={
+                        "size": 11,
+                        "symbol": "diamond",
+                        "color": ERROR_SEVERITY_COLORS.get(severity_text.lower(), ERROR_SEVERITY_COLORS["unknown"]),
+                        "line": {"width": 1, "color": "#FFFFFF"},
+                    },
+                    customdata=severity_group[
+                        [
+                            "time_text",
+                            "normalized_signature",
+                            "error_family_display",
+                            "severity",
+                            "component_display",
+                            "side_display",
+                            "chip_display",
+                            "chuck_no",
+                            "source_file",
+                            "message",
+                            "track",
+                        ]
+                    ].to_numpy(),
+                    hovertemplate=(
+                        "时间: %{customdata[0]}<br>"
+                        "错误签名: %{customdata[1]}<br>"
+                        "错误家族: %{customdata[2]}<br>"
+                        "严重级别: %{customdata[3]}<br>"
+                        "组件: %{customdata[4]}<br>"
+                        "边位: %{customdata[5]}<br>"
+                        "芯片: %{customdata[6]}<br>"
+                        "Chuck: %{customdata[7]}<br>"
+                        "Source: %{customdata[8]}<br>"
+                        "轨道: %{customdata[10]}<br>"
+                        "消息: %{customdata[9]}<extra></extra>"
+                    ),
+                )
+            )
+    return fig, error_output, track_order
 
 
 def paged_table(path: str, *, params: dict | None = None, page_key: str, page_size_key: str, title: str, default_page_size: int = 100, max_page_size: int = 500):
@@ -1998,7 +3682,7 @@ def render_login_portal() -> None:
                     <div class="auth-chip-row">
                         <span class="auth-chip">FastAPI + Streamlit</span>
                         <span class="auth-chip">角色权限</span>
-                        <span class="auth-chip">邮箱验证</span>
+                        <span class="auth-chip">Admin Review</span>
                         <span class="auth-chip">方案库索引</span>
                     </div>
                 </div>
@@ -2016,6 +3700,8 @@ def render_login_portal() -> None:
             """
         )
         st.info("默认管理员首次启动后自动创建，首次登录建议立即修改密码。")
+
+        render_announcement_feed(limit=24)
 
     with form_col:
         st.markdown("### 登录入口")
@@ -2037,123 +3723,48 @@ def render_login_portal() -> None:
             email = st.text_input("邮箱", key="register_email")
             password = st.text_input("密码", type="password", key="register_password")
             confirm_password = st.text_input("确认密码", type="password", key="register_password_confirm")
-            registration_note = st.text_area("注册备注", key="register_note", height=90, placeholder="可填写部门、用途或申请说明")
-            current_register_fingerprint = "||".join(
-                [
-                    str(username or "").strip().lower(),
-                    str(email or "").strip().lower(),
-                    str(password or ""),
-                    str(confirm_password or ""),
-                    str(registration_note or "").strip(),
-                ]
-            )
-            request_fingerprint = str(st.session_state.get("register_request_fingerprint") or "")
-            verification_token = str(st.session_state.get("register_verification_token") or "").strip()
-            verification_step = str(st.session_state.get("register_verification_step") or "draft")
-            register_changed_after_code = bool(request_fingerprint) and current_register_fingerprint != request_fingerprint
-            if register_changed_after_code and (verification_token or verification_step in {"code_sent", "verified"}):
-                st.session_state["register_verification_token"] = ""
-                st.session_state["register_verification_step"] = "draft"
-                verification_token = ""
-                verification_step = "draft"
-            verification_login_name = str(st.session_state.get("register_login_name") or username or email).strip()
-            verification_code = str(st.session_state.get("register_verify_code") or "").strip()
+            registration_note = st.text_area("注册备注（可选）", key="register_note", height=90, placeholder="可填写部门、使用场景或补充说明")
 
-            st.caption("注册步骤：1. 发送验证码  2. 直接在当前卡片输入验证码完成校验  3. 提交注册申请")
-            if verification_step == "verified" and verification_token and not register_changed_after_code:
-                st.success("邮箱已验证，当前注册信息可以直接提交注册申请。")
-            elif register_changed_after_code:
-                st.warning("注册信息已发生变化，请重新发送验证码并重新完成邮箱验证。")
-            elif verification_step == "code_sent":
-                st.info("验证码已发送，请在当前卡片完成邮箱验证，验证成功后会解锁提交按钮。")
-            else:
-                st.info("提交注册申请前，需要先通过邮箱验证码验证。请使用公司邮箱进行注册，否则审核不通过。")
-            if st.button("发送验证码", use_container_width=True, key="register_request_code_button"):
+            st.caption("注册申请提交后会直接进入管理员审核，无需再做邮箱验证。")
+            st.info("请填写可用邮箱并提交申请，管理员审批通过后即可使用该账号登录。")
+
+            if st.button("提交注册申请", use_container_width=True, key="register_submit_button"):
                 if password != confirm_password:
                     st.error("两次输入的密码不一致。")
                 else:
                     ok, resp = api_post(
-                        "/auth/register/request-code",
+                        "/auth/register",
                         json={"username": username, "email": email, "password": password, "registration_note": registration_note},
                         timeout=30,
                     )
                     if ok:
-                        st.session_state["register_login_name"] = username or email
-                        st.session_state["register_verification_token"] = ""
-                        st.session_state["register_request_fingerprint"] = current_register_fingerprint
-                        st.session_state["register_verification_step"] = "code_sent"
-                        st.session_state["register_verify_code"] = ""
-                        st.success("验证码已发送，请直接在下方输入验证码完成邮箱验证。")
-                    else:
-                        st.error(resp)
-
-            st.text_input(
-                "邮箱验证码",
-                key="register_verify_code",
-                placeholder="输入邮箱收到的 6 位验证码",
-                disabled=not bool(request_fingerprint),
-            )
-            verify_col, resend_col = st.columns(2)
-            if verify_col.button(
-                "验证邮箱",
-                use_container_width=True,
-                key="register_verify_code_button",
-                disabled=not bool(request_fingerprint),
-            ):
-                if not verification_login_name:
-                    st.error("请先填写注册信息并发送验证码。")
-                elif not verification_code:
-                    st.error("请输入邮箱验证码。")
-                else:
-                    ok, resp = api_post(
-                        "/auth/register/verify-email",
-                        json={"login_name": verification_login_name, "code": verification_code},
-                        timeout=30,
-                    )
-                    if ok:
-                        st.session_state["register_verification_token"] = str(resp.get("verification_token") or "")
-                        st.session_state["register_verification_step"] = "verified"
-                        st.success("邮箱验证成功，现在可以直接提交注册申请。")
-                    else:
-                        st.session_state["register_verification_token"] = ""
-                        st.session_state["register_verification_step"] = "code_sent"
-                        st.error(resp)
-            if resend_col.button(
-                "重新发送验证码",
-                use_container_width=True,
-                key="register_resend_code_button",
-                disabled=not bool(request_fingerprint),
-            ):
-                if not verification_login_name:
-                    st.error("请先填写注册信息并发送验证码。")
-                else:
-                    ok, resp = api_post("/auth/register/resend-code", json={"login_name": verification_login_name}, timeout=30)
-                    if ok:
-                        st.session_state["register_verification_token"] = ""
-                        st.session_state["register_verification_step"] = "code_sent"
-                        st.session_state["register_verify_code"] = ""
-                        st.success("验证码已重新发送。")
-                    else:
-                        st.error(resp)
-
-            if st.button(
-                "提交注册申请",
-                use_container_width=True,
-                key="register_submit_button",
-                disabled=not bool(verification_token) or register_changed_after_code,
-            ):
-                if not verification_token:
-                    st.error("请先输入正确验证码并完成邮箱验证，再提交注册申请。")
-                else:
-                    ok, resp = api_post("/auth/register", json={"verification_token": verification_token}, timeout=30)
-                    if ok:
-                        st.session_state["register_verification_token"] = ""
-                        st.session_state["register_request_fingerprint"] = ""
-                        st.session_state["register_verification_step"] = "submitted"
-                        st.session_state["register_verify_code"] = ""
                         st.success("注册申请已提交，等待管理员审核。")
                     else:
                         st.error(resp)
+
+        st.markdown("### 忘记密码")
+        forgot_username = st.text_input("用户名", key="forgot_username")
+        forgot_email = st.text_input("邮箱", key="forgot_email")
+        forgot_new_password = st.text_input("新密码", type="password", key="forgot_new_password")
+        forgot_confirm_password = st.text_input("确认新密码", type="password", key="forgot_confirm_password")
+        st.caption("当用户名和邮箱同时匹配时，可直接重置密码。")
+        if st.button("重置密码", use_container_width=True, key="forgot_password_button"):
+            if forgot_new_password != forgot_confirm_password:
+                st.error("两次输入的新密码不一致。")
+            else:
+                ok, resp = api_post(
+                    "/auth/reset-password",
+                    json={
+                        "username": forgot_username,
+                        "email": forgot_email,
+                        "new_password": forgot_new_password,
+                    },
+                    timeout=30,
+                )
+                if ok:
+                    st.success("密码已重置，请使用新密码登录。")
+                else:
+                    st.error(resp)
 
 
 def render_account_controls(current_user: dict[str, Any]) -> None:
@@ -2182,6 +3793,182 @@ def render_account_controls(current_user: dict[str, Any]) -> None:
             api_post("/auth/logout", json={}, timeout=15)
             _clear_login_state()
             st.rerun()
+
+
+def render_announcement_feed(limit: int = 6) -> None:
+    st.markdown("### 更新公告")
+    ok, data = api_get("/announcements", limit=limit)
+    if not ok:
+        st.info("暂时无法加载更新公告。")
+        return
+    items = data.get("items", []) if isinstance(data, dict) else []
+    if not items:
+        st.info("当前还没有更新公告。")
+        return
+
+    pinned_item = next((item for item in items if item.get("is_pinned")), None)
+    latest_item = next(
+        (
+            item
+            for item in items
+            if pinned_item is None or str(item.get("id")) != str(pinned_item.get("id"))
+        ),
+        None,
+    )
+    featured_entries: list[tuple[dict[str, Any], str]] = []
+    if pinned_item is not None:
+        featured_entries.append((pinned_item, "置顶公告"))
+    if latest_item is not None:
+        featured_entries.append((latest_item, "最新公告"))
+    elif pinned_item is None and items:
+        featured_entries.append((items[0], "最新公告"))
+
+    featured_ids = {str(item.get("id")) for item, _ in featured_entries}
+    history_items = [item for item in items if str(item.get("id")) not in featured_ids]
+
+    def _render_announcement_card(item: dict[str, Any], *, tag: str, compact: bool = False) -> str:
+        title = escape(str(item.get("title") or ("置顶公告" if item.get("is_pinned") else "更新公告")).strip())
+        summary_text = str(item.get("summary") or "").strip() or "暂无摘要"
+        summary = escape(summary_text).replace("\n", "<br>")
+        updated_by = escape(str(item.get("updated_by") or "系统发布").strip() or "系统发布")
+        updated_at = escape(_display_datetime_text(item.get("updated_at")))
+        pinned_badge = (
+            '<span style="display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;'
+            'background:rgba(11,92,173,0.10);color:#0b5cad;font-size:11px;font-weight:700;">置顶</span>'
+            if item.get("is_pinned")
+            else ""
+        )
+        if compact:
+            return (
+                '<article style="padding:14px 16px;border-radius:18px;border:1px solid rgba(126,184,255,0.20);'
+                'background:rgba(255,255,255,0.92);margin-top:10px;">'
+                f'<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">'
+                f'<div style="font-size:14px;font-weight:700;color:#12324f;line-height:1.5;">{title}</div>'
+                f"{pinned_badge}</div>"
+                f'<div style="margin-top:8px;font-size:12px;line-height:1.6;color:#4f6478;">{summary}</div>'
+                f'<div style="margin-top:8px;font-size:11px;color:#70859b;">{updated_at}</div>'
+                "</article>"
+            )
+        return (
+            '<article style="padding:18px;border-radius:20px;border:1px solid rgba(126,184,255,0.24);'
+            'background:linear-gradient(180deg,rgba(255,255,255,0.96),rgba(241,248,255,0.90));margin-bottom:12px;">'
+            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+            f'<span style="display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;'
+            'background:rgba(11,92,173,0.10);color:#0b5cad;font-size:11px;font-weight:700;">'
+            f"{escape(tag)}</span>{pinned_badge}</div>"
+            f'<div style="margin-top:12px;font-size:15px;font-weight:700;color:#12324f;line-height:1.6;">{title}</div>'
+            f'<div style="margin-top:10px;font-size:13px;line-height:1.75;color:#38556f;white-space:normal;">{summary}</div>'
+            f'<div style="margin-top:12px;font-size:11px;color:#70859b;">发布人: {updated_by} | 更新时间: {updated_at}</div>'
+            "</article>"
+        )
+
+    featured_html = "".join(_render_announcement_card(item, tag=tag) for item, tag in featured_entries)
+    history_html = "".join(_render_announcement_card(item, tag="历史公告", compact=True) for item in history_items)
+    st.markdown(
+        f"""
+        <div style="border:1px solid rgba(126,184,255,0.22);border-radius:24px;padding:18px 18px 14px 18px;
+                    background:linear-gradient(180deg,rgba(255,255,255,0.94),rgba(241,248,255,0.86));">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;">
+                <div>
+                    <div style="font-size:15px;font-weight:800;color:#12324f;">公告栏</div>
+                    <div style="margin-top:6px;font-size:12px;line-height:1.7;color:#70859b;">
+                        默认展示置顶公告和最新公告，下滑滚轮可回看过往公告。
+                    </div>
+                </div>
+                <div style="padding:4px 10px;border-radius:999px;background:rgba(11,92,173,0.08);color:#0b5cad;font-size:11px;font-weight:700;">
+                    {len(items)} 条
+                </div>
+            </div>
+            <div style="max-height:420px;overflow-y:auto;padding-right:6px;">
+                {featured_html}
+                {"<div style='margin:4px 2px 0 2px;font-size:11px;font-weight:700;letter-spacing:0.08em;color:#70859b;'>历史公告</div>" if history_html else ""}
+                {history_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_announcement_admin_panel(current_user: dict[str, Any]) -> None:
+    if not current_user.get("is_admin"):
+        return
+    with st.expander("发布更新公告", expanded=False):
+        title = st.text_input("公告标题", key="announcement_title")
+        summary = st.text_area("更新摘要", key="announcement_summary", height=120, placeholder="填写本次更新摘要")
+        is_pinned = st.checkbox("设为置顶消息", key="announcement_is_pinned")
+        if st.button("发布公告", key="announcement_publish_button", use_container_width=True):
+            ok, resp = api_post(
+                "/admin/announcements",
+                json={"title": title, "summary": summary, "is_pinned": is_pinned},
+                timeout=30,
+            )
+            if ok:
+                st.success("更新公告已发布。")
+                clear_cached_api_get()
+                st.rerun()
+            else:
+                st.error(resp)
+
+    with st.expander("管理已有公告", expanded=False):
+        ok, data = api_get("/announcements", limit=50)
+        if not ok:
+            st.error(data)
+            return
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not items:
+            st.info("当前还没有可管理的公告。")
+            return
+
+        labels = [
+            f"{item['id']} | {'置顶' if item.get('is_pinned') else '更新'} | {str(item.get('title') or '未命名公告').strip()} | {_display_datetime_text(item.get('updated_at'))}"
+            for item in items
+        ]
+        picked_label = st.selectbox("选择公告", labels, key="announcement_manage_pick")
+        selected = items[labels.index(picked_label)]
+        announcement_id = int(selected["id"])
+        title_key = f"announcement_edit_title_{announcement_id}"
+        summary_key = f"announcement_edit_summary_{announcement_id}"
+        pinned_key = f"announcement_edit_pinned_{announcement_id}"
+        confirm_delete_key = f"announcement_delete_confirm_{announcement_id}"
+
+        st.text_input("公告标题", value=str(selected.get("title") or ""), key=title_key)
+        st.text_area(
+            "更新摘要",
+            value=str(selected.get("summary") or ""),
+            key=summary_key,
+            height=140,
+            placeholder="填写本次更新摘要",
+        )
+        st.checkbox("设为置顶消息", value=bool(selected.get("is_pinned")), key=pinned_key)
+        st.caption(f"最近更新人: {selected.get('updated_by') or '-'} | 更新时间: {_display_datetime_text(selected.get('updated_at'))}")
+
+        save_col, delete_col = st.columns(2)
+        if save_col.button("保存修改", key=f"announcement_save_button_{announcement_id}", use_container_width=True):
+            ok_update, resp_update = api_put(
+                f"/admin/announcements/{announcement_id}",
+                {
+                    "title": st.session_state.get(title_key),
+                    "summary": st.session_state.get(summary_key),
+                    "is_pinned": bool(st.session_state.get(pinned_key)),
+                },
+            )
+            if ok_update:
+                st.success("公告已更新。")
+                clear_cached_api_get()
+                st.rerun()
+            else:
+                st.error(resp_update)
+
+        confirm_delete = st.checkbox("确认删除该公告", key=confirm_delete_key)
+        if delete_col.button("删除公告", key=f"announcement_delete_button_{announcement_id}", use_container_width=True, disabled=not confirm_delete):
+            ok_delete, resp_delete = api_delete(f"/admin/announcements/{announcement_id}")
+            if ok_delete:
+                st.success("公告已删除。")
+                clear_cached_api_get()
+                st.rerun()
+            else:
+                st.error(resp_delete)
 
 
 def render_user_management_page() -> None:
@@ -2434,9 +4221,6 @@ st.session_state.setdefault("theme_mode", "light")
 st.session_state.setdefault("api_base", DEFAULT_API_BASE)
 st.session_state.setdefault("auth_token", "")
 st.session_state.setdefault("current_user", None)
-st.session_state.setdefault("register_verification_token", "")
-st.session_state.setdefault("register_request_fingerprint", "")
-st.session_state.setdefault("register_verification_step", "draft")
 inject_design_system(str(st.session_state.get("theme_mode", "light")))
 API_BASE = st.sidebar.text_input("FastAPI 地址", value=st.session_state["api_base"])
 st.session_state["api_base"] = API_BASE
@@ -2456,7 +4240,7 @@ api_ok, api_msg = check_api_health()
 
 tasks_page = load_tasks_page()
 tasks = tasks_page.get("items", [])
-label_to_uuid = {f"{t.get('created_at', '')} | {str(t.get('task_uuid', ''))[:8]} | {t.get('status', '')} | {t.get('filename', '')}": t.get("task_uuid", "") for t in tasks}
+label_to_uuid = {f"{_display_datetime_text(t.get('created_at'))} | {str(t.get('task_uuid', ''))[:8]} | {t.get('status', '')} | {t.get('filename', '')}": t.get("task_uuid", "") for t in tasks}
 labels = ["(不选择历史任务)"] + list(label_to_uuid.keys())
 default_uuid = st.session_state.get("latest_task_uuid", "")
 default_label = next((label for label, uuid in label_to_uuid.items() if uuid == default_uuid), labels[0])
@@ -2484,7 +4268,7 @@ with st.sidebar.expander("项目管理", expanded=False):
     else:
         st.info("当前未选择历史项目。")
 
-nav_pages = ["首页 / 仪表盘", "历史项目中心", "文件上传", "统一事件流", "耗时分析", "事件流时间轴", "错误分析", "参数趋势分析", "LLM 诊断", "方案库中心", "原始文件预览", "未知日志待标注池", "规则建议审核视图", "配置页面", "导出"]
+nav_pages = ["首页 / 仪表盘", "历史项目中心", "统一事件流", "耗时分析", "事件流时间轴", "错误分析", "参数趋势分析", "LLM 诊断", "方案库中心", "原始文件预览", "未知日志待标注池", "规则建议审核视图", "配置页面", "导出"]
 if bool(current_user.get("is_admin")):
     nav_pages.insert(nav_pages.index("方案库中心") + 1, "用户管理")
 page = st.sidebar.radio("导航", nav_pages)
@@ -2498,11 +4282,27 @@ elif page == "方案库中心":
     render_solution_hub(cast(dict[str, Any], current_user))
 
 elif page == "首页 / 仪表盘":
+    notice = str(st.session_state.pop("dashboard_upload_notice", "") or "").strip()
+    if notice:
+        st.success(notice)
+
+    ok_runtime, runtime = api_get("/system/runtime", live=True)
+    upload_col, runtime_col = st.columns([1.05, 1.15], gap="large")
+    with upload_col:
+        render_dashboard_upload_panel(panel_key="dashboard")
+    with runtime_col:
+        if ok_runtime and isinstance(runtime, dict):
+            render_system_pressure_summary(cast(JsonDict, runtime))
+        else:
+            st.error(runtime)
+    render_announcement_feed(limit=50)
+    render_announcement_admin_panel(cast(dict[str, Any], current_user))
+
     if not task_uuid:
-        st.info("请先在左侧选择任务 UUID。")
+        st.info("可先在上方直接上传新文件，或从左侧选择历史任务 UUID。")
     else:
         ok, data = api_get(f"/tasks/{task_uuid}/dashboard")
-        ok_status, status = api_get(f"/tasks/{task_uuid}/status")
+        ok_status, status = api_get(f"/tasks/{task_uuid}/status", live=True)
         ok_perf, perf = api_get(f"/tasks/{task_uuid}/performance-summary")
         if ok and ok_status:
             perf_summary = perf if ok_perf and isinstance(perf, dict) else {}
@@ -2520,6 +4320,7 @@ elif page == "首页 / 仪表盘":
                     {"icon": "review", "label": "唯一错误数", "value": unique_error_count, "note": "去重后的错误簇数量", "tone": "#DCEBFA"},
                 ],
             )
+            render_dashboard_progress_card(task_uuid, cast(JsonDict, status))
             render_dashboard_snapshot(
                 status.get("progress_percent", 0),
                 f"当前阶段: {status.get('current_stage') or ('已完成' if status.get('status') == 'completed' else '等待状态同步')}",
@@ -2579,12 +4380,13 @@ elif page == "历史项目中心":
 elif page == "文件上传":
     with st.form("upload_form"):
         uploaded = st.file_uploader("支持多文件与压缩包上传(zip / 7z / tar)", accept_multiple_files=True)
-        cpu_cores = st.number_input("并行处理 CPU 核心数", min_value=1, max_value=max(1, os.cpu_count() or 4), value=min(4, max(1, os.cpu_count() or 4)), step=1)
+        cpu_cores = st.number_input("并行处理 CPU 核心数", min_value=1, max_value=max(1, os.cpu_count() or 4), value=min(32, max(1, os.cpu_count() or 4)), step=1)
+        perf_controls = _render_upload_perf_controls(key_prefix="page_upload")
         submitted = st.form_submit_button("开始批量上传并分析")
     if submitted and uploaded:
         with st.spinner("正在上传并提交后台任务，请勿重复点击..."):
             files_payload = [("files", (f.name, f.getvalue(), f.type or "application/octet-stream")) for f in uploaded]
-            ok, result = api_post("/tasks/upload", files=files_payload, data={"cpu_cores": int(cpu_cores)})
+            ok, result = api_post("/tasks/upload", files=files_payload, data={"cpu_cores": int(cpu_cores), **perf_controls})
             if ok:
                 st.success("任务已提交，后端正在后台处理中。")
                 st.session_state["latest_task_uuid"] = result["task_uuid"]
@@ -2593,7 +4395,7 @@ elif page == "文件上传":
             else:
                 st.error(result)
     if task_uuid:
-        ok, status = api_get(f"/tasks/{task_uuid}/status")
+        ok, status = api_get(f"/tasks/{task_uuid}/status", live=True)
         if ok:
             st.markdown("### 当前任务进度")
             st.progress(int(status.get("progress_percent", 0)))
@@ -2612,6 +4414,7 @@ elif page == "统一事件流":
     if not task_uuid:
         st.info("请先选择任务 UUID。")
     else:
+        scope_params = render_scope_filter_panel(task_uuid, "events_scope")
         f1, f2, f3, f4, f5 = st.columns(5, gap="medium")
         component = f1.text_input("组件过滤")
         level = f2.selectbox("级别", ["", "INFO", "WARN", "ERROR", "FATAL"])
@@ -2625,6 +4428,7 @@ elif page == "耗时分析":
         st.info("请先选择任务 UUID。")
     else:
         unit = DURATION_UNITS[st.selectbox("Cycle 总耗时单位", list(DURATION_UNITS.keys()), key="ana_unit")]
+        render_scope_filter_panel(task_uuid, "timing_scope")
         ok2, cycle_rows = api_get(f"/tasks/{task_uuid}/cycle-summary", unit=unit)
         if ok2:
             cycle_df = pd.DataFrame(cycle_rows)
@@ -2643,13 +4447,15 @@ elif page == "事件流时间轴":
     if not task_uuid:
         st.info("请先选择任务 UUID。")
     else:
+        render_scope_filter_panel(task_uuid, "timeline_scope")
         cycles_ok, cycles = api_get(f"/tasks/{task_uuid}/cycles")
         options = ["全程"] + [str(c) for c in (cycles if cycles_ok else [])]
         cycle_pick = st.selectbox("选择 Cycle", options, key="timeline_cycle")
         track_order = st.selectbox("纵轴顺序", ["default", "cycle"], format_func=lambda x: "默认顺序" if x == "default" else "按 cycle 排序")
         cycle_no = None if cycle_pick == "全程" else int(cycle_pick)
-        ok, rows = api_get(f"/tasks/{task_uuid}/movement-timeline", cycle_no=cycle_no, track_order=track_order)
-        ok_errors, error_rows = api_get(f"/tasks/{task_uuid}/movement-timeline/errors", cycle_no=cycle_no)
+        track_granularity = st.selectbox("轨道粒度", ["component", "side", "side_chip"], index=2)
+        ok, rows = api_get(f"/tasks/{task_uuid}/movement-timeline", cycle_no=cycle_no, track_order=track_order, track_granularity=track_granularity)
+        ok_errors, error_rows = api_get(f"/tasks/{task_uuid}/movement-timeline/errors", cycle_no=cycle_no, track_granularity=track_granularity)
         if ok:
             df = pd.DataFrame(rows)
             if not df.empty:
@@ -2657,7 +4463,7 @@ elif page == "事件流时间轴":
                 # still works in environments with slightly different pandas versions.
                 df["start"] = pd.to_datetime(df["start"], errors="coerce")
                 df["end"] = pd.to_datetime(df["end"], errors="coerce")
-                df = df.dropna(subset=["start", "end"]).copy()
+                df = _dropna_frame(df, "start", "end").copy()
                 if df.empty:
                     st.info("当前时间轴数据缺少可解析的开始/结束时间，暂时无法绘制甘特图。")
                 else:
@@ -2680,9 +4486,9 @@ elif page == "事件流时间轴":
                             & error_df["severity"].isin(selected_severities)
                         ].copy()
                         error_df["time"] = pd.to_datetime(error_df["time"], errors="coerce")
-                        error_df = error_df.dropna(subset=["time"]).copy()
-                    fig = px.timeline(df, x_start="start", x_end="end", y="track", color="sub_step", hover_data=["sub_step", "cycle_no", "start_time_sec", "end_time_sec", "duration_ms", "component", "module", "message"])
-                    if show_error_points and not error_df.empty:
+                        error_df = _dropna_frame(error_df, "time").copy()
+                    fig, error_df, track_order_values = build_movement_timeline_figure(df, error_df, order_mode=track_order, show_error_points=show_error_points)
+                    if False and show_error_points and not error_df.empty:
                         for severity_value, severity_group in error_df.groupby("severity", dropna=False):
                             severity_text = str(severity_value or "unknown")
                             fig.add_trace(
@@ -2708,7 +4514,22 @@ elif page == "事件流时间轴":
                                     ),
                                 )
                             )
-                    render_fig(fig, key="timeline", height=min(max(500, 24 * len(df['track'].unique()) + 180), 2200), title="按 Cycle / 全程查看各组件运动时间轴", title_outside=True)
+                    timeline_key_seed = json.dumps(
+                        {
+                            "task_uuid": task_uuid,
+                            "cycle_pick": cycle_pick,
+                            "track_order": track_order,
+                            "track_granularity": track_granularity,
+                            "show_error_points": show_error_points,
+                            "families": selected_families,
+                            "severities": selected_severities,
+                            "track_count": int(df["track"].nunique()),
+                            "error_count": int(len(error_df)),
+                        },
+                        ensure_ascii=False,
+                    )
+                    timeline_render_key = f"timeline_{hashlib.sha1(timeline_key_seed.encode('utf-8')).hexdigest()[:12]}"
+                    render_fig(fig, key=timeline_render_key, height=min(max(500, 24 * len(df['track'].unique()) + 180), 2200), title="按 Cycle / 全程查看各组件运动时间轴", title_outside=True)
                     if show_error_points:
                         if ok_errors and not error_df.empty:
                             st.caption(f"当前已标记 {len(error_df)} 个错误时间点，可按错误家族和严重级别自由筛选。")
@@ -2728,6 +4549,7 @@ elif page == "错误分析":
         st.info("请先选择任务 UUID。")
     else:
         paged_table(f"/tasks/{task_uuid}/errors", page_key="errors_page", page_size_key="errors_page_size", title="错误簇", default_page_size=100, max_page_size=500)
+        render_scope_filter_panel(task_uuid, "error_scope")
         ok, rows = api_get(f"/tasks/{task_uuid}/errors", limit=100, offset=0)
         if ok and rows.get("items"):
             df = enrich_error_family_frame(rows["items"])
@@ -2759,6 +4581,9 @@ elif page == "参数趋势分析":
             options = [d["parameter_name"] for d in defs]
             selected = st.multiselect("选择参数", options, default=options[:4])
             unit = DURATION_UNITS[st.selectbox("趋势图单位", list(DURATION_UNITS.keys()), key="trend_unit")]
+            low_value_reference = st.selectbox("低值判定基线", ["优先期望值", "优先阈值"], key="trend_low_value_reference")
+            highlight_low_points = st.checkbox("标红低于基线的点", value=True, key="trend_highlight_low_points")
+            hide_low_points = st.checkbox("隐藏低于基线的点", value=False, key="trend_hide_low_points")
             if selected:
                 for name in selected:
                     ok, rows = api_get(f"/tasks/{task_uuid}/parameter-series/{name}", unit=unit)
@@ -2768,12 +4593,31 @@ elif page == "参数趋势分析":
                         if str(name).startswith("temperature_"):
                             x_col = "start_time"
                         df = df.sort_values(by=[x_col, "cycle"], na_position="last")
-                        fig = px.line(df, x=x_col, y="duration_value", markers=True)
-                        if df["threshold_value"].notna().any():
-                            fig.add_hline(y=float(df["threshold_value"].dropna().iloc[0]), line_dash="dash", line_color="red")
-                        if df["expected_value"].notna().any():
-                            fig.add_hline(y=float(df["expected_value"].dropna().iloc[0]), line_dash="dot", line_color="green")
+                        fig, low_value_meta = build_parameter_trend_figure(
+                            df,
+                            x_col=x_col,
+                            y_col="duration_value",
+                            low_value_preference=low_value_reference,
+                            highlight_low_points=highlight_low_points,
+                            hide_low_points=hide_low_points,
+                        )
+                        if fig is None:
+                            if low_value_meta.get("hidden_low_count"):
+                                st.info(f"{name} 趋势中，全部点都低于当前基线，已被隐藏。")
+                            else:
+                                st.info(f"{name} 趋势暂无可绘制数据。")
+                            continue
                         render_fig(fig, key=f"trend_{name}", height=360, title=f"{name} 趋势")
+                        low_label = low_value_meta.get("low_reference_label")
+                        low_value = low_value_meta.get("low_reference_value")
+                        hidden_low_count = int(low_value_meta.get("hidden_low_count") or 0)
+                        if low_label and low_value is not None:
+                            note_parts = [f"低值判定基线: {low_label} = {low_value:.4f} {unit}"]
+                            if highlight_low_points:
+                                note_parts.append("低于基线的点已标红")
+                            if hide_low_points:
+                                note_parts.append(f"已隐藏 {hidden_low_count} 个低于基线的点")
+                            st.caption("；".join(note_parts))
                 ok_sub, sub_rows = api_get(f"/tasks/{task_uuid}/substep-cycle-series", agg_mode="mean", unit=unit)
                 if ok_sub and sub_rows:
                     render_substep_cycle_facets(pd.DataFrame(sub_rows), value_col="duration_value", key="substep_cycle_facets")
@@ -2819,7 +4663,7 @@ elif page == "LLM 诊断":
                 unique_sigs = sorted({str(r.get("normalized_signature") or "") for r in hist_rows if r.get("normalized_signature")})
                 sig_filter = st.selectbox("按错误签名过滤", ["全部"] + unique_sigs, key="llm_hist_sig_filter")
                 filtered_rows = hist_rows if sig_filter == "全部" else [r for r in hist_rows if str(r.get("normalized_signature") or "") == sig_filter]
-                labels = [f"{i + 1}. {row.get('normalized_signature', '')} | {row.get('analysis_stage', '-')} | {row.get('created_at', '-')}" for i, row in enumerate(filtered_rows)]
+                labels = [f"{i + 1}. {row.get('normalized_signature', '')} | {row.get('analysis_stage', '-')} | {_display_datetime_text(row.get('created_at'))}" for i, row in enumerate(filtered_rows)]
                 if labels:
                     picked = st.selectbox("选择历史结果", labels, key="llm_hist_pick")
                     idx = labels.index(picked)
@@ -2868,7 +4712,7 @@ elif page == "LLM 诊断":
 
                 latest_ok, latest_item = api_get(f"/tasks/{task_uuid}/llm-results/latest", normalized_signature=signature)
                 if latest_ok:
-                    st.caption(f"该错误簇已有历史诊断: {latest_item.get('created_at', '-')} | {latest_item.get('analysis_stage', '-')} | {latest_item.get('llm_status', '-')}")
+                    st.caption(f"该错误簇已有历史诊断: {_display_datetime_text(latest_item.get('created_at'))} | {latest_item.get('analysis_stage', '-')} | {latest_item.get('llm_status', '-')}")
 
                 default_depth = "medium" if "medium" in depth_cfg else next(iter(depth_cfg.keys()), "medium")
                 depth = st.selectbox("分析深度", list(depth_cfg.keys()) or ["low", "medium", "high"], index=(list(depth_cfg.keys()).index(default_depth) if depth_cfg and default_depth in depth_cfg else 0))
@@ -3195,7 +5039,7 @@ elif page == "未知日志待标注池":
                 c1, c2, c3 = st.columns(3)
                 c1.metric("当前状态", row.get("review_status", "pending_review"))
                 c2.metric("出现次数", row.get("occurrence_count", 0))
-                c3.metric("源文件数", len(row.get("source_files") or {}))
+                c3.metric("源文件数", _safe_len(row.get("source_files")))
                 st.markdown("### 代表性样本")
                 st.code(str(row.get("representative_text") or ""))
                 render_review_actions("unknown_cluster", f"/active-learning/unknown-clusters/{selected_sig}/review", reviewer_key="unknown_reviewer", notes_key="unknown_notes")
@@ -3419,7 +5263,12 @@ elif page == "配置页面":
             ]
         )
 
-        overview_tab, threshold_tab, rules_tab, knowledge_tab = st.tabs(["总览", "时间与阈值", "异常与审核", "Prompt 与方案库"])
+        config_tab_labels = ["总览", "时间与阈值", "异常与审核", "Prompt 与方案库"]
+        if bool(current_user.get("is_admin")):
+            config_tab_labels.append("Env 配置")
+        config_tabs = st.tabs(config_tab_labels)
+        overview_tab, threshold_tab, rules_tab, knowledge_tab = config_tabs[:4]
+        admin_env_tab = config_tabs[4] if len(config_tabs) > 4 else None
 
         with overview_tab:
             st.markdown("#### 基础信息")
@@ -3660,6 +5509,10 @@ elif page == "配置页面":
                         columns=2,
                     )
                     render_tag_cloud(children, empty_text="当前未配置子模块")
+
+        if admin_env_tab is not None:
+            with admin_env_tab:
+                render_admin_env_config_panel(llm_cfg)
     else:
         st.error(data)
 

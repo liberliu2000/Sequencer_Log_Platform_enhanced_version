@@ -240,11 +240,6 @@ export function SolutionConsole() {
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerPasswordConfirm, setRegisterPasswordConfirm] = useState("");
   const [registerNote, setRegisterNote] = useState("");
-  const [registerCode, setRegisterCode] = useState("");
-  const [registerVerificationToken, setRegisterVerificationToken] = useState("");
-  const [registerVerificationStep, setRegisterVerificationStep] = useState<
-    "draft" | "code_sent" | "verified" | "submitted"
-  >("draft");
 
   const [solutionForm, setSolutionForm] = useState<SolutionFormState>(defaultSolutionForm);
   const [librarySearch, setLibrarySearch] = useState("");
@@ -425,7 +420,7 @@ export function SolutionConsole() {
     }
   }
 
-  async function handleRequestCode() {
+  async function handleSubmitRegistration() {
     setNotice(null);
     if (registerPassword !== registerPasswordConfirm) {
       setNotice({ tone: "error", text: "两次输入的密码不一致。" });
@@ -433,68 +428,23 @@ export function SolutionConsole() {
     }
 
     try {
-      await withBusy("发送验证码中", () =>
-        api.requestRegisterCode({
+      await withBusy("提交注册申请中", () =>
+        api.register({
           username: registerUsername.trim(),
           email: registerEmail.trim(),
           password: registerPassword,
           registration_note: registerNote.trim(),
         }),
       );
-      setRegisterVerificationStep("code_sent");
-      setRegisterVerificationToken("");
-      setNotice({ tone: "success", text: "验证码已发送到邮箱，请完成验证。" });
-    } catch (error) {
-      showApiError(error);
-    }
-  }
-
-  async function handleVerifyCode() {
-    setNotice(null);
-
-    try {
-      const response = await withBusy("验证邮箱中", () =>
-        api.verifyRegisterCode(registerUsername.trim() || registerEmail.trim(), registerCode.trim()),
-      );
-      setRegisterVerificationToken(response.verification_token);
-      setRegisterVerificationStep("verified");
-      setNotice({ tone: "success", text: "邮箱验证完成，现在可以提交注册申请。" });
-    } catch (error) {
-      showApiError(error);
-    }
-  }
-
-  async function handleSubmitRegistration() {
-    setNotice(null);
-
-    if (!registerVerificationToken) {
-      setNotice({ tone: "error", text: "请先完成邮箱验证。" });
-      return;
-    }
-
-    try {
-      await withBusy("提交注册申请中", () => api.register(registerVerificationToken));
-      setRegisterVerificationStep("submitted");
-      setRegisterVerificationToken("");
-      setRegisterCode("");
+      setRegisterUsername("");
+      setRegisterEmail("");
+      setRegisterPassword("");
+      setRegisterPasswordConfirm("");
+      setRegisterNote("");
       setNotice({
         tone: "success",
         text: "注册申请已提交，等待管理员审批后即可登录。",
       });
-    } catch (error) {
-      showApiError(error);
-    }
-  }
-
-  async function handleResendCode() {
-    setNotice(null);
-
-    try {
-      await withBusy("重新发送中", () =>
-        api.resendRegisterCode(registerUsername.trim() || registerEmail.trim()),
-      );
-      setRegisterVerificationStep("code_sent");
-      setNotice({ tone: "success", text: "新的验证码已发送，请查看邮箱。" });
     } catch (error) {
       showApiError(error);
     }
@@ -791,7 +741,7 @@ export function SolutionConsole() {
 
         <div className="grid gap-4 md:grid-cols-3">
           <MetricCard label="导航方式" value="单页切换" helper="像 Streamlit 一样简单直达，不需要前端路由跳转。" />
-          <MetricCard label="认证流程" value="邮箱验证 + 审批" helper="注册先验邮箱，再由管理员审批，之后才能登录。" />
+          <MetricCard label="认证流程" value="提交申请 + 审批" helper="注册只需提供邮箱账户，管理员审核通过后即可登录。" />
           <MetricCard label="部署方式" value="域名可替换" helper="前端通过环境变量连接真实后端，替换域名即可上线。" />
         </div>
 
@@ -877,7 +827,7 @@ export function SolutionConsole() {
       <Card>
         <CardHeader>
           <CardTitle>注册页面</CardTitle>
-          <CardDescription>保持和 Streamlit 一样的三步式流程：填写信息、邮箱验证、提交审批。</CardDescription>
+          <CardDescription>填写用户名、邮箱和密码后即可直接提交注册申请，等待管理员审核。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="grid gap-5 md:grid-cols-2">
@@ -917,28 +867,8 @@ export function SolutionConsole() {
             />
           </Field>
 
-          <div className="grid gap-4 rounded-3xl border border-[var(--border)] bg-[var(--muted)]/60 p-5 lg:grid-cols-[1fr_1fr_auto]">
-            <Field label="邮箱验证码">
-              <Input
-                value={registerCode}
-                onChange={(event) => setRegisterCode(event.target.value)}
-              />
-            </Field>
-            <div className="space-y-2">
-              <p className="text-sm font-medium text-[var(--foreground)]">当前进度</p>
-              <Badge className={statusBadgeTone(registerVerificationStep)}>{registerVerificationStep}</Badge>
-            </div>
-            <div className="flex flex-wrap items-end gap-3">
-              <Button type="button" variant="secondary" onClick={handleRequestCode}>
-                发送验证码
-              </Button>
-              <Button type="button" variant="secondary" onClick={handleVerifyCode}>
-                验证邮箱
-              </Button>
-              <Button type="button" variant="secondary" onClick={handleResendCode}>
-                重发验证码
-              </Button>
-            </div>
+          <div className="rounded-3xl border border-[var(--border)] bg-[var(--muted)]/60 p-5 text-sm leading-6 text-[var(--muted-foreground)]">
+            注册说明：提交后账号会进入管理员审核队列，审核通过后即可使用该邮箱账户登录。
           </div>
 
           <div className="flex flex-wrap gap-3">

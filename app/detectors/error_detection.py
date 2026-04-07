@@ -14,6 +14,7 @@ NOISE_PATTERNS = [
     r"logger:",
     r"debug trace",
 ]
+NOISE_REGEXES = [re.compile(pattern, re.IGNORECASE) for pattern in NOISE_PATTERNS]
 
 
 def normalize_error_signature(event: NormalizedEvent) -> tuple[str | None, str | None, str | None]:
@@ -24,7 +25,7 @@ def normalize_error_signature(event: NormalizedEvent) -> tuple[str | None, str |
     ):
         return None, None, None
 
-    if any(re.search(pattern, lowered, re.IGNORECASE) for pattern in NOISE_PATTERNS):
+    if any(pattern.search(lowered) for pattern in NOISE_REGEXES):
         return None, None, None
 
     family = classify_error_family(

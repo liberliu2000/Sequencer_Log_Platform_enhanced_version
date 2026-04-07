@@ -22,6 +22,7 @@ from app.services.performance_service import PerformanceService
 from app.services.pipeline_parallel import PIPELINE_STAGE_PLAN
 from app.services.prompt_template_service import PromptTemplateService
 from app.services.query_service import QueryService
+from app.services.announcement_service import AnnouncementService
 from app.services.solution_repository import SolutionRepositoryService
 from app.services.solution_review_service import SolutionReviewService
 from app.services.case_retriever import CaseRetriever
@@ -40,6 +41,19 @@ router = APIRouter()
 
 def _dt_text(v):
     return v.isoformat() if hasattr(v, 'isoformat') else str(v or '')
+
+
+def _coerce_form_bool(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _load_json(path: Path):
@@ -132,6 +146,11 @@ def _parse_csv_param(raw_value: str | None) -> list[str]:
     return [part.strip() for part in str(raw_value).split(',') if part and part.strip()]
 
 
+def _csv_or_none(raw_value: str | None) -> list[str] | None:
+    values = _parse_csv_param(raw_value)
+    return values or None
+
+
 def _parse_json_text(raw_value: str | None, default):
     if not raw_value:
         return default
@@ -185,6 +204,52 @@ def health():
     return {'status': 'ok', 'queue_pending': len(queue.pending), 'pipeline_stages': PIPELINE_STAGE_PLAN}
 
 
+@router.get('/announcements')
+def list_announcements(limit: int = Query(default=20, ge=1, le=200), db: Session = Depends(get_db)):
+    items = AnnouncementService(db).list_announcements(limit=limit)
+    return {'items': items, 'total': len(items)}
+
+
+@router.post('/admin/announcements')
+def create_announcement(payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_admin_user)):
+    try:
+        item = AnnouncementService(db).create_announcement(
+            title=payload.get('title'),
+            summary=str(payload.get('summary') or ''),
+            updated_by=str(current_user.get('username') or 'admin'),
+            is_pinned=bool(payload.get('is_pinned')),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {'status': 'ok', 'item': item}
+
+
+@router.put('/admin/announcements/{announcement_id}')
+def update_announcement(announcement_id: int, payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_admin_user)):
+    try:
+        item = AnnouncementService(db).update_announcement(
+            announcement_id,
+            title=payload.get('title'),
+            summary=payload.get('summary'),
+            is_pinned=payload.get('is_pinned'),
+            updated_by=str(current_user.get('username') or 'admin'),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail='announcement not found')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {'status': 'ok', 'item': item}
+
+
+@router.delete('/admin/announcements/{announcement_id}')
+def delete_announcement(announcement_id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_admin_user)):
+    try:
+        item = AnnouncementService(db).delete_announcement(announcement_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail='announcement not found')
+    return {'status': 'ok', 'item': item}
+
+
 @router.get('/system/runtime')
 def system_runtime(current_user: dict = Depends(get_current_user)):
     snapshot = SystemRuntimeService().current_snapshot()
@@ -214,10 +279,31 @@ def update_system_runtime_policy(
 
 
 @router.post('/tasks/upload', response_model=UploadTaskResponse)
-async def upload_logs(files: list[UploadFile] = File(...), cpu_cores: int = Form(default=1), db: Session = Depends(get_db)):
+async def upload_logs(
+    files: list[UploadFile] = File(...),
+    cpu_cores: int = Form(default=16),
+    max_workers: int | None = Form(default=None),
+    file_level_workers: int | None = Form(default=None),
+    streaming_parse_chunk_bytes: int | None = Form(default=None),
+    max_parse_chunks_per_file: int | None = Form(default=None),
+    db_batch_size: int | None = Form(default=None),
+    enable_process_pool: str | None = Form(default=None),
+    enable_streaming_parse: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
     settings = get_settings()
     repo = TaskRepository(db)
     runtime_service = SystemRuntimeService()
+    runtime_options = {
+        "max_workers": max_workers,
+        "file_level_workers": file_level_workers,
+        "streaming_parse_chunk_bytes": streaming_parse_chunk_bytes,
+        "max_parse_chunks_per_file": max_parse_chunks_per_file,
+        "db_batch_size": db_batch_size,
+        "enable_process_pool": _coerce_form_bool(enable_process_pool),
+        "enable_streaming_parse": _coerce_form_bool(enable_streaming_parse),
+    }
+    runtime_options = {key: value for key, value in runtime_options.items() if value is not None}
     task_uuid = uuid.uuid4().hex
     batch_dir = Path(settings.upload_dir) / task_uuid
     batch_dir.mkdir(parents=True, exist_ok=True)
@@ -241,7 +327,14 @@ async def upload_logs(files: list[UploadFile] = File(...), cpu_cores: int = Form
     repo.update_task_progress(task.id, status='queued', current_stage='等待异步任务队列调度', file_count=saved_count, message=f'批量上传完成，共 {saved_count} 个文件，{round(total_bytes / 1024 / 1024, 2)} MB')
     task_state_cache.init_task(task_uuid, display_name, cpu_cores=cpu_cores)
     task_state_cache.update(task_uuid, status='queued', current_stage='等待异步任务队列调度', file_count=saved_count, message=f'批量上传完成，共 {saved_count} 个文件，{round(total_bytes / 1024 / 1024, 2)} MB', cpu_cores=cpu_cores)
-    position = queue.submit(task_uuid, lambda: IngestionService.process_task_by_uuid(task_uuid, cpu_cores=cpu_cores))
+    position = queue.submit(
+        task_uuid,
+        lambda: IngestionService.process_task_by_uuid(
+            task_uuid,
+            cpu_cores=cpu_cores,
+            runtime_options=runtime_options,
+        ),
+    )
     repo.update_task_progress(task.id, queue_position=position)
     task_state_cache.update(task_uuid, status='queued', current_stage='等待异步任务队列调度', queue_position=position, file_count=saved_count, message=f'已进入队列，第 {position} 位', cpu_cores=cpu_cores)
     guard = runtime_service.dispatch_guard()
@@ -266,8 +359,8 @@ def list_tasks(page: int = Query(default=1, ge=1), page_size: int = Query(defaul
     }
 
 
-@router.get('/tasks/{task_uuid}/status')
-def task_status(task_uuid: str, db: Session = Depends(get_db)):
+@router.get('/tasks/{task_uuid}/status-legacy')
+def task_status_legacy(task_uuid: str, db: Session = Depends(get_db)):
     cached = task_state_cache.get(task_uuid)
     if cached is not None:
         return cached
@@ -276,6 +369,63 @@ def task_status(task_uuid: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail='任务不存在')
     perf = PerformanceService().read_summary(task_uuid)
     return {'task_uuid': task.task_uuid, 'filename': task.filename, 'status': task.status, 'file_count': task.file_count, 'total_events': task.total_events, 'total_errors': task.total_errors, 'progress_percent': task.progress_percent, 'current_stage': task.current_stage, 'queue_position': task.queue_position or queue.queue_position(task.task_uuid), 'message': task.message, 'created_at': _dt_text(task.created_at), 'updated_at': _dt_text(task.updated_at), 'cpu_cores': perf.get('cpu_cores'), 'elapsed_seconds': perf.get('stage_timings', {}).get('total_seconds'), 'started_at': None, 'finished_at': None}
+
+
+@router.get('/tasks/{task_uuid}/status')
+def task_status(task_uuid: str, db: Session = Depends(get_db)):
+    repo = TaskRepository(db)
+    task = repo.get_task_by_uuid(task_uuid)
+    cached = task_state_cache.get(task_uuid) or {}
+    perf = PerformanceService().read_summary(task_uuid)
+
+    if not task and not cached:
+        raise HTTPException(status_code=404, detail='task not found')
+
+    response = {
+        'task_uuid': task_uuid,
+        'filename': getattr(task, 'filename', None),
+        'status': getattr(task, 'status', None),
+        'file_count': getattr(task, 'file_count', 0),
+        'total_events': getattr(task, 'total_events', 0),
+        'total_errors': getattr(task, 'total_errors', 0),
+        'progress_percent': getattr(task, 'progress_percent', 0),
+        'current_stage': getattr(task, 'current_stage', None),
+        'queue_position': getattr(task, 'queue_position', None),
+        'message': getattr(task, 'message', None),
+        'created_at': _dt_text(getattr(task, 'created_at', None)),
+        'updated_at': _dt_text(getattr(task, 'updated_at', None)),
+        'cpu_cores': perf.get('cpu_cores'),
+        'elapsed_seconds': (perf.get('stage_timings') or {}).get('total_seconds'),
+        'started_at': None,
+        'finished_at': None,
+        'estimated_remaining_seconds': None,
+        'estimated_finish_at': None,
+        'runtime_snapshot': {},
+        'progress_history': perf.get('progress_history', []),
+    }
+
+    response.update(cached)
+    response['task_uuid'] = task_uuid
+    response['filename'] = response.get('filename') or getattr(task, 'filename', None)
+    response['file_count'] = int(response.get('file_count') or getattr(task, 'file_count', 0) or 0)
+    response['total_events'] = int(response.get('total_events') or getattr(task, 'total_events', 0) or 0)
+    response['total_errors'] = int(response.get('total_errors') or getattr(task, 'total_errors', 0) or 0)
+    response['progress_percent'] = int(response.get('progress_percent') or 0)
+    response['queue_position'] = response.get('queue_position') or getattr(task, 'queue_position', None) or queue.queue_position(task_uuid)
+    response['cpu_cores'] = response.get('cpu_cores') or perf.get('cpu_cores')
+
+    perf_status = perf.get('status_snapshot') if isinstance(perf.get('status_snapshot'), dict) else {}
+    if perf_status and not response.get('progress_history'):
+        response['progress_history'] = perf_status.get('progress_history', [])
+    if perf_status:
+        for field in ('started_at', 'finished_at', 'elapsed_seconds', 'estimated_remaining_seconds', 'estimated_finish_at'):
+            if response.get(field) is None and perf_status.get(field) is not None:
+                response[field] = perf_status.get(field)
+
+    if response.get('status') in {'uploaded', 'queued', 'processing'}:
+        response['runtime_snapshot'] = SystemRuntimeService().current_snapshot()
+
+    return response
 
 
 @router.get('/tasks/{task_uuid}/performance-summary')
@@ -291,10 +441,33 @@ def dashboard(task_uuid: str, db: Session = Depends(get_db)):
 
 
 @router.get('/tasks/{task_uuid}/events')
-def events(task_uuid: str, component: str | None = None, level: str | None = None, cycle_no: int | None = None, chip_name: str | None = None, search: str | None = None, limit: int = Query(default=100, le=500), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
+def events(
+    task_uuid: str,
+    component: str | None = None,
+    level: str | None = None,
+    cycle_no: int | None = None,
+    chip_name: str | None = None,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    search: str | None = None,
+    limit: int = Query(default=100, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.list_events(task.id, component, level, cycle_no, chip_name, search, limit, offset)
+    return query.list_events(
+        task.id,
+        component,
+        level,
+        cycle_no,
+        _csv_or_none(chip_name),
+        search,
+        limit,
+        offset,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+    )
 
 
 @router.get('/tasks/{task_uuid}/cycles')
@@ -304,39 +477,123 @@ def list_cycles(task_uuid: str, db: Session = Depends(get_db)):
     return query.list_cycles(task.id)
 
 
-@router.get('/tasks/{task_uuid}/steps')
-def step_summaries(task_uuid: str, cycle_no: int | None = None, parameter_name: str | None = None, limit: int = Query(default=100, le=500), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
+@router.get('/tasks/{task_uuid}/scope-catalog')
+def scope_catalog(task_uuid: str, db: Session = Depends(get_db)):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_step_summaries(task.id, cycle_no=cycle_no, parameter_name=parameter_name, offset=offset, limit=limit)
+    return query.get_scope_catalog(task.id)
+
+
+@router.get('/tasks/{task_uuid}/steps')
+def step_summaries(
+    task_uuid: str,
+    cycle_no: int | None = None,
+    parameter_name: str | None = None,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    limit: int = Query(default=100, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = QueryService(db)
+    task = query.get_task_or_raise(task_uuid)
+    return query.get_step_summaries(
+        task.id,
+        cycle_no=cycle_no,
+        parameter_name=parameter_name,
+        offset=offset,
+        limit=limit,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/cycle-summary')
-def cycle_summary(task_uuid: str, unit: str = Query(default='ms'), db: Session = Depends(get_db)):
+def cycle_summary(
+    task_uuid: str,
+    unit: str = Query(default='ms'),
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_cycle_summaries(task.id, unit=unit)
+    return query.get_cycle_summaries(
+        task.id,
+        unit=unit,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/movement-timeline')
-def movement_timeline(task_uuid: str, cycle_no: int | None = None, track_order: str = Query(default='default'), db: Session = Depends(get_db)):
+def movement_timeline(
+    task_uuid: str,
+    cycle_no: int | None = None,
+    track_order: str = Query(default='default'),
+    track_granularity: str = Query(default='component'),
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_movement_timeline(task.id, cycle_no=cycle_no, track_order=track_order)
+    return query.get_movement_timeline(
+        task.id,
+        cycle_no=cycle_no,
+        track_order=track_order,
+        track_granularity=track_granularity,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/movement-timeline/errors')
-def movement_timeline_errors(task_uuid: str, cycle_no: int | None = None, db: Session = Depends(get_db)):
+def movement_timeline_errors(
+    task_uuid: str,
+    cycle_no: int | None = None,
+    track_granularity: str = Query(default='component'),
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_timeline_error_points(task.id, cycle_no=cycle_no)
+    return query.get_timeline_error_points(
+        task.id,
+        cycle_no=cycle_no,
+        track_granularity=track_granularity,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/operational-metrics')
-def operational_metrics(task_uuid: str, cycle_no: int | None = None, db: Session = Depends(get_db)):
+def operational_metrics(
+    task_uuid: str,
+    cycle_no: int | None = None,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_operational_metrics(task.id, cycle_no=cycle_no)
+    return query.get_operational_metrics(
+        task.id,
+        cycle_no=cycle_no,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/temperature-cycle-validation')
@@ -347,10 +604,25 @@ def temperature_cycle_validation(task_uuid: str, db: Session = Depends(get_db)):
 
 
 @router.get('/tasks/{task_uuid}/errors')
-def error_clusters(task_uuid: str, limit: int = Query(default=100, le=500), offset: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
+def error_clusters(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    limit: int = Query(default=100, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_error_clusters(task.id, offset=offset, limit=limit)
+    return query.get_error_clusters(
+        task.id,
+        offset=offset,
+        limit=limit,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/errors/trend')
@@ -517,24 +789,67 @@ def parameter_definitions(db: Session = Depends(get_db)):
 
 
 @router.get('/tasks/{task_uuid}/parameter-series/{parameter_name}')
-def parameter_series(task_uuid: str, parameter_name: str, unit: str = Query(default='s'), db: Session = Depends(get_db)):
+def parameter_series(
+    task_uuid: str,
+    parameter_name: str,
+    unit: str = Query(default='s'),
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_parameter_series(task.id, parameter_name, unit=unit)
+    return query.get_parameter_series(
+        task.id,
+        parameter_name,
+        unit=unit,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/row-scan-metric-series')
-def row_scan_metric_series(task_uuid: str, unit: str = Query(default='ms'), db: Session = Depends(get_db)):
+def row_scan_metric_series(
+    task_uuid: str,
+    unit: str = Query(default='ms'),
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_row_scan_metric_stage_series(task.id, unit=unit)
+    return query.get_row_scan_metric_stage_series(
+        task.id,
+        unit=unit,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 @router.get('/tasks/{task_uuid}/substep-cycle-series')
-def substep_cycle_series(task_uuid: str, agg_mode: str = Query(default='mean'), unit: str = Query(default='s'), db: Session = Depends(get_db)):
+def substep_cycle_series(
+    task_uuid: str,
+    agg_mode: str = Query(default='mean'),
+    unit: str = Query(default='s'),
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    return query.get_substep_cycle_series(task.id, agg_mode=agg_mode, unit=unit)
+    return query.get_substep_cycle_series(
+        task.id,
+        agg_mode=agg_mode,
+        unit=unit,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
 
 
 
@@ -996,58 +1311,142 @@ def ask_solution_repository(payload: dict, db: Session = Depends(get_db), curren
 
 
 @router.get('/tasks/{task_uuid}/export/events')
-def export_events(task_uuid: str, db: Session = Depends(get_db)):
+def export_events(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_events_csv(task.id, task_uuid)
+    path = ExportService(db).export_events_csv(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name)
 
 
 @router.get('/tasks/{task_uuid}/export/errors')
-def export_errors(task_uuid: str, db: Session = Depends(get_db)):
+def export_errors(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_error_report_csv(task.id, task_uuid)
+    path = ExportService(db).export_error_report_csv(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name)
 
 
 @router.get('/tasks/{task_uuid}/export/parameters')
-def export_parameters(task_uuid: str, db: Session = Depends(get_db)):
+def export_parameters(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_parameter_results_csv(task.id, task_uuid)
+    path = ExportService(db).export_parameter_results_csv(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name)
 
 
 @router.get('/tasks/{task_uuid}/export/report.json')
-def export_report_json(task_uuid: str, db: Session = Depends(get_db)):
+def export_report_json(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_json_report(task.id, task_uuid)
+    path = ExportService(db).export_json_report(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name)
 
 
 @router.get('/tasks/{task_uuid}/export/report.html')
-def export_report_html(task_uuid: str, db: Session = Depends(get_db)):
+def export_report_html(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_html_report(task.id, task_uuid)
+    path = ExportService(db).export_html_report(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name, media_type='text/html')
 
 
 @router.get('/tasks/{task_uuid}/export/report.xlsx')
-def export_report_xlsx(task_uuid: str, db: Session = Depends(get_db)):
+def export_report_xlsx(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_excel_report(task.id, task_uuid)
+    path = ExportService(db).export_excel_report(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name)
 
 
 @router.get('/tasks/{task_uuid}/export/report.pdf')
-def export_report_pdf(task_uuid: str, db: Session = Depends(get_db)):
+def export_report_pdf(
+    task_uuid: str,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    chip_name: str | None = None,
+    db: Session = Depends(get_db),
+):
     query = QueryService(db)
     task = query.get_task_or_raise(task_uuid)
-    path = ExportService(db).export_pdf_report(task.id, task_uuid)
+    path = ExportService(db).export_pdf_report(
+        task.id,
+        task_uuid,
+        side_scopes=_csv_or_none(side_scope),
+        side_groups=_csv_or_none(side_group),
+        chip_names=_csv_or_none(chip_name),
+    )
     return FileResponse(path=path, filename=Path(path).name)
 
 

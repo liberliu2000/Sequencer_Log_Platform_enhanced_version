@@ -6,7 +6,7 @@ services:
     container_name: sequencer-log-platform
     ports:
       - "8000:8000"
-      - "8501:8501"
+      - "1122:1122"
     volumes:
       - ./.env:/workspace/.env
       - ./.env.example:/workspace/.env.example:ro

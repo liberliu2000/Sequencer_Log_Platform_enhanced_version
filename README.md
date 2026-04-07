@@ -1,5 +1,85 @@
 # Sequencer Log Platform Enhanced Version
 
+## 2026-04-02 Next Frontend Sync
+
+- Production web UI is `frontend/` (Next.js). The optimization and repair for dashboard progress, timeline/gantt rendering, table interaction, and chart interaction have now been implemented in:
+  - `frontend/components/platform-shared.tsx`
+  - `frontend/components/log-platform-console.tsx`
+- Backend SQLite lock mitigation is now implemented in:
+  - `app/db/session.py`
+  - `app/services/auth_service.py`
+  - `tests/test_auth_service.py`
+- Dashboard home now includes a real-time visual processing panel with current file, stage, progress, elapsed time, ETA, and estimated finish time, with lightweight polling only while a task is actively running.
+- Timeline / gantt rendering now uses the backend's original time fields for display alignment, supports multi-cycle switching, zoom, pan, box-zoom, hover detail, and component/track highlighting without changing backend calculations.
+- Shared line charts and data tables now support hover detail, legend toggle, wheel zoom, box-zoom, pan, sorting, filtering, search, and denser-axis auto-thinning for better readability on low-memory servers.
+- SQLite connections now use a busy timeout plus WAL mode for file-backed databases, and auth session `last_seen_at` updates are best-effort so transient lock contention no longer escalates into HTTP 500 responses.
+- Validation:
+  - `cd frontend && npm run lint`
+  - `cd frontend && npm run build`
+  - `pytest tests/test_auth_service.py -q`
+  - `pytest tests/test_api_basic.py -q`
+
+## 仪表盘可视化进度与时间轴交互修复（2026-04-02）
+
+本次更新聚焦前端显示层与交互层优化，严格保持原有计算逻辑、数据结构、输出结果与数据精度不变，适配小内存服务器，代码可直接替换运行。
+
+### 本次前端优化
+
+- `ui/streamlit_app.py`
+  - 仪表盘首页“实时文件处理进度”升级为可视化进度面板，使用科技感状态卡片 + 动态进度条 + 阶段流程条展示当前处理文件名、阶段、整体进度、已用时间、预计剩余时间、预计结束时间与最近处理轨迹。
+  - 甘特图时间轴改为按组件着色并稳定轨道顺序，修复多 Cycle 切换时的显示错位、错误点与轨道不对应、刷新后顺序不稳定等渲染问题。
+  - 错误时间点会自动对齐到真实 lane/track，hover 提示补齐组件、子步骤、Cycle、起止时间、轨道和消息详情。
+  - 统一增强所有 Plotly 图表交互：支持 hover 详情、鼠标滚轮缩放、框选缩放、平移、图例点击筛选/系列开关。
+  - 统一优化图表坐标轴显示密度：自动调节刻度数、过密标签自动跳显、长标签自动旋转、时间轴 tick format 自适应。
+  - 所有 `st.dataframe` 表格补充轻量“表格工具”，支持原生排序/滚动基础上再叠加搜索与按列过滤，不引入额外前端依赖。
+
+### 验证
+
+- 语法校验：`ui/streamlit_app.py` 已通过 AST 解析
+- 回归验证：`pytest tests/test_task_state_cache.py -q`
+
+## 全链路防崩优化与实时进度面板（2026-04-02）
+
+本次更新在不改变任何最终输出结果、数据精度、图表内容和业务逻辑的前提下，补齐了“流式后处理与聚合”以及查询/导出链路的低内存优化，并在仪表盘新增了实时任务进度面板。
+
+### 后端优化
+
+- `app/services/streaming_aggregation.py`
+  - 流式后处理完成后，直接把完整 `ParameterResult` 批量落库到新表 `parameter_results`，后续查询、导出、绘图不再重复扫描全量事件。
+  - 资源守卫从“仅内存”扩展为“CPU + 内存”联合降级，达到阈值时自动缩小批量大小、触发 `gc.collect()` 并短暂让出 CPU。
+  - 保留原有 `step_summaries`、`error_clusters` 和仪表盘统计口径，最终结果与优化前完全一致。
+
+- `app/services/query_service.py`
+  - `get_parameter_results()` 优先读取轻量结果表；旧任务若还没有结果表数据，则使用数据库顺序扫描 + 增量聚合流式回填一次，避免再把 `normalized_events` 全量反序列化进内存。
+  - `preview_task_file()` 改为只读取头部字节做二进制判断，并按行流式预览文本，避免大日志整文件读入。
+
+- `app/services/export_service.py`
+  - `export_events_csv()` 改为分页流式写 CSV，避免导出时一次性构造超大列表。
+
+- `app/services/system_runtime_service.py`
+  - 新增 CPU 软阈值 `system_cpu_soft_limit_percent`，调度守卫同时考虑 CPU 和内存压力。
+  - 新增 `adaptive_cpu_allocation()`，任务启动前会根据系统负载自动降低并发核数，适配低核轻量服务器。
+
+- `app/services/ingestion_service.py`
+  - 任务开始时会记录自适应 CPU 分配结果，性能摘要中会保留 `runtime_allocation`、`progress_history` 和最终 `status_snapshot`。
+  - 成功 / 失败都会把进度历史持久化到 `data/performance/<task_uuid>.json`，任务完成后仍可在仪表盘回看历史。
+
+- `app/services/task_state_cache.py`
+  - 状态缓存新增 `filename`、`total_events`、`total_errors`、`estimated_remaining_seconds`、`estimated_finish_at`、`progress_history`、`runtime_snapshot`。
+  - ETA 基于最近进度斜率动态估算，并保留轻量历史缓冲，避免常驻大对象。
+
+### 仪表盘新增能力
+
+- `ui/streamlit_app.py`
+  - 仪表盘页新增“实时文件处理进度”卡片，展示当前文件 / 任务名、当前阶段、`st.progress`、已用时间、预计剩余时间、预计结束时间、状态和最近处理历史。
+  - `/tasks/{task_uuid}/status` 改为实时请求，不走 15 秒缓存；处理中的任务使用局部自动刷新，不影响原有布局。
+
+### 兼容性与验证
+
+- 新增轻量结果表：`parameter_results`
+- 旧任务首次查询参数结果时会自动流式回填，不需要前端改动
+- 全量测试已通过：`64 passed`
+
 ## 主进程汇总解析结果防崩修复（2026-04-02）
 
 - `app/services/streaming_aggregation.py`
@@ -26,7 +106,7 @@
 - LLM 诊断、相似案例检索、审核流
 - 主动学习、未知日志池、规则建议审核
 - 全局方案库、任务簇、多维索引检索、导出
-- 用户注册、邮箱验证、管理员审核、角色权限
+- ???????????????
 
 ## 技术栈
 
@@ -64,8 +144,8 @@
 
 ### 4. 注册审核
 
-- 用户先填写注册信息并发送邮箱验证码
-- 只有验证码验证成功后，才允许正式提交注册申请
+- ?????????????????
+- ??????????????????????
 - 注册申请提交成功后进入管理员审批
 - 用户状态包括：
   - `pending_verification`
@@ -73,7 +153,7 @@
   - `approved`
   - `rejected`
   - `disabled`
-- 支持验证码过期、重发和频率限制
+- ???????????????????????????
 
 ### 5. 错误码生成
 
@@ -178,7 +258,7 @@ python -m scripts.run_ui
 
 默认地址：
 
-- `http://127.0.0.1:8501`
+- `http://127.0.0.1:1122`
 
 ### 一键本地启动
 
@@ -225,7 +305,7 @@ scripts\start_local.ps1
 
 - `MAIL_DELIVERY_MODE=console`
 
-生产或联调邮件验证码时：
+??????????
 
 - `MAIL_DELIVERY_MODE=smtp`
 
@@ -233,10 +313,7 @@ scripts\start_local.ps1
 
 ### 认证与用户
 
-- `POST /api/v1/auth/register/request-code`
 - `POST /api/v1/auth/register`
-- `POST /api/v1/auth/register/resend-code`
-- `POST /api/v1/auth/register/verify-email`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
 - `GET /api/v1/auth/me`
@@ -290,7 +367,7 @@ scripts\start_local.ps1
 
 页面显示规则：
 
-- 未登录时只能看到登录/注册/邮箱验证界面
+- ??????????/????
 - `submitter` 可进入主功能页和方案提交/查询页
 - `reviewer` 额外可进行方案审核、任务簇审核、模块维护
 - `admin` 额外拥有用户管理页
@@ -376,7 +453,7 @@ git pull --ff-only origin <branch>
 
 - 密码仅以哈希形式保存
 - 登录失败会触发锁定策略
-- 验证码有有效期、重发间隔和每日次数限制
+- ???????????????????????????
 - 后端接口按角色强制鉴权
 - 导出接口需要登录 token
 

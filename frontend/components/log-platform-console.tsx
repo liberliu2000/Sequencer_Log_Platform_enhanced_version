@@ -68,6 +68,7 @@ import {
   MetricCard,
   NoticeBanner,
   PaginationBar,
+  ProcessingProgressPanel,
   SectionTitle,
   SimpleLineChart,
   StatusBadge,
@@ -116,6 +117,16 @@ type EnvItem = {
   is_modified: boolean;
 };
 
+type AnnouncementItem = {
+  id: number;
+  title?: string | null;
+  summary?: string | null;
+  updated_by?: string | null;
+  updated_at?: string | null;
+  is_pinned?: boolean;
+  created_at?: string | null;
+};
+
 const TOKEN_STORAGE_KEY = "sequencer-platform-auth-token";
 const API_BASE_STORAGE_KEY = "sequencer-platform-api-base";
 const TASK_STORAGE_KEY = "sequencer-platform-selected-task";
@@ -154,17 +165,17 @@ const pageUsageGuides: Record<PageKey, { title: string; description: string; ste
     description: "输入账号信息后直接进入平台，不需要额外跳转。",
     steps: [
       "输入用户名或邮箱与密码，点击登录。",
-      "如还没有账号，可切换到注册页完成验证码和审核流程。",
+      "No account yet? Open the registration page and submit an approval request.",
       "登录后优先在左侧选择任务或新建上传任务，再进入各分析子页面。",
     ],
   },
   register: {
     title: "注册页使用逻辑",
-    description: "注册流程保持三段式：申请验证码、邮箱验证、提交审核。",
+    description: "Registration now goes straight to admin review without email verification.",
     steps: [
-      "先填写用户名、邮箱、密码和注册说明，然后发送验证码。",
-      "收到邮箱验证码后完成验证，拿到注册提交资格。",
-      "提交申请后等待管理员审核，审核通过即可登录平台。",
+      "Fill in username, email, password, and an optional note.",
+      "Submit the registration request directly once the form is complete.",
+      "Wait for an administrator to approve the account before signing in.",
     ],
   },
   dashboard: {
@@ -476,12 +487,12 @@ function UsageStatusCard({
   const progress = percent === null ? 0 : Math.max(0, Math.min(percent, 100));
   const toneClass =
     percent === null
-      ? "bg-slate-300"
+      ? "bg-[rgba(140,159,180,0.45)]"
       : progress >= 90
-        ? "bg-rose-500"
+        ? "bg-[#d45e5a]"
         : progress >= 75
-          ? "bg-amber-500"
-          : "bg-emerald-500";
+          ? "bg-[#d78a45]"
+          : "bg-[#66bfff]";
 
   return (
     <Card>
@@ -507,6 +518,101 @@ function UsageStatusCard({
   );
 }
 
+function AnnouncementFeedCard({
+  items,
+  loading,
+  hasError,
+}: {
+  items: AnnouncementItem[];
+  loading: boolean;
+  hasError: boolean;
+}) {
+  const pinned = items.find((item) => item.is_pinned) ?? null;
+  const latest = pinned
+    ? items.find((item) => item.id !== pinned.id) ?? null
+    : items[0] ?? null;
+  const featured = [
+    pinned ? { item: pinned, label: "置顶公告" } : null,
+    latest ? { item: latest, label: "最新公告" } : null,
+  ].filter((entry): entry is { item: AnnouncementItem; label: string } => Boolean(entry));
+  const featuredIds = new Set(featured.map((entry) => entry.item.id));
+  const historyItems = items.filter((item) => !featuredIds.has(item.id));
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/35 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-sm font-medium text-[var(--foreground)]">公告栏</p>
+          <p className="text-xs leading-5 text-[var(--muted-foreground)]">
+            默认展示置顶公告和最新公告，向下滚动可回看过往公告。
+          </p>
+        </div>
+        <Badge>{items.length}</Badge>
+      </div>
+      <div className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
+        {loading && !items.length ? (
+          <p className="text-sm text-[var(--muted-foreground)]">正在加载公告...</p>
+        ) : null}
+        {hasError ? (
+          <p className="text-sm text-[var(--muted-foreground)]">暂时无法加载公告。</p>
+        ) : null}
+        {!loading && !hasError && !items.length ? (
+          <p className="text-sm text-[var(--muted-foreground)]">当前还没有公告。</p>
+        ) : null}
+        {featured.map((entry) => (
+          <article
+            key={`announcement-featured-${entry.item.id}-${entry.label}`}
+            className="rounded-2xl border border-[rgba(126,184,255,0.24)] bg-[var(--card)]/95 p-4"
+          >
+            <div className="flex items-center gap-2">
+              <Badge className="border-[rgba(11,92,173,0.2)] bg-[rgba(11,92,173,0.08)] text-[#0b5cad]">
+                {entry.label}
+              </Badge>
+              {entry.item.is_pinned ? <Badge>置顶</Badge> : null}
+            </div>
+            <p className="mt-3 text-sm font-semibold text-[var(--foreground)]">
+              {String(entry.item.title || (entry.item.is_pinned ? "置顶公告" : "更新公告")).trim()}
+            </p>
+            <p className="mt-2 text-sm leading-6 whitespace-pre-wrap break-words text-[var(--foreground)]">
+              {String(entry.item.summary || "暂无摘要").trim()}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-3 text-xs text-[var(--muted-foreground)]">
+              <span>{formatDate(entry.item.updated_at || entry.item.created_at || null)}</span>
+              <span>{entry.item.updated_by ? `发布人：${entry.item.updated_by}` : "系统发布"}</span>
+            </div>
+          </article>
+        ))}
+        {historyItems.length ? (
+          <div className="space-y-2">
+            <p className="px-1 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+              历史公告
+            </p>
+            {historyItems.map((item) => (
+              <article
+                key={`announcement-history-${item.id}`}
+                className="rounded-2xl border border-[var(--border)] bg-[var(--card)]/80 px-4 py-3"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-[var(--foreground)]">
+                    {String(item.title || (item.is_pinned ? "置顶公告" : "更新公告")).trim()}
+                  </p>
+                  {item.is_pinned ? <Badge>置顶</Badge> : null}
+                </div>
+                <p className="mt-2 text-xs leading-5 text-[var(--muted-foreground)]">
+                  {shortText(item.summary || "暂无摘要", 120)}
+                </p>
+                <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">
+                  {formatDate(item.updated_at || item.created_at || null)}
+                </p>
+              </article>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function LogPlatformConsole() {
   const { resolvedTheme, setTheme } = useTheme();
 
@@ -518,6 +624,8 @@ export function LogPlatformConsole() {
   const [busyLabel, setBusyLabel] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [health, setHealth] = useState<AnyRecord | null>(null);
+  const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
+  const [announcementStatus, setAnnouncementStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
 
   const [tasks, setTasks] = useState<AnyRecord[]>([]);
   const [selectedTaskUuid, setSelectedTaskUuid] = useState("");
@@ -533,9 +641,6 @@ export function LogPlatformConsole() {
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerPasswordConfirm, setRegisterPasswordConfirm] = useState("");
   const [registerNote, setRegisterNote] = useState("");
-  const [registerCode, setRegisterCode] = useState("");
-  const [registerVerificationToken, setRegisterVerificationToken] = useState("");
-  const [registerStep, setRegisterStep] = useState<"draft" | "code_sent" | "verified" | "submitted">("draft");
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
@@ -1149,14 +1254,14 @@ export function LogPlatformConsole() {
     }
   }
 
-  async function handleRequestCode() {
+  async function handleSubmitRegistration() {
     if (registerPassword !== registerPasswordConfirm) {
-      setNotice({ tone: "error", text: "两次输入的密码不一致。" });
+      setNotice({ tone: "error", text: "Passwords do not match." });
       return;
     }
     try {
-      await withBusy("正在发送验证码", () =>
-        platformRequest(apiBase, "/auth/register/request-code", {
+      await withBusy("Submitting registration", () =>
+        platformRequest(apiBase, "/auth/register", {
           token: null,
           method: "POST",
           body: {
@@ -1167,43 +1272,12 @@ export function LogPlatformConsole() {
           },
         }),
       );
-      setRegisterStep("code_sent");
-      setNotice({ tone: "success", text: "验证码已发送，请前往邮箱查收。" });
-    } catch (error) {
-      showError(error);
-    }
-  }
-
-  async function handleVerifyCode() {
-    try {
-      const response = await withBusy("正在验证邮箱", () =>
-        platformRequest<AnyRecord>(apiBase, "/auth/register/verify-email", {
-          token: null,
-          method: "POST",
-          body: { login_name: registerUsername.trim() || registerEmail.trim(), code: registerCode.trim() },
-        }),
-      );
-      setRegisterVerificationToken(String(response.verification_token || ""));
-      setRegisterStep("verified");
-      setNotice({ tone: "success", text: "邮箱验证通过，现在可以提交注册申请。" });
-    } catch (error) {
-      showError(error);
-    }
-  }
-
-  async function handleSubmitRegistration() {
-    try {
-      await withBusy("正在提交注册申请", () =>
-        platformRequest(apiBase, "/auth/register", {
-          token: null,
-          method: "POST",
-          body: { verification_token: registerVerificationToken },
-        }),
-      );
-      setRegisterVerificationToken("");
-      setRegisterCode("");
-      setRegisterStep("submitted");
-      setNotice({ tone: "success", text: "注册申请已提交，请等待管理员审核。" });
+      setRegisterUsername("");
+      setRegisterEmail("");
+      setRegisterPassword("");
+      setRegisterPasswordConfirm("");
+      setRegisterNote("");
+      setNotice({ tone: "success", text: "Registration request submitted. Waiting for admin review." });
     } catch (error) {
       showError(error);
     }
@@ -1577,20 +1651,6 @@ export function LogPlatformConsole() {
     }
   }
 
-  async function handleResendCode() {
-    try {
-      await withBusy("正在重新发送验证码", () =>
-        platformRequest(apiBase, "/auth/register/resend-code", {
-          token: null,
-          method: "POST",
-          body: { login_name: registerUsername.trim() || registerEmail.trim() },
-        }),
-      );
-      setNotice({ tone: "success", text: "验证码已重新发送，请检查邮箱。" });
-    } catch (error) {
-      showError(error);
-    }
-  }
 
   async function handleFindSimilarCases() {
     if (!selectedTaskUuid || !selectedErrorSignature) {
@@ -1902,6 +1962,32 @@ export function LogPlatformConsole() {
   }, [apiBase]);
 
   useEffect(() => {
+    let cancelled = false;
+    setAnnouncementStatus("loading");
+    void platformRequest<AnyRecord>(apiBase, "/announcements", {
+      token: null,
+      query: { limit: 24 },
+    })
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setAnnouncements(safeArray<AnnouncementItem>(result.items));
+        setAnnouncementStatus("ready");
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setAnnouncements([]);
+        setAnnouncementStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase]);
+
+  useEffect(() => {
     if (typeof window !== "undefined") {
       if (selectedTaskUuid) {
         window.localStorage.setItem(TASK_STORAGE_KEY, selectedTaskUuid);
@@ -2130,6 +2216,21 @@ export function LogPlatformConsole() {
         return activeTimelineFamilies.includes(family) && activeTimelineSeverities.includes(severity);
       })
     : [];
+
+  useEffect(() => {
+    if (!isAuthenticated || page !== "dashboard" || !selectedTaskUuid) {
+      return;
+    }
+    const runtimeStatus = String(statusData.status || "").toLowerCase();
+    if (!["uploaded", "queued", "processing", "running"].includes(runtimeStatus)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void Promise.all([loadDashboard(), loadSystemRuntime()]).catch(showError);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [isAuthenticated, page, selectedTaskUuid, statusData.status]);
+
   const errorFamilyRows = useMemo(() => {
     const groups = new Map<string, { label: string; description: string; value: number }>();
     errorItems.forEach((row) => {
@@ -2286,7 +2387,7 @@ export function LogPlatformConsole() {
   function renderLogin() {
     return (
       <div className="mx-auto max-w-xl space-y-6">
-        <SectionTitle title="登录" description="登录后即可访问日志任务、方案库、LLM 诊断和主动学习工作台。" />
+        <SectionTitle title="Registration" description="Fill in username, email, and password, then submit for admin review." />
         <Card>
           <CardContent className="pt-6">
             <form className="space-y-5" onSubmit={(event) => void handleLogin(event)}>
@@ -2316,7 +2417,7 @@ export function LogPlatformConsole() {
   function renderRegister() {
     return (
       <div className="mx-auto max-w-3xl space-y-6">
-        <SectionTitle title="注册申请" description="保持与 Streamlit 相同的三段式流程：发送验证码、邮箱验证、提交审核。" />
+        <SectionTitle title="Registration" description="Fill in username, email, and password, then submit for admin review." />
         <Card>
           <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
             <Field label="用户名">
@@ -2344,22 +2445,11 @@ export function LogPlatformConsole() {
                 <Textarea value={registerNote} onChange={(event) => setRegisterNote(event.target.value)} />
               </Field>
             </div>
-            <div className="lg:col-span-2">
-              <Field label={`验证码 / 当前状态: ${registerStep}`}>
-                <Input value={registerCode} onChange={(event) => setRegisterCode(event.target.value)} />
-              </Field>
-            </div>
             <div className="lg:col-span-2 flex flex-wrap gap-3">
-              <Button onClick={() => void handleRequestCode()}>发送验证码</Button>
-              <Button variant="secondary" onClick={() => void handleVerifyCode()}>
-                验证邮箱
-              </Button>
-              <Button variant="secondary" onClick={() => void handleResendCode()}>
-                重发验证码
-              </Button>
-              <Button variant="secondary" onClick={() => void handleSubmitRegistration()}>
-                提交注册
-              </Button>
+              <Button onClick={() => void handleSubmitRegistration()}>Submit registration</Button>
+            </div>
+            <div className="lg:col-span-2 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/40 px-4 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+              After submission, the account enters the admin review queue and can be used once approved.
             </div>
           </CardContent>
         </Card>
@@ -2409,6 +2499,7 @@ export function LogPlatformConsole() {
             helper="基于服务数据目录所在磁盘统计当前占用。"
           />
         </div>
+        <ProcessingProgressPanel status={statusData} />
         <Card>
           <CardContent className="space-y-4 pt-6">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -2516,30 +2607,30 @@ export function LogPlatformConsole() {
           maxHeight={520}
         />
         {selectedHistoryTask ? (
-          <>
-            <DetailListCard
-              title="历史任务详情"
-              description="在这里先确认任务是否需要继续查看，或直接执行删除。"
-              value={selectedHistoryTask}
-            />
-            <div className="flex flex-wrap gap-3">
-              <Button onClick={() => void handleApplyHistoryTask()}>设为当前任务</Button>
-              <Button
-                variant="danger"
-                onClick={() => {
-                  if (
-                    typeof window === "undefined" ||
-                    window.confirm(`确定要删除任务 ${selectedHistoryTask.task_uuid} 吗？该操作不可恢复。`)
-                  ) {
-                    void handleDeleteTask(String(selectedHistoryTask.task_uuid));
-                  }
-                }}
-              >
-                删除选中任务
-              </Button>
-            </div>
-          </>
-        ) : null}
+  <>
+    <DetailListCard
+      title="History Task Detail"
+      description="Review the selected history task before switching or deleting it."
+      value={selectedHistoryTask}
+    />
+    <div className="flex flex-wrap gap-3">
+      <Button onClick={() => void handleApplyHistoryTask()}>Set As Current Task</Button>
+      <Button
+        variant="danger"
+        onClick={() => {
+          if (
+            typeof window === "undefined" ||
+            window.confirm(`Delete task ${selectedHistoryTask.task_uuid}? This action cannot be undone.`)
+          ) {
+            void handleDeleteTask(String(selectedHistoryTask.task_uuid));
+          }
+        }}
+      >
+        Delete Selected Task
+      </Button>
+    </div>
+  </>
+) : null}
       </div>
     );
   }
@@ -2652,6 +2743,7 @@ export function LogPlatformConsole() {
         </Card>
         <SimpleLineChart
           title={`Cycle 总耗时趋势 (${performanceUnit})`}
+          key={`cycle-summary-${selectedTaskUuid}-${performanceUnit}-${cycleSummaryRows.length}`}
           rows={cycleSummaryRows}
           xKey="cycle_no"
           yKey="total_duration_value"
@@ -2730,6 +2822,8 @@ export function LogPlatformConsole() {
           title="按 Cycle / 全程查看各组件运动时间轴"
           rows={timelineRows}
           errors={filteredTimelineErrors}
+          orderMode={timelineTrackOrder === "cycle" ? "cycle" : "default"}
+          resetKey={`timeline-${selectedTaskUuid}-${timelineCycleNo || "all"}-${timelineTrackOrder}`}
         />
         {timelineShowDetails ? (
           <DataTable
@@ -2851,7 +2945,7 @@ export function LogPlatformConsole() {
             />
           );
         })}
-        <SimpleLineChart title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="cycle" yKey="duration_value" seriesKey="sub_step" />
+        <SimpleLineChart key={`substep-series-${selectedTaskUuid}-${parameterUnit}`} title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="cycle" yKey="duration_value" seriesKey="sub_step" />
         <SimpleLineChart title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="cycle" yKey="duration_value" seriesKey="metric_stage" />
         <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
           <input type="checkbox" checked={parameterShowMetricTable} onChange={(event) => setParameterShowMetricTable(event.target.checked)} />
@@ -3026,7 +3120,7 @@ export function LogPlatformConsole() {
                 <Select value={selectedHistoryIndex} onChange={(event) => setSelectedHistoryIndex(event.target.value)}>
                   {filteredHistoryRows.map((row, index) => (
                     <option key={`${row.normalized_signature}-${index}`} value={String(index)}>
-                      {`${index + 1}. ${row.normalized_signature || ""} | ${row.analysis_stage || "-"} | ${row.created_at || "-"}`}
+                      {`${index + 1}. ${row.normalized_signature || ""} | ${row.analysis_stage || "-"} | ${formatDate(typeof row.created_at === "string" ? row.created_at : null)}`}
                     </option>
                   ))}
                 </Select>
@@ -3623,10 +3717,82 @@ export function LogPlatformConsole() {
         </Card>
         <InfoTileGrid columns={4} items={[{ label: "未知簇总数", value: safeObject(localPreview.summary).unknown_clusters_total || 0 }, { label: "反馈记录总数", value: safeObject(localPreview.summary).feedback_records_total || 0 }, { label: "新规则建议", value: safeObject(localPreview.summary).new_rule_suggestions || 0 }, { label: "修正规则建议", value: safeObject(localPreview.summary).rule_fix_suggestions || 0 }]} />
         <TabBar tabs={[{ key: "localNew", label: "本地新规则建议" }, { key: "localFix", label: "本地修正规则建议" }, { key: "llmNew", label: "LLM 新规则建议" }, { key: "llmFix", label: "LLM 修正规则建议" }, { key: "patterns", label: "高频误判模式" }, { key: "yaml", label: "YAML 候选片段" }, { key: "reviews", label: "审核记录" }, { key: "files", label: "已写入建议文件" }, { key: "payload", label: "LLM 请求 / 响应" }]} active={rulesTab} onChange={setRulesTab} />
-        {rulesTab === "localNew" ? <><DataTable title="本地新规则建议" rows={localNewSuggestions} maxHeight={320} /><Field label="选择本地新规则建议"><Select value={selectedLocalNewSuggestionId} onChange={(event) => setSelectedLocalNewSuggestionId(event.target.value)}><option value="">自动选择首条</option>{localNewSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLocalNew ? <DetailListCard value={currentLocalNew} /> : null}{currentLocalNew ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLocalNew.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLocalNew.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLocalNew.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
-        {rulesTab === "localFix" ? <><DataTable title="本地修正规则建议" rows={localFixSuggestions} maxHeight={320} /><Field label="选择本地修正规则建议"><Select value={selectedLocalFixSuggestionId} onChange={(event) => setSelectedLocalFixSuggestionId(event.target.value)}><option value="">自动选择首条</option>{localFixSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLocalFix ? <DetailListCard value={currentLocalFix} /> : null}{currentLocalFix ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLocalFix.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLocalFix.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLocalFix.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
-        {rulesTab === "llmNew" ? <><DataTable title="LLM 新规则建议" rows={llmNewSuggestions} maxHeight={320} /><Field label="选择 LLM 新规则建议"><Select value={selectedLlmNewSuggestionId} onChange={(event) => setSelectedLlmNewSuggestionId(event.target.value)}><option value="">自动选择首条</option>{llmNewSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLlmNew ? <DetailListCard value={currentLlmNew} /> : null}{currentLlmNew ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLlmNew.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLlmNew.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLlmNew.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
-        {rulesTab === "llmFix" ? <><DataTable title="LLM 修正规则建议" rows={llmFixSuggestions} maxHeight={320} /><Field label="选择 LLM 修正规则建议"><Select value={selectedLlmFixSuggestionId} onChange={(event) => setSelectedLlmFixSuggestionId(event.target.value)}><option value="">自动选择首条</option>{llmFixSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}</Select></Field>{currentLlmFix ? <DetailListCard value={currentLlmFix} /> : null}{currentLlmFix ? <div className="flex flex-wrap gap-3"><Button onClick={() => void handleRuleReview("approved", String(currentLlmFix.suggestion_id || ""))}>通过</Button><Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLlmFix.suggestion_id || ""))}>退回修改</Button><Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLlmFix.suggestion_id || ""))}>拒绝</Button></div> : null}</> : null}
+        {rulesTab === "localNew" ? (
+          <>
+            <DataTable title="本地新规则建议" rows={localNewSuggestions} maxHeight={320} />
+            <Field label="选择本地新规则建议">
+              <Select value={selectedLocalNewSuggestionId} onChange={(event) => setSelectedLocalNewSuggestionId(event.target.value)}>
+                <option value="">自动选择首条</option>
+                {localNewSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}
+              </Select>
+            </Field>
+            {currentLocalNew ? <DetailListCard value={currentLocalNew} /> : null}
+            {currentLocalNew ? (
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => void handleRuleReview("approved", String(currentLocalNew.suggestion_id || ""))}>通过</Button>
+                <Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLocalNew.suggestion_id || ""))}>退回修改</Button>
+                <Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLocalNew.suggestion_id || ""))}>拒绝</Button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {rulesTab === "localFix" ? (
+          <>
+            <DataTable title="本地修正规则建议" rows={localFixSuggestions} maxHeight={320} />
+            <Field label="选择本地修正规则建议">
+              <Select value={selectedLocalFixSuggestionId} onChange={(event) => setSelectedLocalFixSuggestionId(event.target.value)}>
+                <option value="">自动选择首条</option>
+                {localFixSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}
+              </Select>
+            </Field>
+            {currentLocalFix ? <DetailListCard value={currentLocalFix} /> : null}
+            {currentLocalFix ? (
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => void handleRuleReview("approved", String(currentLocalFix.suggestion_id || ""))}>通过</Button>
+                <Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLocalFix.suggestion_id || ""))}>退回修改</Button>
+                <Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLocalFix.suggestion_id || ""))}>拒绝</Button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {rulesTab === "llmNew" ? (
+          <>
+            <DataTable title="LLM 新规则建议" rows={llmNewSuggestions} maxHeight={320} />
+            <Field label="选择 LLM 新规则建议">
+              <Select value={selectedLlmNewSuggestionId} onChange={(event) => setSelectedLlmNewSuggestionId(event.target.value)}>
+                <option value="">自动选择首条</option>
+                {llmNewSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}
+              </Select>
+            </Field>
+            {currentLlmNew ? <DetailListCard value={currentLlmNew} /> : null}
+            {currentLlmNew ? (
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => void handleRuleReview("approved", String(currentLlmNew.suggestion_id || ""))}>通过</Button>
+                <Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLlmNew.suggestion_id || ""))}>退回修改</Button>
+                <Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLlmNew.suggestion_id || ""))}>拒绝</Button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {rulesTab === "llmFix" ? (
+          <>
+            <DataTable title="LLM 修正规则建议" rows={llmFixSuggestions} maxHeight={320} />
+            <Field label="选择 LLM 修正规则建议">
+              <Select value={selectedLlmFixSuggestionId} onChange={(event) => setSelectedLlmFixSuggestionId(event.target.value)}>
+                <option value="">自动选择首条</option>
+                {llmFixSuggestions.map((item) => <option key={String(item.suggestion_id)} value={String(item.suggestion_id)}>{String(item.suggestion_id)}</option>)}
+              </Select>
+            </Field>
+            {currentLlmFix ? <DetailListCard value={currentLlmFix} /> : null}
+            {currentLlmFix ? (
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => void handleRuleReview("approved", String(currentLlmFix.suggestion_id || ""))}>通过</Button>
+                <Button variant="secondary" onClick={() => void handleRuleReview("needs_revision", String(currentLlmFix.suggestion_id || ""))}>退回修改</Button>
+                <Button variant="danger" onClick={() => void handleRuleReview("rejected", String(currentLlmFix.suggestion_id || ""))}>拒绝</Button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
         {rulesTab === "patterns" ? <DataTable title="高频误判模式" rows={[...safeArray(localPreview.high_frequency_misclassified_patterns), ...safeArray(llmResult.high_frequency_misclassified_patterns)]} maxHeight={320} /> : null}
         {rulesTab === "yaml" ? <CodePreview title="YAML 候选片段" code={JSON.stringify(localPreview.parser_rules_yaml_fragment || {}, null, 2)} maxHeight={420} /> : null}
         {rulesTab === "reviews" ? <DataTable title="审核记录" rows={ruleReviews} maxHeight={320} /> : null}
@@ -3758,9 +3924,9 @@ export function LogPlatformConsole() {
                           <CardTitle className="text-base">{item.key}</CardTitle>
                           <Badge>{envGroupFromKey(item.key)}</Badge>
                           {item.is_sensitive ? (
-                            <Badge className="bg-slate-100 text-slate-900">敏感字段</Badge>
+                            <Badge className="border-[rgba(69,128,212,0.22)] bg-[rgba(69,128,212,0.1)] text-[var(--foreground)]">敏感字段</Badge>
                           ) : null}
-                          <Badge className={item.is_modified ? "bg-amber-100 text-amber-900" : "bg-emerald-100 text-emerald-900"}>
+                          <Badge className={item.is_modified ? "border-[rgba(215,138,69,0.28)] bg-[rgba(215,138,69,0.12)] text-[#8a531e]" : "border-[rgba(102,191,255,0.28)] bg-[rgba(102,191,255,0.12)] text-[#164a7c]"}>
                             {item.is_modified ? "已修改" : "默认一致"}
                           </Badge>
                         </div>
@@ -3990,6 +4156,11 @@ export function LogPlatformConsole() {
               <p className="font-medium text-[var(--foreground)]">API Health</p>
               <p className="mt-2 text-[var(--muted-foreground)]">{String(health?.status || "unknown")}</p>
             </div>
+            <AnnouncementFeedCard
+              items={announcements}
+              loading={announcementStatus === "loading"}
+              hasError={announcementStatus === "error"}
+            />
             {isAuthenticated ? (
               <>
                 <Separator />

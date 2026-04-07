@@ -1,0 +1,49 @@
+side_tokens:
+  - A
+  - B
+  - A1
+  - A2
+  - B1
+  - B2
+
+filename_side_patterns:
+  - "(?:^|[_\\-.])(A\\d{0,2}|B\\d{0,2})(?=(?:[_\\-.]|$))"
+
+stage_patterns:
+  stage_key:
+    - "\\bStageKey\\s*[:=]\\s*([A-Za-z]\\d{0,2})\\b"
+  stage_name:
+    - "\\bStageName\\s*[:=]\\s*([A-Za-z]\\d{0,2})\\b"
+    - "\\bgroupName\\s*[:=]\\s*([A-Za-z]\\d{0,2})\\b"
+  workflow_stage:
+    - "\\b(?:Start\\s+optical\\s+CPAS\\s+Workflow\\s+For\\s+Stage|Workflow\\s+For\\s+Stage)\\s+([A-Za-z]\\d{0,2})\\b"
+    - "\\bFor\\s+Stage\\s+([A-Za-z]\\d{0,2})\\b"
+  source_chuck:
+    - "\\bSourceChuck\\s*[:=]\\s*([A-Za-z]\\d{0,2}-\\d+)\\b"
+    - "\\b(?:TargetChuck|ChuckNo|Chuck)\\s*[:=]\\s*([A-Za-z]\\d{0,2}-\\d+)\\b"
+  slot_no:
+    - "\\b(?:SlotNo|SourceSlot|TargetSlot|Slot)\\s*[:=]\\s*([A-Za-z0-9_-]+)\\b"
+
+context_side_patterns:
+  - "\\b(?:request imager|hold imager|transfer command|set transfer slide data|update slide position|move slide|transfer slide)\\b[^\\n]{0,120}?\\b(A\\d{0,2}|B\\d{0,2})\\b"
+  - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,120}?\\b(?:request imager|hold imager|transfer command|set transfer slide data|update slide position|move slide|transfer slide)\\b"
+  - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,80}?\\bcpas\\s+reagent\\s+priming\\b"
+  - "\\bcpas\\s+reagent\\s+priming\\b[^\\n]{0,80}?\\b(A\\d{0,2}|B\\d{0,2})\\b"
+  - "\\bSpray[-_/ ](A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,160}?\\b(?:Fluidic|status|[A-Za-z0-9_]+\\.py)\\b"
+  - "(?<!\\S)(A\\d{1,2}|B\\d{1,2})(?!\\S)"
+
+chip_patterns:
+  - "\\b(?:SlideUniqueNo|slide\\s*unique\\s*no|slide[_\\s-]?[NF]?|chip[_\\s-]?name|slide\\s*name|flowcell\\s*id)\\s*[:=, ]+(\\d{2}\\.M\\d_[A-Z]{2}_(?:HLAA|HLAB)[A-Za-z0-9]+)\\b"
+  - "\\b(?:SlideUniqueNo|slide\\s*unique\\s*no|slide[_\\s-]?[NF]?|chip[_\\s-]?name|slide\\s*name|flowcell\\s*id)\\s*[:=, ]+((?:HLAA|HLAB)[A-Za-z0-9]{4,})\\b"
+  - "\\b(\\d{2}\\.M\\d_[A-Z]{2}_(?:HLAA|HLAB)[A-Za-z0-9]+)\\b"
+  - "\\b((?:HLAA|HLAB)[A-Za-z0-9]{4,})\\b"
+
+chip_position_patterns:
+  near:
+    - "\\b(?:near|Near)\\b"
+    - "\\bchip\\s*position\\s*[:=]\\s*N(?:ear)?\\b"
+  far:
+    - "\\b(?:far|Far)\\b"
+    - "\\bchip\\s*position\\s*[:=]\\s*F(?:ar)?\\b"
+
+chip_position_by_chip_fragment: {}

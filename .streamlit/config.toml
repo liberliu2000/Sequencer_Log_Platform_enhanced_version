@@ -5,3 +5,7 @@ backgroundColor = "#F7FBFF"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#021024"
 font = "sans serif"
+
+[server]
+# Streamlit requires a numeric ceiling here, so use a very large value.
+maxUploadSize = 10240

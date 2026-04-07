@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 
 from app.parsers.base import BaseParser
-from app.schemas.common import RawLogRecord
+from app.schemas.common import build_raw_log_record
 from app.utils.files import detect_encoding
 
 
@@ -26,8 +26,8 @@ class CsvWorkflowParser(BaseParser):
             score += 30
         return score
 
-    def parse(self, path: Path):
-        encoding = detect_encoding(path)
+    def parse(self, path: Path, *, encoding: str | None = None):
+        encoding = encoding or detect_encoding(path)
         with path.open("r", encoding=encoding, errors="replace", newline="") as f:
             reader = csv.reader(f)
             for row in reader:
@@ -36,7 +36,7 @@ class CsvWorkflowParser(BaseParser):
                 msg = ",".join(row[5:]).strip() if len(row) > 5 else row[-1].strip()
                 if not msg:
                     continue
-                yield RawLogRecord(
+                yield build_raw_log_record(
                     source_file=path.name,
                     parser_name=self.name,
                     raw_text=",".join(row),

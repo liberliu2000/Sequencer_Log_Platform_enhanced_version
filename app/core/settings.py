@@ -45,21 +45,32 @@ class Settings(BaseSettings):
 
     # 并行/调度
     enable_parallel_parse: bool = True
+    enable_process_pool: bool = True
+    enable_streaming_parse: bool = True
     enable_threaded_prescan: bool = True
     enable_multiprocess_parse: bool = True
     enable_staged_parallel_pipeline: bool = True
-    max_parallel_cpu_cores: int = 4
-    max_thread_workers: int = 8
-    max_process_workers: int = 4
-    prescan_thread_workers: int = 8
-    queue_dispatch_workers: int = 2
+    max_workers: int = 32
+    file_level_workers: int = 16
+    max_parallel_cpu_cores: int = 64
+    max_thread_workers: int = 48
+    max_process_workers: int = 32
+    prescan_thread_workers: int = 32
+    queue_dispatch_workers: int = 8
+    queue_maxsize: int = 128
     parallel_min_files: int = 3
     file_scan_batch_size: int = 200
-    parse_batch_size: int = 16
-    load_batch_size: int = 32
-    metrics_batch_size: int = 64
+    parse_batch_size: int = 64
+    streaming_parse_chunk_bytes: int = 16777216
+    max_parse_chunks_per_file: int = 64
+    load_batch_size: int = 128
+    metrics_batch_size: int = 256
+    db_batch_size: int = 5000
     failed_worker_retries: int = 1
     sqlite_write_strategy: Literal["main_process_only"] = "main_process_only"
+    progress_persist_interval_ms: int = 1500
+    progress_persist_percent_step: int = 2
+    unknown_log_max_scan_bytes: int = 4194304
 
     # 前端/数据准备性能
     enable_service_cache: bool = True
@@ -68,11 +79,13 @@ class Settings(BaseSettings):
     front_page_max_rows: int = 100
     table_page_default_size: int = 100
     table_page_max_size: int = 500
-    lightweight_mode: bool = True
+    lightweight_mode: bool = False
     ui_auto_refresh_seconds: int = 5
     performance_log_enabled: bool = True
-    system_memory_soft_limit_percent: int = 88
-    system_memory_soft_reserve_mb: int = 2048
+    task_progress_history_limit: int = 48
+    system_memory_soft_limit_percent: int = 96
+    system_memory_soft_reserve_mb: int = 4096
+    system_cpu_soft_limit_percent: int = 92
     system_memory_guard_wait_seconds: int = 5
 
     default_time_rounding: Literal["truncate", "round"] = "truncate"
@@ -172,6 +185,10 @@ class Settings(BaseSettings):
     @property
     def error_rules_path(self) -> Path:
         return BASE_DIR / "config" / "error_rules.yaml"
+
+    @property
+    def side_rules_path(self) -> Path:
+        return BASE_DIR / "config" / "side_rules.yaml"
 
     @property
     def prompt_templates_path(self) -> Path:

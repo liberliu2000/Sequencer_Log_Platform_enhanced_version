@@ -42,6 +42,10 @@ def _create_indexes_if_possible(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_task_audit_logs_task_id ON task_audit_logs(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_audit_logs_task_uuid ON task_audit_logs(task_uuid)",
         "CREATE INDEX IF NOT EXISTS idx_task_audit_logs_created_at ON task_audit_logs(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_normalized_events_task_side ON normalized_events(task_id, side_scope)",
+        "CREATE INDEX IF NOT EXISTS idx_normalized_events_task_chip ON normalized_events(task_id, chip_name)",
+        "CREATE INDEX IF NOT EXISTS idx_step_summaries_task_side ON step_summaries(task_id, side_scope)",
+        "CREATE INDEX IF NOT EXISTS idx_parameter_results_task_side ON parameter_results(task_id, side_scope)",
         "CREATE INDEX IF NOT EXISTS idx_llm_results_task_sig ON llm_analysis_results(task_id, normalized_signature)",
         "CREATE INDEX IF NOT EXISTS idx_solution_records_review_status ON solution_records(review_status)",
         "CREATE INDEX IF NOT EXISTS idx_solution_records_submitter ON solution_records(submitter)",
@@ -55,6 +59,8 @@ def _create_indexes_if_possible(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)",
         "CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users(email_verified)",
         "CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_announcements_updated_at ON announcements(updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_announcements_pinned ON announcements(is_pinned)",
         "CREATE INDEX IF NOT EXISTS idx_email_codes_expires ON email_verification_codes(expires_at)",
         "CREATE INDEX IF NOT EXISTS idx_registration_challenges_email ON registration_challenges(email)",
         "CREATE INDEX IF NOT EXISTS idx_registration_challenges_verified ON registration_challenges(verified_at)",
@@ -159,9 +165,38 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
         ("cycle_infer_method", "VARCHAR(64)"),
         ("cycle_infer_confidence", "VARCHAR(16)"),
         ("cycle_infer_reason", "VARCHAR(128)"),
+        ("instrument_scope", "VARCHAR(128)"),
+        ("side_scope", "VARCHAR(32)"),
+        ("side_group", "VARCHAR(32)"),
+        ("chip_position", "VARCHAR(32)"),
+        ("chuck_no", "VARCHAR(32)"),
+        ("slot_no", "VARCHAR(32)"),
+        ("stage_key", "VARCHAR(32)"),
+        ("side_confidence", "FLOAT"),
+        ("side_evidence", "TEXT"),
     ]
     step_summary_columns = [
         ("parameter_name", "VARCHAR(64)"),
+        ("instrument_scope", "VARCHAR(128)"),
+        ("side_scope", "VARCHAR(32)"),
+        ("side_group", "VARCHAR(32)"),
+        ("chip_position", "VARCHAR(32)"),
+        ("chuck_no", "VARCHAR(32)"),
+        ("slot_no", "VARCHAR(32)"),
+        ("stage_key", "VARCHAR(32)"),
+        ("side_confidence", "FLOAT"),
+        ("side_evidence", "TEXT"),
+    ]
+    parameter_result_columns = [
+        ("instrument_scope", "VARCHAR(128)"),
+        ("side_scope", "VARCHAR(32)"),
+        ("side_group", "VARCHAR(32)"),
+        ("chip_position", "VARCHAR(32)"),
+        ("chuck_no", "VARCHAR(32)"),
+        ("slot_no", "VARCHAR(32)"),
+        ("stage_key", "VARCHAR(32)"),
+        ("side_confidence", "FLOAT"),
+        ("side_evidence", "TEXT"),
     ]
 
     if _has_table(inspector, "upload_tasks"):
@@ -184,6 +219,11 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
         added = _add_columns_if_missing(engine, "step_summaries", step_summary_columns)
         if added:
             result["added_columns"]["step_summaries"] = added
+            result["migrated"] = True
+    if _has_table(inspector, "parameter_results"):
+        added = _add_columns_if_missing(engine, "parameter_results", parameter_result_columns)
+        if added:
+            result["added_columns"]["parameter_results"] = added
             result["migrated"] = True
 
     _create_indexes_if_possible(engine)

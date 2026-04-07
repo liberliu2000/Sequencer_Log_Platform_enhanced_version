@@ -143,37 +143,18 @@ def render_root_console(settings: Settings) -> str:
         </div>
         <div class="auth-grid">
           <div class="subpanel">
-            <h4>登录</h4>
-            <form id="loginForm" class="form-grid">
-              <label>用户名或邮箱<input id="loginName" autocomplete="username" /></label>
-              <label>密码<input id="loginPassword" type="password" autocomplete="current-password" /></label>
-              <div class="button-row">
-                <button type="submit">登录系统</button>
-                <button id="logoutButton" class="ghost" type="button">退出登录</button>
-              </div>
-            </form>
-          </div>
-          <div class="subpanel">
-            <h4>注册</h4>
+            <h4>注册账号</h4>
             <form id="registerStartForm" class="form-grid">
               <label>用户名<input id="registerUsername" /></label>
               <label>邮箱<input id="registerEmail" type="email" /></label>
               <label>密码<input id="registerPassword" type="password" /></label>
               <label>确认密码<input id="registerPasswordConfirm" type="password" /></label>
-              <label>注册说明<textarea id="registerNote" rows="3"></textarea></label>
+              <label>注册备注（可选）<textarea id="registerNote" rows="3" placeholder="可填写部门、使用场景或补充说明"></textarea></label>
               <div class="button-row">
-                <button type="submit">发送验证码</button>
+                <button type="submit">提交注册申请</button>
               </div>
             </form>
-            <form id="registerVerifyForm" class="form-grid compact-gap">
-              <label>登录名<input id="verifyLoginName" /></label>
-              <label>验证码<input id="verifyCode" /></label>
-              <div class="button-row">
-                <button type="submit">验证邮箱</button>
-                <button id="resendCodeButton" class="ghost" type="button">重发验证码</button>
-                <button id="completeRegisterButton" class="ghost" type="button">提交注册</button>
-              </div>
-            </form>
+            <p class="inline-message">提交后会进入管理员审核队列，审核通过后即可使用该账号登录。</p>
           </div>
           <div class="subpanel">
             <h4>修改密码</h4>

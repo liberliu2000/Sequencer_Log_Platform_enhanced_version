@@ -1,6 +1,8 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
+const BEIJING_TIMEZONE = "Asia/Shanghai";
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -10,7 +12,22 @@ export function formatDate(value?: string | null) {
     return "未记录";
   }
 
-  const date = new Date(value);
+  const normalized = value.includes("T") ? value : value.replace(" ", "T");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const date = new Date(`${normalized}T00:00:00Z`);
+    if (!Number.isNaN(date.getTime())) {
+      return new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: BEIJING_TIMEZONE,
+      }).format(date);
+    }
+  }
+  const hasTimezone = /[zZ]$|[+\-]\d{2}:\d{2}$/.test(normalized);
+  const date = new Date(hasTimezone ? normalized : `${normalized}Z`);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
@@ -21,6 +38,7 @@ export function formatDate(value?: string | null) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: BEIJING_TIMEZONE,
   }).format(date);
 }
 

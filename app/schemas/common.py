@@ -42,7 +42,14 @@ class NormalizedEvent(BaseModel):
     raw_text: str
     cycle_no: int | None = None
     sub_step: str | None = None
+    instrument_scope: str | None = None
+    side_scope: str | None = None
+    side_group: str | None = None
     chip_name: str | None = None
+    chip_position: str | None = None
+    chuck_no: str | None = None
+    slot_no: str | None = None
+    stage_key: str | None = None
     stage_name: str | None = None
     board_name: str | None = None
     event_kind: str | None = None
@@ -58,12 +65,23 @@ class NormalizedEvent(BaseModel):
     cycle_infer_method: str | None = None
     cycle_infer_confidence: str | None = None
     cycle_infer_reason: str | None = None
+    side_confidence: float | None = None
+    side_evidence: dict[str, Any] = Field(default_factory=dict)
     extra_json: dict[str, Any] = Field(default_factory=dict)
 
 
 class CycleSummary(BaseModel):
     cycle_no: int | None = None
+    instrument_scope: str | None = None
+    side_scope: str | None = None
+    side_group: str | None = None
     chip_name: str | None = None
+    chip_position: str | None = None
+    chuck_no: str | None = None
+    slot_no: str | None = None
+    stage_key: str | None = None
+    side_confidence: float | None = None
+    side_evidence: dict[str, Any] = Field(default_factory=dict)
     total_duration_ms: float | None = None
     started_at: int | None = None
     ended_at: int | None = None
@@ -74,7 +92,14 @@ class StepSummary(BaseModel):
     parameter_name: str | None = None
     sub_step: str
     component: str | None = None
+    instrument_scope: str | None = None
+    side_scope: str | None = None
+    side_group: str | None = None
     chip_name: str | None = None
+    chip_position: str | None = None
+    chuck_no: str | None = None
+    slot_no: str | None = None
+    stage_key: str | None = None
     start_epoch_ms: int | None = None
     end_epoch_ms: int | None = None
     duration_ms: float | None = None
@@ -82,6 +107,8 @@ class StepSummary(BaseModel):
     is_over_threshold: bool = False
     start_time_text: str | None = None
     end_time_text: str | None = None
+    side_confidence: float | None = None
+    side_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class ParameterResult(BaseModel):
@@ -89,7 +116,14 @@ class ParameterResult(BaseModel):
     parameter_display_name: str
     cycle: int | None = None
     slide: str | None = None
+    instrument_scope: str | None = None
+    side_scope: str | None = None
+    side_group: str | None = None
     chip_name: str | None = None
+    chip_position: str | None = None
+    chuck_no: str | None = None
+    slot_no: str | None = None
+    stage_key: str | None = None
     duration_seconds: float | None = None
     duration_ms: float | None = None
     start_time: str | None = None
@@ -104,6 +138,8 @@ class ParameterResult(BaseModel):
     component: str | None = None
     start_event_id: int | None = None
     end_event_id: int | None = None
+    side_confidence: float | None = None
+    side_evidence: dict[str, Any] = Field(default_factory=dict)
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -200,3 +236,11 @@ class DashboardSummary(BaseModel):
     unique_error_count: int
     top_errors: list[dict[str, Any]]
     component_distribution: list[dict[str, Any]]
+
+
+def build_raw_log_record(**kwargs: Any) -> RawLogRecord:
+    return RawLogRecord.model_construct(**kwargs)
+
+
+def build_normalized_event(**kwargs: Any) -> NormalizedEvent:
+    return NormalizedEvent.model_construct(**kwargs)

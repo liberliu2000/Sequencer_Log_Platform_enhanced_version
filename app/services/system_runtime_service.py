@@ -48,15 +48,17 @@ class SystemRuntimeService:
 
     def current_policy(self) -> dict[str, Any]:
         settings = get_settings()
-        limit_percent = max(0, min(int(settings.system_memory_soft_limit_percent), 98))
-        reserve_mb = max(0, int(settings.system_memory_soft_reserve_mb))
+        memory_limit_percent = max(0, min(int(settings.system_memory_soft_limit_percent), 98))
+        memory_reserve_mb = max(0, int(settings.system_memory_soft_reserve_mb))
+        cpu_limit_percent = max(0, min(int(settings.system_cpu_soft_limit_percent), 100))
         guard_wait_seconds = max(2, int(settings.system_memory_guard_wait_seconds))
         return {
-            "memory_soft_limit_percent": limit_percent,
-            "memory_soft_reserve_mb": reserve_mb,
+            "memory_soft_limit_percent": memory_limit_percent,
+            "memory_soft_reserve_mb": memory_reserve_mb,
+            "cpu_soft_limit_percent": cpu_limit_percent,
             "guard_wait_seconds": guard_wait_seconds,
             "blocks_new_tasks_only": True,
-            "policy_note": "达到阈值后只延迟新任务调度，不会中断正在运行的分析任务。",
+            "policy_note": "When CPU or memory pressure is high, new task dispatch is delayed but running tasks keep going.",
         }
 
     def current_snapshot(self) -> dict[str, Any]:
@@ -65,7 +67,7 @@ class SystemRuntimeService:
         memory = self._read_memory()
         disk = self._read_disk(Path(settings.data_dir))
         policy = self.current_policy()
-        guard = self.dispatch_guard(memory=memory, policy=policy)
+        guard = self.dispatch_guard(cpu=cpu, memory=memory, policy=policy)
         return {
             "collected_at": datetime.utcnow().isoformat(),
             "cpu": cpu,
@@ -78,37 +80,89 @@ class SystemRuntimeService:
     def dispatch_guard(
         self,
         *,
+        cpu: dict[str, Any] | None = None,
         memory: dict[str, Any] | None = None,
         policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        cpu = cpu or self._read_cpu()
         memory = memory or self._read_memory()
         policy = policy or self.current_policy()
-        limit_percent = int(policy.get("memory_soft_limit_percent") or 0)
-        reserve_mb = int(policy.get("memory_soft_reserve_mb") or 0)
+        memory_limit_percent = int(policy.get("memory_soft_limit_percent") or 0)
+        memory_reserve_mb = int(policy.get("memory_soft_reserve_mb") or 0)
+        cpu_limit_percent = int(policy.get("cpu_soft_limit_percent") or 0)
         wait_seconds = int(policy.get("guard_wait_seconds") or 5)
 
         reasons: list[str] = []
-        current_percent = memory.get("percent")
+        current_memory_percent = memory.get("percent")
         available_mb = memory.get("available_mb")
+        cpu_percent = cpu.get("percent")
 
-        if limit_percent > 0 and current_percent is not None and float(current_percent) >= limit_percent:
-            reasons.append(f"当前内存占用 {current_percent}% 已达到软上限 {limit_percent}%")
-        if reserve_mb > 0 and available_mb is not None and float(available_mb) <= reserve_mb:
-            reasons.append(f"当前剩余可用内存 {available_mb} MB，低于保留阈值 {reserve_mb} MB")
+        if (
+            memory_limit_percent > 0
+            and current_memory_percent is not None
+            and float(current_memory_percent) >= memory_limit_percent
+        ):
+            reasons.append(
+                f"memory usage {current_memory_percent}% reached the soft limit {memory_limit_percent}%"
+            )
+        if memory_reserve_mb > 0 and available_mb is not None and float(available_mb) <= memory_reserve_mb:
+            reasons.append(
+                f"available memory {available_mb} MB is below the reserved threshold {memory_reserve_mb} MB"
+            )
+        if cpu_limit_percent > 0 and cpu_percent is not None and float(cpu_percent) >= cpu_limit_percent:
+            reasons.append(f"CPU usage {cpu_percent}% reached the soft limit {cpu_limit_percent}%")
 
         blocked = bool(reasons)
         return {
             "blocked": blocked,
             "dispatch_allowed": not blocked,
             "reasons": reasons,
-            "summary": "；".join(reasons) if reasons else "资源状态允许继续调度新任务。",
+            "summary": "; ".join(reasons)
+            if reasons
+            else "System resources are healthy enough to continue dispatching new tasks.",
             "guard_wait_seconds": wait_seconds,
+            "cpu_percent": cpu_percent,
+            "memory_percent": current_memory_percent,
             "available_headroom_percent": None
-            if current_percent is None or limit_percent <= 0
-            else _round(limit_percent - float(current_percent)),
+            if current_memory_percent is None or memory_limit_percent <= 0
+            else _round(memory_limit_percent - float(current_memory_percent)),
             "available_headroom_mb": None
-            if available_mb is None or reserve_mb <= 0
-            else _round(float(available_mb) - reserve_mb),
+            if available_mb is None or memory_reserve_mb <= 0
+            else _round(float(available_mb) - memory_reserve_mb),
+            "available_cpu_headroom_percent": None
+            if cpu_percent is None or cpu_limit_percent <= 0
+            else _round(cpu_limit_percent - float(cpu_percent)),
+        }
+
+    def adaptive_cpu_allocation(
+        self,
+        requested_cpu_cores: int | None,
+        available_cpu_count: int,
+        configured_max: int,
+    ) -> dict[str, Any]:
+        logical_cores = max(1, int(available_cpu_count or os.cpu_count() or 1))
+        requested = max(1, int(requested_cpu_cores or configured_max or 1))
+        requested = min(requested, logical_cores, max(1, int(configured_max or 1)))
+
+        snapshot = self.current_snapshot()
+        guard = snapshot.get("guard", {})
+        cpu_percent = ((snapshot.get("cpu") or {}).get("percent"))
+        cpu_limit = ((snapshot.get("policy") or {}).get("cpu_soft_limit_percent")) or 0
+
+        recommended = requested
+        reason = "requested"
+        if guard.get("blocked"):
+            recommended = 1
+            reason = "system_guard"
+        elif cpu_percent is not None and cpu_limit and float(cpu_percent) >= max(60.0, float(cpu_limit) - 10.0):
+            recommended = max(1, min(requested, requested // 2 or 1))
+            reason = "cpu_pressure"
+
+        return {
+            "requested_cpu_cores": requested,
+            "recommended_cpu_cores": recommended,
+            "reason": reason,
+            "snapshot": snapshot,
         }
 
     def update_memory_policy(
@@ -120,14 +174,14 @@ class SystemRuntimeService:
     ) -> dict[str, Any]:
         if memory_soft_limit_percent is not None:
             if int(memory_soft_limit_percent) < 50 or int(memory_soft_limit_percent) > 98:
-                raise ValueError("memory_soft_limit_percent 必须在 50 到 98 之间。")
+                raise ValueError("memory_soft_limit_percent must be between 50 and 98")
             self.env_service.update_item(
                 "SYSTEM_MEMORY_SOFT_LIMIT_PERCENT",
                 str(int(memory_soft_limit_percent)),
             )
         if memory_soft_reserve_mb is not None:
             if int(memory_soft_reserve_mb) < 0 or int(memory_soft_reserve_mb) > 262144:
-                raise ValueError("memory_soft_reserve_mb 必须在 0 到 262144 之间。")
+                raise ValueError("memory_soft_reserve_mb must be between 0 and 262144")
             self.env_service.update_item(
                 "SYSTEM_MEMORY_SOFT_RESERVE_MB",
                 str(int(memory_soft_reserve_mb)),

@@ -12,9 +12,8 @@ PUBLIC_API_PREFIXES = {
     "/api/v1/health",
     "/api/v1/auth/login",
     "/api/v1/auth/register",
-    "/api/v1/auth/register/request-code",
-    "/api/v1/auth/register/resend-code",
-    "/api/v1/auth/register/verify-email",
+    "/api/v1/auth/reset-password",
+    "/api/v1/announcements",
 }
 
 

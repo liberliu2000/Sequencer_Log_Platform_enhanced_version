@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -14,6 +15,7 @@ from app.models.db_models import (
     ErrorClusterModel,
     LLMAnalysisResultModel,
     NormalizedEventModel,
+    ParameterResultModel,
     StepSummaryModel,
     TaskAuditLogModel,
     UploadTaskModel,
@@ -85,6 +87,9 @@ class TaskRepository:
                 mapping = {key: row.get(key) for key in field_names if key in row}
             else:
                 mapping = {key: getattr(row, key, None) for key in field_names}
+            for key, value in list(mapping.items()):
+                if isinstance(value, (dict, list)) and (key.endswith("_json") or key.endswith("_evidence")):
+                    mapping[key] = json.dumps(value, ensure_ascii=False, default=str)
             mapping["task_id"] = task_id
             yield mapping
 
@@ -154,6 +159,7 @@ class TaskRepository:
         message: str | None = None,
         file_count: int | None = None,
         queue_position: int | None = None,
+        audit: bool = True,
     ) -> None:
         task = self.db.get(UploadTaskModel, task_id)
         if not task:
@@ -171,7 +177,7 @@ class TaskRepository:
         if queue_position is not None:
             task.queue_position = queue_position
         task.updated_at = datetime.utcnow()
-        if current_stage or message:
+        if audit and (current_stage or message):
             self.db.add(
                 TaskAuditLogModel(
                     task_id=task.id,
@@ -285,6 +291,21 @@ class TaskRepository:
             self.db.execute(insert(ErrorClusterModel), batch)
         self.db.commit()
 
+    def replace_parameter_results(
+        self,
+        task_id: int,
+        rows: Iterable[ParameterResultModel | dict[str, Any]],
+        batch_size: int = 500,
+    ) -> None:
+        self.db.execute(delete(ParameterResultModel).where(ParameterResultModel.task_id == task_id))
+        field_names = tuple(column.name for column in ParameterResultModel.__table__.columns if column.name != "id")
+        for batch in self._iter_chunks(
+            self._iter_insert_mappings(rows, task_id=task_id, field_names=field_names),
+            batch_size,
+        ):
+            self.db.execute(insert(ParameterResultModel), batch)
+        self.db.commit()
+
     def save_llm_result(self, row: LLMAnalysisResultModel) -> None:
         self.db.add(row)
         self.db.commit()
@@ -318,6 +339,7 @@ class TaskRepository:
 
         self.db.query(LLMAnalysisResultModel).filter(LLMAnalysisResultModel.task_id == task_id).delete()
         self.db.query(ErrorClusterModel).filter(ErrorClusterModel.task_id == task_id).delete()
+        self.db.query(ParameterResultModel).filter(ParameterResultModel.task_id == task_id).delete()
         self.db.query(StepSummaryModel).filter(StepSummaryModel.task_id == task_id).delete()
         self.db.query(NormalizedEventModel).filter(NormalizedEventModel.task_id == task_id).delete()
         self.db.query(TaskAuditLogModel).filter(TaskAuditLogModel.task_id == task_id).delete()

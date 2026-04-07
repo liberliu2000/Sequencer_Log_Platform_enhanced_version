@@ -55,8 +55,6 @@ npm run build
 前端默认对接现有 FastAPI 接口：
 
 - `POST /api/v1/auth/login`
-- `POST /api/v1/auth/register/request-code`
-- `POST /api/v1/auth/register/verify-email`
 - `POST /api/v1/auth/register`
 - `GET /api/v1/admin/users`
 - `POST /api/v1/admin/users/{id}/status`

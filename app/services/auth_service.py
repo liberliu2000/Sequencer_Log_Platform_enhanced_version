@@ -4,20 +4,18 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.security import (
     hash_password,
     hash_session_token,
-    hash_verification_code,
     issue_session_token,
-    issue_verification_code,
     utcnow,
     verify_password,
 )
 from app.core.settings import get_settings
-from app.models.db_models import RegistrationChallengeModel, UserModel, UserSessionModel
-from app.services.email_service import EmailDeliveryError, EmailService
+from app.models.db_models import UserModel, UserSessionModel
 
 
 USER_STATUS_PENDING_VERIFICATION = "pending_verification"
@@ -39,7 +37,6 @@ class AuthService:
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
-        self.email_service = EmailService()
 
     def serialize_user(self, user: UserModel) -> dict[str, Any]:
         return {
@@ -84,15 +81,14 @@ class AuthService:
         )
         return self.db.scalar(stmt)
 
-    def find_registration_challenge(self, login_name: str) -> RegistrationChallengeModel | None:
-        normalized = str(login_name or "").strip().lower()
-        if not normalized:
+    def find_user_by_username_and_email(self, *, username: str, email: str) -> UserModel | None:
+        normalized_username = str(username or "").strip().lower()
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_username or not normalized_email:
             return None
-        stmt = select(RegistrationChallengeModel).where(
-            or_(
-                func.lower(RegistrationChallengeModel.username) == normalized,
-                func.lower(RegistrationChallengeModel.email) == normalized,
-            )
+        stmt = select(UserModel).where(
+            func.lower(UserModel.username) == normalized_username,
+            func.lower(UserModel.email) == normalized_email,
         )
         return self.db.scalar(stmt)
 
@@ -103,6 +99,23 @@ class AuthService:
         return user
 
     def start_registration(
+        self,
+        *,
+        username: str,
+        password: str,
+        email: str,
+        registration_note: str | None = None,
+        request_ip: str | None = None,
+    ) -> dict[str, Any]:
+        return self.register_user(
+            username=username,
+            password=password,
+            email=email,
+            registration_note=registration_note,
+            request_ip=request_ip,
+        )
+
+    def register_user(
         self,
         *,
         username: str,
@@ -126,157 +139,20 @@ class AuthService:
         if existing_email:
             raise AuthError("邮箱已存在。")
 
-        challenge = self.find_registration_challenge(username) or self.find_registration_challenge(email)
         now = utcnow()
-        if challenge is None:
-            challenge = RegistrationChallengeModel(
-                username=username,
-                email=email,
-                password_hash=hash_password(password),
-                registration_note=str(registration_note or "").strip() or None,
-                code_hash="pending",
-                expires_at=now,
-                request_ip=request_ip,
-                resend_count=0,
-                attempt_count=0,
-                created_at=now,
-                updated_at=now,
-            )
-            self.db.add(challenge)
-            self.db.flush()
-        else:
-            if challenge.consumed_at is not None:
-                challenge.consumed_at = None
-            challenge.username = username
-            challenge.email = email
-            challenge.password_hash = hash_password(password)
-            challenge.registration_note = str(registration_note or "").strip() or None
-            challenge.request_ip = request_ip
-            challenge.updated_at = now
-
-        self._assert_registration_resend_allowed(challenge)
-        code = issue_verification_code()
-        challenge.code_hash = hash_verification_code(challenge.id, code)
-        challenge.expires_at = now + timedelta(minutes=self.settings.auth_verification_code_minutes)
-        challenge.last_sent_at = now
-        challenge.resend_count = int(challenge.resend_count or 0) + 1
-        challenge.attempt_count = 0
-        challenge.verified_at = None
-        challenge.verification_token_hash = None
-        challenge.verification_token_expires_at = None
-        try:
-            self.email_service.send_verification_code(
-                recipient=challenge.email,
-                username=challenge.username,
-                code=code,
-                expires_minutes=self.settings.auth_verification_code_minutes,
-            )
-        except EmailDeliveryError:
-            self.db.rollback()
-            raise
-        self.db.commit()
-        return {
-            "status": "verification_sent",
-            "login_name": challenge.username,
-            "email": challenge.email,
-            "verification_expires_at": challenge.expires_at.isoformat() if challenge.expires_at else None,
-        }
-
-    def resend_verification_code(self, *, login_name: str, request_ip: str | None = None) -> dict[str, Any]:
-        challenge = self.find_registration_challenge(login_name)
-        if not challenge or challenge.consumed_at is not None:
-            raise AuthError("注册验证记录不存在。")
-        if challenge.verified_at is not None:
-            raise AuthError("邮箱已验证，请继续提交注册申请。")
-
-        self._assert_registration_resend_allowed(challenge)
-        now = utcnow()
-        code = issue_verification_code()
-        challenge.code_hash = hash_verification_code(challenge.id, code)
-        challenge.expires_at = now + timedelta(minutes=self.settings.auth_verification_code_minutes)
-        challenge.last_sent_at = now
-        challenge.resend_count = int(challenge.resend_count or 0) + 1
-        challenge.request_ip = request_ip
-        challenge.updated_at = now
-        self.email_service.send_verification_code(
-            recipient=challenge.email,
-            username=challenge.username,
-            code=code,
-            expires_minutes=self.settings.auth_verification_code_minutes,
-        )
-        self.db.commit()
-        return {
-            "status": "ok",
-            "verification_expires_at": challenge.expires_at.isoformat() if challenge.expires_at else None,
-        }
-
-    def verify_email_code(self, *, login_name: str, code: str) -> dict[str, Any]:
-        challenge = self.find_registration_challenge(login_name)
-        if not challenge or challenge.consumed_at is not None:
-            raise AuthError("验证码不存在，请重新发送。")
-        if challenge.expires_at is None or challenge.expires_at < utcnow():
-            raise AuthError("验证码已过期，请重新发送。")
-
-        challenge.attempt_count = int(challenge.attempt_count or 0) + 1
-        expected_hash = hash_verification_code(challenge.id, str(code or "").strip())
-        if challenge.code_hash != expected_hash:
-            self.db.commit()
-            raise AuthError("验证码错误。")
-
-        now = utcnow()
-        verification_token = issue_session_token()
-        challenge.verified_at = now
-        challenge.verification_token_hash = hash_session_token(verification_token)
-        challenge.verification_token_expires_at = now + timedelta(minutes=30)
-        challenge.updated_at = now
-        self.db.commit()
-        return {
-            "status": "ok",
-            "verification_token": verification_token,
-            "next_status": "verified_can_submit",
-            "verified_email": challenge.email,
-            "verified_username": challenge.username,
-        }
-
-    def register_user(self, *, verification_token: str, request_ip: str | None = None) -> dict[str, Any]:
-        token_hash = hash_session_token(str(verification_token or "").strip())
-        if not token_hash:
-            raise AuthError("缺少邮箱验证成功后的注册凭证。")
-        challenge = self.db.scalar(
-            select(RegistrationChallengeModel).where(RegistrationChallengeModel.verification_token_hash == token_hash)
-        )
-        if not challenge:
-            raise AuthError("注册凭证无效。")
-        now = utcnow()
-        if challenge.verified_at is None or challenge.verification_token_expires_at is None or challenge.verification_token_expires_at < now:
-            raise AuthError("注册凭证已过期，请重新验证邮箱。")
-        if challenge.consumed_at is not None:
-            raise AuthError("该注册申请已提交，请勿重复提交。")
-        if self.find_user(challenge.username):
-            raise AuthError("用户名已存在。")
-        existing_email = self.db.scalar(select(UserModel).where(func.lower(UserModel.email) == challenge.email.lower()))
-        if existing_email:
-            raise AuthError("邮箱已存在。")
-
         user = UserModel(
-            username=challenge.username,
-            email=challenge.email,
-            password_hash=challenge.password_hash,
+            username=username,
+            email=email,
+            password_hash=hash_password(password),
             status=USER_STATUS_PENDING_ADMIN_APPROVAL,
-            email_verified=True,
-            email_verified_at=challenge.verified_at,
-            registration_note=challenge.registration_note,
+            email_verified=False,
+            email_verified_at=None,
+            registration_note=str(registration_note or "").strip() or None,
             approval_requested_at=now,
             created_at=now,
             updated_at=now,
         )
         self.db.add(user)
-        challenge.consumed_at = now
-        challenge.code_hash = ""
-        challenge.verification_token_hash = None
-        challenge.verification_token_expires_at = None
-        challenge.request_ip = request_ip
-        challenge.updated_at = now
         self.db.commit()
         self.db.refresh(user)
         return {
@@ -339,7 +215,12 @@ class AuthService:
         if user.status != USER_STATUS_APPROVED:
             return None
         session.last_seen_at = now
-        self.db.commit()
+        try:
+            self.db.commit()
+        except OperationalError:
+            # If SQLite is briefly write-locked, keep authentication successful
+            # and skip this best-effort metadata update.
+            self.db.rollback()
         return user
 
     def logout(self, *, token: str) -> None:
@@ -350,6 +231,7 @@ class AuthService:
             self.db.commit()
 
     def change_password(self, *, user: UserModel, current_password: str, new_password: str) -> dict[str, Any]:
+        self._validate_new_password(new_password)
         if len(str(new_password or "")) < 8:
             raise AuthError("新密码至少需要 8 个字符。")
         if not verify_password(current_password, user.password_hash):
@@ -357,6 +239,21 @@ class AuthService:
         user.password_hash = hash_password(new_password)
         user.force_password_change = False
         user.updated_at = utcnow()
+        self.db.commit()
+        self.db.refresh(user)
+        return self.serialize_user(user)
+
+    def reset_password_by_identity(self, *, username: str, email: str, new_password: str) -> dict[str, Any]:
+        self._validate_new_password(new_password)
+        user = self.find_user_by_username_and_email(username=username, email=email)
+        if not user:
+            raise AuthError("用户名和邮箱不匹配。")
+        user.password_hash = hash_password(new_password)
+        user.force_password_change = False
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        user.updated_at = utcnow()
+        self._revoke_user_sessions(user.id)
         self.db.commit()
         self.db.refresh(user)
         return self.serialize_user(user)
@@ -369,8 +266,6 @@ class AuthService:
         user = self.get_user_by_id(user_id)
         now = utcnow()
         if action == "approve":
-            if not user.email_verified:
-                raise AuthError("用户尚未完成邮箱验证。")
             user.status = USER_STATUS_APPROVED
             user.approved_at = now
             user.rejected_at = None
@@ -387,8 +282,6 @@ class AuthService:
             user.disabled_at = now
             user.approved_by = actor
         elif action == "enable":
-            if not user.email_verified:
-                raise AuthError("用户尚未完成邮箱验证。")
             user.status = USER_STATUS_APPROVED
             user.disabled_at = None
             user.approved_at = user.approved_at or now
@@ -400,7 +293,14 @@ class AuthService:
         self.db.refresh(user)
         return self.serialize_user(user)
 
-    def update_user_roles(self, *, user_id: int, is_reviewer: bool, is_admin: bool, actor: str) -> dict[str, Any]:
+    def update_user_roles(
+        self,
+        *,
+        user_id: int,
+        is_reviewer: bool,
+        is_admin: bool,
+        actor: str,
+    ) -> dict[str, Any]:
         user = self.get_user_by_id(user_id)
         user.is_reviewer = bool(is_reviewer or is_admin)
         user.is_admin = bool(is_admin)
@@ -463,13 +363,23 @@ class AuthService:
         self.db.refresh(admin)
         return self.serialize_user(admin)
 
+    def _validate_new_password(self, new_password: str) -> None:
+        if len(str(new_password or "")) < 8:
+            raise AuthError("新密码至少需要 8 个字符。")
+
+    def _revoke_user_sessions(self, user_id: int) -> None:
+        now = utcnow()
+        sessions = list(self.db.scalars(select(UserSessionModel).where(UserSessionModel.user_id == user_id)))
+        for session in sessions:
+            session.revoked_at = now
+
     def _assert_login_allowed(self, user: UserModel) -> None:
         if user.locked_until and user.locked_until > utcnow():
             raise AuthError(f"登录失败次数过多，请在 {user.locked_until.isoformat()} 后重试。")
         if user.status == USER_STATUS_PENDING_VERIFICATION:
-            raise AuthError("账号尚未完成邮箱验证。")
+            raise AuthError("账号正在等待管理员审核。")
         if user.status == USER_STATUS_PENDING_ADMIN_APPROVAL:
-            raise AuthError("账号已完成邮箱验证，等待管理员审核。")
+            raise AuthError("账号正在等待管理员审核。")
         if user.status == USER_STATUS_REJECTED:
             raise AuthError("注册申请已被拒绝。")
         if user.status == USER_STATUS_DISABLED:
@@ -486,16 +396,9 @@ class AuthService:
 
     def _status_message(self, status: str) -> str:
         mapping = {
-            USER_STATUS_PENDING_VERIFICATION: "账号尚未完成邮箱验证。",
-            USER_STATUS_PENDING_ADMIN_APPROVAL: "账号已完成邮箱验证，等待管理员审核。",
+            USER_STATUS_PENDING_VERIFICATION: "账号正在等待管理员审核。",
+            USER_STATUS_PENDING_ADMIN_APPROVAL: "账号正在等待管理员审核。",
             USER_STATUS_REJECTED: "注册申请已被拒绝。",
             USER_STATUS_DISABLED: "账号已被停用。",
         }
         return mapping.get(status, "账号当前不可登录。")
-
-    def _assert_registration_resend_allowed(self, challenge: RegistrationChallengeModel) -> None:
-        now = utcnow()
-        if int(challenge.resend_count or 0) > 0 and challenge.last_sent_at and (now - challenge.last_sent_at).total_seconds() < self.settings.auth_verification_resend_seconds:
-            raise AuthError("验证码发送过于频繁，请稍后再试。")
-        if int(challenge.resend_count or 0) >= self.settings.auth_verification_max_daily_sends:
-            raise AuthError("今日验证码发送次数已达上限。")

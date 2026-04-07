@@ -55,6 +55,8 @@ def favicon():
 @app.middleware("http")
 async def auth_guard(request, call_next):
     path = request.url.path
+    if request.method.upper() == "OPTIONS":
+        return await call_next(request)
     if path.startswith("/docs") or path.startswith("/redoc") or path.startswith("/openapi.json"):
         return await call_next(request)
     if not path.startswith(settings.api_prefix):

@@ -5,7 +5,6 @@
     tasks: [],
     selectedTaskUuid: "",
     currentUser: null,
-    registerVerificationToken: "",
     latestDiagnosisResult: null,
     latestDiagnosisSignature: "",
     latestReviewResult: null,
@@ -26,6 +25,7 @@
 
   const TOKEN_KEY = "slp-web-auth-token";
   const TASK_KEY = "slp-web-selected-task";
+  const BEIJING_TIMEZONE = "Asia/Shanghai";
 
   const navLabels = {
     home: "Home / Dashboard",
@@ -62,9 +62,6 @@
     loginForm: document.getElementById("loginForm"),
     logoutButton: document.getElementById("logoutButton"),
     registerStartForm: document.getElementById("registerStartForm"),
-    registerVerifyForm: document.getElementById("registerVerifyForm"),
-    resendCodeButton: document.getElementById("resendCodeButton"),
-    completeRegisterButton: document.getElementById("completeRegisterButton"),
     changePasswordForm: document.getElementById("changePasswordForm"),
   };
 
@@ -108,15 +105,37 @@
     return safeString(value);
   }
 
+  function parseUtcApiDate(value) {
+    if (!value) {
+      return null;
+    }
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value;
+    }
+    const text = safeString(value).trim();
+    if (!text) {
+      return null;
+    }
+    const normalized = text.includes("T") ? text : text.replace(" ", "T");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+      const date = new Date(`${normalized}T00:00:00Z`);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+    const hasTimezone = /[zZ]$|[+\-]\d{2}:\d{2}$/.test(normalized);
+    const candidate = hasTimezone ? normalized : `${normalized}Z`;
+    const date = new Date(candidate);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
   function formatDateTime(value) {
     if (!value) {
       return "-";
     }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
+    const date = parseUtcApiDate(value);
+    if (!date) {
       return safeString(value);
     }
-    return date.toLocaleString("zh-CN", { hour12: false });
+    return date.toLocaleString("zh-CN", { hour12: false, timeZone: BEIJING_TIMEZONE });
   }
 
   function statusTone(status) {
@@ -2093,45 +2112,29 @@
     const password = byId("registerPassword").value;
     const confirmPassword = byId("registerPasswordConfirm").value;
     if (password !== confirmPassword) {
-      setAuthMessage("Passwords do not match.");
+      setAuthMessage("两次输入的密码不一致。");
       return;
     }
-    const username = byId("registerUsername").value.trim();
-    const email = byId("registerEmail").value.trim();
-    const result = await apiRequest(
-      `${config.apiPrefix}/auth/register/request-code`,
+    await apiRequest(
+      `${config.apiPrefix}/auth/register`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username,
-          email,
+          username: byId("registerUsername").value.trim(),
+          email: byId("registerEmail").value.trim(),
           password,
           registration_note: byId("registerNote").value,
         }),
       },
       false
     );
-    byId("verifyLoginName").value = username || email;
-    setAuthMessage(`楠岃瘉鐮佸凡鍙戦€侊細${result.verification_expires_at || "-"}`);
-  }
-
-  async function handleVerifyCode(event) {
-    event.preventDefault();
-    const result = await apiRequest(
-      `${config.apiPrefix}/auth/register/verify-email`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          login_name: byId("verifyLoginName").value.trim(),
-          code: byId("verifyCode").value.trim(),
-        }),
-      },
-      false
-    );
-    state.registerVerificationToken = result.verification_token || "";
-    setAuthMessage("Email verification succeeded. You can now submit registration.");
+    setAuthMessage("注册申请已提交，等待管理员审核。");
+    byId("registerUsername").value = "";
+    byId("registerEmail").value = "";
+    byId("registerPassword").value = "";
+    byId("registerPasswordConfirm").value = "";
+    byId("registerNote").value = "";
   }
 
   async function bootstrap() {
@@ -2157,32 +2160,6 @@
     dom.loginForm.addEventListener("submit", handleLogin);
     dom.logoutButton.addEventListener("click", handleLogout);
     dom.registerStartForm.addEventListener("submit", handleRegisterStart);
-    dom.registerVerifyForm.addEventListener("submit", handleVerifyCode);
-    dom.resendCodeButton.addEventListener("click", async () => {
-      await apiRequest(
-        `${config.apiPrefix}/auth/register/resend-code`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ login_name: byId("verifyLoginName").value.trim() }),
-        },
-        false
-      );
-      setAuthMessage("Verification code resent.");
-    });
-    dom.completeRegisterButton.addEventListener("click", async () => {
-      await apiRequest(
-        `${config.apiPrefix}/auth/register`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ verification_token: state.registerVerificationToken }),
-        },
-        false
-      );
-      setAuthMessage("Registration request submitted. Waiting for admin review.");
-      state.registerVerificationToken = "";
-    });
     dom.changePasswordForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (byId("newPassword").value !== byId("confirmNewPassword").value) {

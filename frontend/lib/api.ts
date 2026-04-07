@@ -102,50 +102,15 @@ export const api = {
     });
   },
 
-  requestRegisterCode(payload: {
+  register(payload: {
     username: string;
     email: string;
     password: string;
     registration_note?: string;
   }) {
-    return request<{
-      status: string;
-      login_name: string;
-      email: string;
-      verification_expires_at?: string;
-    }>("/auth/register/request-code", {
-      method: "POST",
-      body: payload,
-    });
-  },
-
-  verifyRegisterCode(loginName: string, code: string) {
-    return request<{
-      status: string;
-      verification_token: string;
-      next_status: string;
-      verified_email: string;
-      verified_username: string;
-    }>("/auth/register/verify-email", {
-      method: "POST",
-      body: { login_name: loginName, code },
-    });
-  },
-
-  resendRegisterCode(loginName: string) {
-    return request<{ status: string; verification_expires_at?: string }>(
-      "/auth/register/resend-code",
-      {
-        method: "POST",
-        body: { login_name: loginName },
-      },
-    );
-  },
-
-  register(verificationToken: string) {
     return request<{ user: User; next_status: string }>("/auth/register", {
       method: "POST",
-      body: { verification_token: verificationToken },
+      body: payload,
     });
   },
 

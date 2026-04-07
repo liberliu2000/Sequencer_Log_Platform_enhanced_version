@@ -19,18 +19,6 @@ def _client_ip(request: Request) -> str | None:
 def register(payload: dict, request: Request, db: Session = Depends(get_db)):
     try:
         item = AuthService(db).register_user(
-            verification_token=str(payload.get("verification_token") or ""),
-            request_ip=_client_ip(request),
-        )
-    except AuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return item
-
-
-@router.post("/auth/register/request-code")
-def request_register_code(payload: dict, request: Request, db: Session = Depends(get_db)):
-    try:
-        item = AuthService(db).start_registration(
             username=str(payload.get("username") or ""),
             password=str(payload.get("password") or ""),
             email=str(payload.get("email") or ""),
@@ -42,22 +30,19 @@ def request_register_code(payload: dict, request: Request, db: Session = Depends
     return item
 
 
+@router.post("/auth/register/request-code")
+def request_register_code(payload: dict, request: Request, db: Session = Depends(get_db)):
+    raise HTTPException(status_code=410, detail="邮箱验证码功能已下线，请直接提交注册申请并等待管理员审核。")
+
+
 @router.post("/auth/register/resend-code")
 def resend_verification_code(payload: dict, request: Request, db: Session = Depends(get_db)):
-    try:
-        item = AuthService(db).resend_verification_code(login_name=str(payload.get("login_name") or ""), request_ip=_client_ip(request))
-    except AuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return item
+    raise HTTPException(status_code=410, detail="邮箱验证码功能已下线，请直接提交注册申请并等待管理员审核。")
 
 
 @router.post("/auth/register/verify-email")
 def verify_email_code(payload: dict, db: Session = Depends(get_db)):
-    try:
-        item = AuthService(db).verify_email_code(login_name=str(payload.get("login_name") or ""), code=str(payload.get("code") or ""))
-    except AuthError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return item
+    raise HTTPException(status_code=410, detail="邮箱验证码功能已下线，请直接提交注册申请并等待管理员审核。")
 
 
 @router.post("/auth/login")
@@ -103,6 +88,20 @@ def change_password(payload: dict, db: Session = Depends(get_db), current_user: 
     return {"status": "ok", "user": item}
 
 
+@router.post("/auth/reset-password")
+def reset_password(payload: dict, db: Session = Depends(get_db)):
+    service = AuthService(db)
+    try:
+        item = service.reset_password_by_identity(
+            username=str(payload.get("username") or ""),
+            email=str(payload.get("email") or ""),
+            new_password=str(payload.get("new_password") or ""),
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "user": item}
+
+
 @router.get("/admin/users")
 def list_users(db: Session = Depends(get_db), current_user: dict = Depends(require_admin_user)):
     items = AuthService(db).list_users()
@@ -112,7 +111,11 @@ def list_users(db: Session = Depends(get_db), current_user: dict = Depends(requi
 @router.post("/admin/users/{user_id}/status")
 def update_user_status(user_id: int, payload: dict, db: Session = Depends(get_db), current_user: dict = Depends(require_admin_user)):
     try:
-        item = AuthService(db).update_user_status(user_id=user_id, action=str(payload.get("action") or ""), actor=str(current_user.get("username") or "admin"))
+        item = AuthService(db).update_user_status(
+            user_id=user_id,
+            action=str(payload.get("action") or ""),
+            actor=str(current_user.get("username") or "admin"),
+        )
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "ok", "item": item}

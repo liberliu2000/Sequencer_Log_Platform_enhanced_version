@@ -4,6 +4,7 @@ import csv
 import shutil
 import tarfile
 import zipfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -22,18 +23,48 @@ class ArchiveHandlingError(RuntimeError):
     pass
 
 
-def detect_encoding(path: Path) -> str:
+@lru_cache(maxsize=4096)
+def _detect_encoding_cached(path_text: str, size_bytes: int, mtime_ns: int) -> str:
+    path = Path(path_text)
     with path.open("rb") as f:
         raw = f.read(4096)
     result = chardet.detect(raw)
     return result.get("encoding") or "utf-8"
 
 
-def read_text_stream(path: Path):
-    encoding = detect_encoding(path)
+def detect_encoding(path: Path) -> str:
+    try:
+        stat = path.stat()
+        return _detect_encoding_cached(str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+    except Exception:
+        with path.open("rb") as f:
+            raw = f.read(4096)
+        result = chardet.detect(raw)
+        return result.get("encoding") or "utf-8"
+
+
+def read_text_stream(path: Path, encoding: str | None = None):
+    encoding = encoding or detect_encoding(path)
     with path.open("r", encoding=encoding, errors="replace", newline="") as f:
         for line in f:
-            yield line.rstrip("\n")
+            yield line.rstrip("\r\n")
+
+
+def read_text_byte_range(path: Path, *, encoding: str, start: int = 0, end: int | None = None):
+    start = max(0, int(start or 0))
+    end = None if end is None else max(start, int(end))
+    with path.open("rb") as f:
+        f.seek(start)
+        if start > 0:
+            f.readline()
+        while True:
+            position = f.tell()
+            if end is not None and position >= end:
+                break
+            raw_line = f.readline()
+            if not raw_line:
+                break
+            yield raw_line.decode(encoding, errors="replace").rstrip("\r\n")
 
 
 def sniff_csv(path: Path) -> bool:
