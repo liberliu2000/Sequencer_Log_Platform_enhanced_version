@@ -9,6 +9,10 @@ TIME_PATTERNS = [
     ("%Y/%m/%d %H:%M:%S.%f", re.compile(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d{3,6}")),
     ("%Y/%m/%d %H:%M:%S:%f", re.compile(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}:\d{3,6}")),
     ("%Y-%m-%d %H:%M:%S.%f", re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3,6}")),
+    ("%Y-%m-%dT%H:%M:%S.%f", re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,6}")),
+    ("%Y/%m/%d %H:%M:%S", re.compile(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?![.:]\d)")),
+    ("%Y-%m-%d %H:%M:%S", re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?![.:]\d)")),
+    ("%Y-%m-%dT%H:%M:%S", re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?![.:]\d)")),
 ]
 FRACTION_RE = re.compile(r"([.:])(\d{3,6})$")
 
@@ -54,7 +58,7 @@ def normalize_fractional_seconds(dt_text: str, rounding: Literal["truncate", "ro
 
 def _fast_parse_datetime(normalized: str) -> datetime | None:
     try:
-        if len(normalized) < 23 or normalized[10] != " ":
+        if len(normalized) < 19 or normalized[10] not in {" ", "T"}:
             return None
         year = int(normalized[0:4])
         month = int(normalized[5:7])
@@ -62,10 +66,12 @@ def _fast_parse_datetime(normalized: str) -> datetime | None:
         hour = int(normalized[11:13])
         minute = int(normalized[14:16])
         second = int(normalized[17:19])
-        microsecond = int(normalized[20:26].ljust(6, "0"))
-        if normalized[4] == "/" and normalized[7] == "/" and normalized[13] == ":" and normalized[16] == ":" and normalized[19] in {".", ":"}:
+        microsecond = 0
+        if len(normalized) >= 21 and normalized[19] in {".", ":"}:
+            microsecond = int(normalized[20:26].ljust(6, "0"))
+        if normalized[4] == "/" and normalized[7] == "/" and normalized[13] == ":" and normalized[16] == ":":
             return datetime(year, month, day, hour, minute, second, microsecond)
-        if normalized[4] == "-" and normalized[7] == "-" and normalized[13] == ":" and normalized[16] == ":" and normalized[19] == ".":
+        if normalized[4] == "-" and normalized[7] == "-" and normalized[13] == ":" and normalized[16] == ":":
             return datetime(year, month, day, hour, minute, second, microsecond)
     except Exception:
         return None
@@ -83,6 +89,10 @@ def _parse_datetime_cached(dt_text: str, rounding: Literal["truncate", "round"])
             return datetime.strptime(normalized, fmt)
         except ValueError:
             continue
+    try:
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        pass
     return None
 
 

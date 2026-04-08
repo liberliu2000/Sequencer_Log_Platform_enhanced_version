@@ -317,6 +317,16 @@ def test_parameter_series_collapses_duplicate_points_and_sorts_by_axis(tmp_path)
         assert rows[1]["sample_count"] == 2
         assert round(float(rows[1]["duration_value"]), 6) == 15.0
 
+        time_rows = QueryService(db).get_parameter_series(task.id, "transfer_time", unit="s", axis_mode="time")
+        assert all(row["x_axis_type"] == "time" for row in time_rows)
+        assert all(row["x_axis_sort_value"] is not None for row in time_rows)
+        assert [row["x_axis_label"] for row in time_rows] == [
+            "2024-03-09 16:01:00",
+            "2024-03-09 16:02:00",
+            "2024-03-09 16:02:01",
+            "2024-03-09 16:04:00",
+        ]
+
 
 def test_timeline_error_points_skip_bad_message_format_noise(tmp_path):
     SessionLocal = _create_session_factory(tmp_path)

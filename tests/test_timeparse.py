@@ -17,3 +17,15 @@ def test_parse_dash_four_digits():
     dt = parse_datetime("2026-03-18 09:46:49.1052")
     assert dt is not None
     assert format_ms(dt) == "2026-03-18 09:46:49.105"
+
+
+def test_parse_dash_seconds_without_fraction():
+    dt = parse_datetime("2026-04-07 18:26:10")
+    assert dt is not None
+    assert format_ms(dt) == "2026-04-07 18:26:10.000"
+
+
+def test_parse_iso_t_seconds_without_fraction():
+    dt = parse_datetime("2026-04-07T18:26:10")
+    assert dt is not None
+    assert format_ms(dt) == "2026-04-07 18:26:10.000"
