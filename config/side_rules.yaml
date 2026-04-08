@@ -29,6 +29,10 @@ context_side_patterns:
   - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,120}?\\b(?:request imager|hold imager|transfer command|set transfer slide data|update slide position|move slide|transfer slide)\\b"
   - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,80}?\\bcpas\\s+reagent\\s+priming\\b"
   - "\\bcpas\\s+reagent\\s+priming\\b[^\\n]{0,80}?\\b(A\\d{0,2}|B\\d{0,2})\\b"
+  - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,80}?\\bfill\\s+ir\\b"
+  - "\\bfill\\s+ir\\b[^\\n]{0,80}?\\b(A\\d{0,2}|B\\d{0,2})\\b"
+  - "\\bchuck\\s+stage\\b[^\\n]{0,80}?\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,80}?\\bwashing\\b"
+  - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,80}?\\bchuck\\s+stage\\b[^\\n]{0,80}?\\bwashing\\b"
   - "\\bSpray[-_/ ](A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,160}?\\b(?:Fluidic|status|[A-Za-z0-9_]+\\.py)\\b"
   - "(?<!\\S)(A\\d{1,2}|B\\d{1,2})(?!\\S)"
 

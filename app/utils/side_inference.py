@@ -34,6 +34,10 @@ _DEFAULT_CONTEXT_PATTERNS = [
     r"\b(A\d{0,2}|B\d{0,2})\b[^\n]{0,120}?\b(?:request imager|hold imager|transfer command|set transfer slide data|update slide position|move slide|transfer slide)\b",
     r"\b(A\d{0,2}|B\d{0,2})\b[^\n]{0,80}?\bcpas\s+reagent\s+priming\b",
     r"\bcpas\s+reagent\s+priming\b[^\n]{0,80}?\b(A\d{0,2}|B\d{0,2})\b",
+    r"\b(A\d{0,2}|B\d{0,2})\b[^\n]{0,80}?\bfill\s+ir\b",
+    r"\bfill\s+ir\b[^\n]{0,80}?\b(A\d{0,2}|B\d{0,2})\b",
+    r"\bchuck\s+stage\b[^\n]{0,80}?\b(A\d{0,2}|B\d{0,2})\b[^\n]{0,80}?\bwashing\b",
+    r"\b(A\d{0,2}|B\d{0,2})\b[^\n]{0,80}?\bchuck\s+stage\b[^\n]{0,80}?\bwashing\b",
     r"\bSpray[-_/ ](A\d{0,2}|B\d{0,2})\b[^\n]{0,160}?\b(?:Fluidic|status|[A-Za-z0-9_]+\.py)\b",
     r"(?<!\S)(A\d{1,2}|B\d{1,2})(?!\S)",
 ]
@@ -376,3 +380,133 @@ def has_strong_side_evidence(inference: ScopeInference) -> bool:
     evidence = inference.side_evidence or {}
     strong_keys = {"from_filename", "from_stagekey", "from_stagename", "from_sourcechuck"}
     return bool(inference.side_scope and any(key in evidence for key in strong_keys))
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except Exception:
+        return None
+
+
+def _join_scope_fragments(*parts: Any) -> str:
+    output: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "").strip()
+        if not text:
+            continue
+        normalized = re.sub(r"\s+", " ", text)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        output.append(normalized)
+    return " | ".join(output)
+
+
+def choose_scope_for_repair(
+    current_side_scope: str | None,
+    current_confidence: Any,
+    inferred_side_scope: str | None,
+    inferred_confidence: Any,
+) -> str | None:
+    current = normalize_side_scope(current_side_scope)
+    inferred = normalize_side_scope(inferred_side_scope)
+    if not inferred:
+        return current
+    if not current:
+        return inferred
+    if current == inferred:
+        return current
+
+    current_specificity = side_specificity(current)
+    inferred_specificity = side_specificity(inferred)
+    current_confidence_value = _safe_float(current_confidence) or 0.0
+    inferred_confidence_value = _safe_float(inferred_confidence) or 0.0
+
+    if inferred_specificity > current_specificity:
+        return inferred
+    if current_confidence_value < 0.75 and inferred_confidence_value >= current_confidence_value:
+        return inferred
+    return current
+
+
+def repair_scope_inference(
+    *,
+    source_file: str | None,
+    message: str | None = None,
+    raw_text: str | None = None,
+    sub_step: str | None = None,
+    start_message: str | None = None,
+    end_message: str | None = None,
+    parameter_name: str | None = None,
+    parameter_display_name: str | None = None,
+    slide: str | None = None,
+    chip_name: str | None = None,
+    stage_name: str | None = None,
+    stage_key: str | None = None,
+    chuck_no: str | None = None,
+    slot_no: str | None = None,
+    instrument_scope: str | None = WHOLE_INSTRUMENT_SCOPE,
+    side_scope: str | None = None,
+    side_group: str | None = None,
+    side_confidence: Any = None,
+    side_evidence: dict[str, Any] | None = None,
+) -> ScopeInference:
+    current_evidence = dict(side_evidence or {})
+    repair_text = _join_scope_fragments(
+        message,
+        raw_text,
+        sub_step,
+        start_message,
+        end_message,
+        parameter_display_name,
+        parameter_name,
+        slide,
+        f"StageKey: {stage_key}" if stage_key else None,
+        f"StageName: {stage_name}" if stage_name else None,
+        f"SourceChuck: {chuck_no}" if chuck_no else None,
+        f"SlotNo: {slot_no}" if slot_no else None,
+    )
+    inference = infer_scope_from_texts(
+        source_file=source_file,
+        message=message or sub_step or parameter_display_name or parameter_name or repair_text or None,
+        raw_text=repair_text or raw_text,
+        chip_name=chip_name,
+        stage_name=stage_name or stage_key,
+        extra={},
+    )
+
+    resolved_side_scope = choose_scope_for_repair(
+        current_side_scope=side_scope,
+        current_confidence=side_confidence,
+        inferred_side_scope=inference.side_scope,
+        inferred_confidence=inference.side_confidence,
+    )
+    resolved_group = infer_side_group(resolved_side_scope) or side_group or inference.side_group
+    resolved_confidence = _safe_float(side_confidence)
+    inferred_confidence_value = _safe_float(inference.side_confidence)
+    if resolved_side_scope and normalize_side_scope(resolved_side_scope) == normalize_side_scope(inference.side_scope):
+        resolved_confidence = max(resolved_confidence or 0.0, inferred_confidence_value or 0.0)
+    elif resolved_confidence is None:
+        resolved_confidence = inferred_confidence_value
+
+    merged_evidence = dict(current_evidence)
+    if inference.side_scope and normalize_side_scope(resolved_side_scope) == normalize_side_scope(inference.side_scope):
+        merged_evidence["scope_repair_selected_side"] = inference.side_scope
+        if inference.side_evidence:
+            merged_evidence["scope_repair_source"] = inference.side_evidence.get("selected_side_source")
+            merged_evidence["scope_repair_inference"] = dict(inference.side_evidence)
+
+    return ScopeInference(
+        instrument_scope=instrument_scope or inference.instrument_scope or WHOLE_INSTRUMENT_SCOPE,
+        side_scope=resolved_side_scope,
+        side_group=resolved_group,
+        chip_name=chip_name or inference.chip_name,
+        chip_position=inference.chip_position,
+        chuck_no=chuck_no or inference.chuck_no,
+        slot_no=slot_no or inference.slot_no,
+        stage_key=stage_key or inference.stage_key,
+        side_confidence=resolved_confidence,
+        side_evidence=merged_evidence,
+    )

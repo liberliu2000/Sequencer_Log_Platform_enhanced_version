@@ -129,6 +129,24 @@ def test_side_inference_matches_standalone_side_tokens_in_message():
     assert token_overrides_coarse_filename.side_evidence.get("selected_side_source") == "from_context"
 
 
+def test_side_inference_matches_fill_ir_and_chuck_stage_washing_patterns():
+    fill_ir = infer_scope_from_texts(
+        source_file="ISW.ZebraMammoth.Service-All_20260326_00.log",
+        message="Unassigned | a1 fill ir",
+        raw_text="",
+    )
+    assert fill_ir.side_scope == "A1"
+    assert fill_ir.side_evidence.get("from_context") == "A1"
+
+    chuck_stage = infer_scope_from_texts(
+        source_file="ISW.ZebraMammoth.Service-All_20260326_00.log",
+        message="Unassigned chuck stage b2 washing",
+        raw_text="",
+    )
+    assert chuck_stage.side_scope == "B2"
+    assert chuck_stage.side_evidence.get("from_context") == "B2"
+
+
 def test_combined_service_all_log_is_split_by_event_side(tmp_path: Path):
     path = tmp_path / "Service-All-A1A2-subset.log"
     path.write_text(SERVICE_ALL_A1_A2_LINES, encoding="utf-8")
