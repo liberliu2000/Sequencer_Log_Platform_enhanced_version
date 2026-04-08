@@ -8,14 +8,24 @@ from app.core.settings import get_settings
 from app.schemas.common import NormalizedEvent, StepSummary
 from app.utils.rules import load_yaml
 
+STATUS_STATE_RE = re.compile(r"\bstatus\s*:\s*([A-Za-z]+)\b", re.IGNORECASE)
+STATUS_RUNNING_STATES = {"running"}
+STATUS_TERMINAL_STATES = {"stopped", "completed", "idle", "failed", "error", "success"}
+HEARTBEAT_LAST_EPOCH_KEY = "_heartbeat_last_epoch_ms"
+HEARTBEAT_LAST_TIME_KEY = "_heartbeat_last_time_text"
+
 
 @lru_cache(maxsize=32768)
 def normalize_step_key(name: str | None) -> str | None:
     if not name:
         return None
     text = name.lower().strip()
+    text = re.sub(r"\bhas\s+hold\s+imager\b", "request imager and wait", text)
+    text = re.sub(r"\bstatus\s*:\s*(?:running|stopped|completed|idle|failed|error|success)\b", "", text)
+    text = re.sub(r"\berror\s*code\s*:[^,]*", "", text)
+    text = re.sub(r"\bupdate\s*time\s*:[^\n]+$", "", text)
     text = re.sub(r"^<+\s*|\s*>+$", "", text)
-    text = re.sub(r"\b(is success|success!?|completed|start|begin|done|finished|for cycle\s*=\s*\d+)\b", "", text)
+    text = re.sub(r"\b(is success|success!?|completed|start|begin|done|finished|called|for cycle\s*=\s*\d+)\b", "", text)
     text = re.sub(r"\bcycle\s*[=:]?\s*\d+\b", "", text)
     text = re.sub(r"\bposition\s*\d+\b", "", text)
     text = re.sub(r"\bfor\s+[a-z0-9_.-]+\.s\d+\b", "", text)
@@ -28,6 +38,48 @@ def build_group_key(event: NormalizedEvent) -> tuple[str | None, int | None, str
 
 
 MAX_PAIR_GAP_MS = 20 * 60 * 1000
+
+
+def extract_status_state(message: str | None) -> str | None:
+    text = str(message or "")
+    match = STATUS_STATE_RE.search(text)
+    if not match:
+        return None
+    return str(match.group(1) or "").strip().lower() or None
+
+
+def is_running_status_message(message: str | None) -> bool:
+    return extract_status_state(message) in STATUS_RUNNING_STATES
+
+
+def is_terminal_status_message(message: str | None) -> bool:
+    return extract_status_state(message) in STATUS_TERMINAL_STATES
+
+
+def _mark_heartbeat_progress(start_event: NormalizedEvent, heartbeat_event: NormalizedEvent) -> None:
+    if start_event.epoch_ms is None or heartbeat_event.epoch_ms is None:
+        return
+    if heartbeat_event.epoch_ms < start_event.epoch_ms:
+        return
+    extra = dict(start_event.extra_json or {})
+    last_epoch = extra.get(HEARTBEAT_LAST_EPOCH_KEY)
+    if last_epoch is None or int(heartbeat_event.epoch_ms) >= int(last_epoch):
+        extra[HEARTBEAT_LAST_EPOCH_KEY] = int(heartbeat_event.epoch_ms)
+        extra[HEARTBEAT_LAST_TIME_KEY] = heartbeat_event.formatted_ms
+        start_event.extra_json = extra
+
+
+def _heartbeat_bounds(start_event: NormalizedEvent) -> tuple[int | None, str | None]:
+    extra = dict(start_event.extra_json or {})
+    last_epoch = extra.get(HEARTBEAT_LAST_EPOCH_KEY)
+    if last_epoch is None:
+        return None, None
+    try:
+        end_epoch_ms = int(last_epoch)
+    except Exception:
+        return None, None
+    end_time_text = extra.get(HEARTBEAT_LAST_TIME_KEY)
+    return end_epoch_ms, str(end_time_text) if end_time_text not in (None, "") else None
 
 
 def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
@@ -49,6 +101,23 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                 continue
 
             if event.direction == "start":
+                if is_running_status_message(event.message):
+                    candidates = active.get(step_key, [])
+                    heartbeat_target: NormalizedEvent | None = None
+                    if candidates:
+                        for candidate in candidates:
+                            if _is_pairable(candidate, event):
+                                heartbeat_target = candidate
+                                break
+                        else:
+                            active[step_key].append(event)
+                            heartbeat_target = event
+                    else:
+                        active[step_key].append(event)
+                        heartbeat_target = event
+                    if heartbeat_target is not None:
+                        _mark_heartbeat_progress(heartbeat_target, event)
+                    continue
                 active[step_key].append(event)
                 continue
 
@@ -149,6 +218,10 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
         for step_key, start_events in active.items():
             for start_event in start_events:
                 threshold_ms = get_step_threshold_ms(thresholds, component, step_key)
+                heartbeat_end_ms, heartbeat_end_text = _heartbeat_bounds(start_event)
+                duration_ms = None
+                if start_event.epoch_ms is not None and heartbeat_end_ms is not None and heartbeat_end_ms >= start_event.epoch_ms:
+                    duration_ms = float(heartbeat_end_ms - start_event.epoch_ms)
                 summaries.append(
                     StepSummary(
                         cycle_no=cycle_no,
@@ -163,12 +236,12 @@ def pair_start_end(events: list[NormalizedEvent]) -> list[StepSummary]:
                         slot_no=start_event.slot_no,
                         stage_key=start_event.stage_key,
                         start_epoch_ms=start_event.epoch_ms,
-                        end_epoch_ms=None,
-                        duration_ms=None,
+                        end_epoch_ms=heartbeat_end_ms,
+                        duration_ms=duration_ms,
                         threshold_ms=threshold_ms,
-                        is_over_threshold=False,
+                        is_over_threshold=bool(duration_ms and threshold_ms and duration_ms > threshold_ms),
                         start_time_text=start_event.formatted_ms,
-                        end_time_text=None,
+                        end_time_text=heartbeat_end_text,
                         side_confidence=start_event.side_confidence,
                         side_evidence=start_event.side_evidence,
                     )

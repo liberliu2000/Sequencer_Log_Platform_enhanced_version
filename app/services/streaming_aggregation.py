@@ -16,8 +16,11 @@ from sqlalchemy.orm import Session
 
 from app.correlators.pairing import (
     _derive_duration_ms,
+    _heartbeat_bounds,
     _is_pairable,
+    _mark_heartbeat_progress,
     build_group_key,
+    is_running_status_message,
     get_step_threshold_ms,
     normalize_step_key,
 )
@@ -1356,6 +1359,23 @@ class StreamingAggregationCoordinator:
 
         component, cycle_no, side_scope, chip_name = group_key
         if event.direction == "start":
+            if is_running_status_message(event.message):
+                candidates = active.get(step_key, [])
+                heartbeat_target: MutableEvent | None = None
+                if candidates:
+                    for candidate in candidates:
+                        if _is_pairable(candidate, event):
+                            heartbeat_target = candidate
+                            break
+                    else:
+                        active[step_key].append(event)
+                        heartbeat_target = event
+                else:
+                    active[step_key].append(event)
+                    heartbeat_target = event
+                if heartbeat_target is not None:
+                    _mark_heartbeat_progress(heartbeat_target, event)
+                return 0
             active[step_key].append(event)
             return 0
 
@@ -1469,6 +1489,10 @@ class StreamingAggregationCoordinator:
             for step_key, start_events in active.items():
                 threshold_ms = get_step_threshold_ms(self.thresholds, component, step_key)
                 for start_event in start_events:
+                    heartbeat_end_ms, heartbeat_end_text = _heartbeat_bounds(start_event)
+                    duration_ms = None
+                    if start_event.epoch_ms is not None and heartbeat_end_ms is not None and heartbeat_end_ms >= start_event.epoch_ms:
+                        duration_ms = float(heartbeat_end_ms - start_event.epoch_ms)
                     emitted += self._append_step_row(
                         step_buffer,
                         cycle_summary_stats,
@@ -1485,12 +1509,12 @@ class StreamingAggregationCoordinator:
                         slot_no=start_event.slot_no,
                         stage_key=start_event.stage_key,
                         start_epoch_ms=start_event.epoch_ms,
-                        end_epoch_ms=None,
-                        duration_ms=None,
+                        end_epoch_ms=heartbeat_end_ms,
+                        duration_ms=duration_ms,
                         threshold_ms=threshold_ms,
-                        is_over_threshold=False,
+                        is_over_threshold=bool(duration_ms and threshold_ms and duration_ms > threshold_ms),
                         start_time_text=start_event.formatted_ms,
-                        end_time_text=None,
+                        end_time_text=heartbeat_end_text,
                         side_confidence=start_event.side_confidence,
                         side_evidence=start_event.side_evidence,
                     )

@@ -232,8 +232,32 @@ class QueryService:
         component_text = str(component or "")
         return any(
             token in sub_step_text
-            for token in ["move", "align", "scan", "transfer", "temperature", "priming", "coarsetheta", "finealign"]
-        ) or component_text in {"XYZStage", "Scanner_1", "Scanner_2", "Workflow", "StageRunMgr", "ImagingMetrics"}
+            for token in ["move", "align", "scan", "transfer", "temperature", "priming", "coarsetheta", "finealign", "spray", "fill", "wash", "acquire", "imager"]
+        ) or component_text in {"XYZStage", "Scanner_1", "Scanner_2", "Workflow", "StageRunMgr", "ImagingMetrics", "SprayClient", "T100Scheduler"}
+
+    @staticmethod
+    def _timeline_bounds(
+        start_epoch_ms: int | None,
+        end_epoch_ms: int | None,
+        duration_ms: float | None,
+    ) -> tuple[int | None, int | None]:
+        start_ms = int(start_epoch_ms) if start_epoch_ms is not None else None
+        end_ms = int(end_epoch_ms) if end_epoch_ms is not None else None
+        if start_ms is not None and end_ms is not None:
+            return start_ms, end_ms
+        if duration_ms is None:
+            return start_ms, end_ms
+        try:
+            duration_int = int(float(duration_ms))
+        except Exception:
+            return start_ms, end_ms
+        if duration_int < 0:
+            return start_ms, end_ms
+        if start_ms is None and end_ms is not None:
+            return max(0, end_ms - duration_int), end_ms
+        if end_ms is None and start_ms is not None:
+            return start_ms, start_ms + duration_int
+        return start_ms, end_ms
 
     def _dict_to_step(self, row: dict[str, Any]) -> StepSummary:
         return StepSummary(
@@ -1496,9 +1520,10 @@ class QueryService:
         output: list[dict[str, Any]] = []
         lanes: dict[str, list[tuple[int, int]]] = defaultdict(list)
         for row in self.db.execute(stmt).mappings():
-            if not (row["start_epoch_ms"] and row["end_epoch_ms"]):
-                continue
             if not self._is_movement_like(row["sub_step"], row["component"]):
+                continue
+            start_ms, end_ms = self._timeline_bounds(row["start_epoch_ms"], row["end_epoch_ms"], row["duration_ms"])
+            if start_ms is None or end_ms is None:
                 continue
             base_track = self._build_timeline_base_track(
                 component=row["component"],
@@ -1508,8 +1533,6 @@ class QueryService:
                 track_granularity=granularity,
             )
             lane_idx = 0
-            start_ms = int(row["start_epoch_ms"])
-            end_ms = int(row["end_epoch_ms"])
             existing = lanes[base_track]
             while lane_idx < len(existing) and start_ms < existing[lane_idx][1]:
                 lane_idx += 1
@@ -1521,6 +1544,8 @@ class QueryService:
             item = dict(row)
             item["module"] = item.get("component")
             item["message"] = item.get("sub_step")
+            item["start_epoch_ms"] = start_ms
+            item["end_epoch_ms"] = end_ms
             item["start_time_sec"] = self._epoch_to_seconds(start_ms)
             item["end_time_sec"] = self._epoch_to_seconds(end_ms)
             item["source_file"] = None

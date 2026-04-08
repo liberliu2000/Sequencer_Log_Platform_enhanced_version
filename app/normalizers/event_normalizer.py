@@ -19,6 +19,7 @@ STEP_DURATION_RE = re.compile(r"span time[:=]\s*([0-9.]+)\s*s", re.IGNORECASE)
 COMPLETED_IN_RE = re.compile(r"\bcompleted\s+in\s+([0-9.]+)\s*sec", re.IGNORECASE)
 ERROR_CODE_RE = re.compile(r"\b(?:error\s*code|code)[:= ]+([A-Za-z0-9_.-]+)", re.IGNORECASE)
 EXCEPTION_TYPE_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.]*(?:Exception|Error))\b")
+ERROR_CODE_FIELD_RE = re.compile(r"\berror\s*code\s*[:= ]*[a-z0-9_.-]*", re.IGNORECASE)
 
 START_PATTERNS = [
     r"\bstart\b",
@@ -27,6 +28,7 @@ START_PATTERNS = [
     r"\bsetup\b",
     r"\bwf start\b",
     r"\brunning position\b",
+    r"\bstatus\s*:\s*running\b",
 ]
 END_PATTERNS = [
     r"\bcompleted\b",
@@ -34,6 +36,8 @@ END_PATTERNS = [
     r"\bsuccess\b",
     r"\bdone\b",
     r"\bfinished\b",
+    r"\bstatus\s*:\s*(?:stopped|completed|idle|failed|error|success)\b",
+    r"\bhas\s+hold\s+imager\b",
 ]
 SUCCESS_RE = re.compile(r"\bis success\b|\bsuccess!\b", re.IGNORECASE)
 START_REGEXES = [re.compile(pattern, re.IGNORECASE) for pattern in START_PATTERNS]
@@ -76,21 +80,22 @@ def infer_sub_step(record: RawLogRecord) -> str | None:
 
 def infer_event_kind(record: RawLogRecord) -> tuple[str | None, str | None]:
     lower = (record.message or "").lower()
+    lower_for_error = ERROR_CODE_FIELD_RE.sub("", lower)
     level = (record.level or "INFO").upper()
 
     if record.parser_name == "metrics_csv":
         return "metric", None
-    if any(k in lower for k in ["exception", "error", "timeout", "failed"]) or level in {"ERROR", "FATAL"}:
-        return "error", None
 
     if "span time" in lower or "completed in" in lower or SUCCESS_RE.search(lower):
         return "step", "end"
-    for pattern in START_REGEXES:
-        if pattern.search(lower):
-            return "step", "start"
     for pattern in END_REGEXES:
         if pattern.search(lower):
             return "step", "end"
+    for pattern in START_REGEXES:
+        if pattern.search(lower):
+            return "step", "start"
+    if any(k in lower_for_error for k in ["exception", "error", "timeout", "failed"]) or level in {"ERROR", "FATAL"}:
+        return "error", None
     if any(k in lower for k in ["move", "fill", "switch", "aspirate", "dispense", "transfer", "scan"]):
         return "action", None
     return "log", None
