@@ -39,6 +39,28 @@
   const TOKEN_KEY = "slp-web-auth-token";
   const TASK_KEY = "slp-web-selected-task";
   const BEIJING_TIMEZONE = "Asia/Shanghai";
+  const TIMELINE_COLOR_SEQUENCE = [
+    "#0B5CAD",
+    "#1E8E6A",
+    "#D97706",
+    "#C2410C",
+    "#7C3AED",
+    "#0F766E",
+    "#B45309",
+    "#DC2626",
+    "#2563EB",
+    "#9333EA",
+    "#059669",
+    "#CA8A04",
+    "#BE185D",
+    "#0369A1",
+    "#4F46E5",
+    "#15803D",
+    "#EA580C",
+    "#7E22CE",
+    "#047857",
+    "#B91C1C",
+  ];
 
   const navLabels = {
     home: "Home / Dashboard",
@@ -186,6 +208,20 @@
       }
     }
     return "";
+  }
+
+  function hashText(value) {
+    const text = safeString(value, "");
+    let hash = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+    }
+    return hash;
+  }
+
+  function pickTimelineColor(...parts) {
+    const key = parts.map((part) => safeString(part, "")).join("|");
+    return TIMELINE_COLOR_SEQUENCE[hashText(key) % TIMELINE_COLOR_SEQUENCE.length];
   }
 
   function statusTone(status) {
@@ -609,35 +645,59 @@
   }
 
   function buildTimelineTraces(rows, errors) {
-    const knownRows = safeArray(rows).filter((row) => !row?.is_uncertain_side);
-    const uncertainRows = safeArray(rows).filter((row) => row?.is_uncertain_side);
     const traces = [];
-    if (knownRows.length) {
+    const groupedRows = new Map();
+    safeArray(rows).forEach((item) => {
+      const renderSide = firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned");
+      const componentName = firstNonEmpty(item?.component, item?.sub_step, "Movement");
+      const uncertain = Boolean(item?.is_uncertain_side);
+      const groupKey = `${uncertain ? "uncertain" : "known"}|${renderSide}|${componentName}`;
+      if (!groupedRows.has(groupKey)) {
+        groupedRows.set(groupKey, {
+          sideScope: renderSide,
+          componentName,
+          uncertain,
+          rows: [],
+        });
+      }
+      groupedRows.get(groupKey).rows.push(item);
+    });
+    groupedRows.forEach((group) => {
+      const color = pickTimelineColor(group.sideScope, group.componentName);
       traces.push({
         type: "bar",
         orientation: "h",
-        name: "Movement",
-        x: knownRows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
-        base: knownRows.map((item) => item.start),
-        y: knownRows.map((item) => item.track || item.sub_step || "-"),
-        marker: { color: "#0d5c63", opacity: 0.78, line: { color: "rgba(255,255,255,0.25)", width: 1 } },
-        hovertext: knownRows.map((item) => `${item.side_scope || "Unassigned"} · Cycle ${item.cycle_no ?? "-"}`),
-        hovertemplate: "%{hovertext}<br>%{y}<br>%{base} → %{x} ms<extra></extra>",
+        name: group.uncertain ? `[?] ${group.sideScope} · ${group.componentName}` : `${group.sideScope} · ${group.componentName}`,
+        legendgroup: `${group.sideScope}|${group.componentName}`,
+        x: group.rows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
+        base: group.rows.map((item) => item.start),
+        y: group.rows.map((item) => item.track || item.sub_step || "-"),
+        customdata: group.rows.map((item) => [
+          firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned"),
+          firstNonEmpty(item?.component, item?.sub_step, "Movement"),
+          item?.cycle_no ?? "-",
+          firstNonEmpty(item?.start_time_sec, item?.start, "-"),
+          firstNonEmpty(item?.end_time_sec, item?.end, "-"),
+          Number(item?.duration_ms || 0),
+          firstNonEmpty(item?.message, "-"),
+          group.uncertain ? firstNonEmpty(item?.original_side_scope, item?.side_scope, "Unknown") : "-",
+        ]),
+        marker: {
+          color,
+          opacity: group.uncertain ? 0.42 : 0.82,
+          line: { color: group.uncertain ? "#b42318" : "rgba(255,255,255,0.25)", width: group.uncertain ? 1.5 : 1 },
+        },
+        hovertemplate:
+          "边位: %{customdata[0]}<br>" +
+          "部件: %{customdata[1]}<br>" +
+          "Cycle: %{customdata[2]}<br>" +
+          "开始: %{customdata[3]}<br>" +
+          "结束: %{customdata[4]}<br>" +
+          "时长(ms): %{customdata[5]}<br>" +
+          "原始边位: %{customdata[7]}<br>" +
+          "说明: %{customdata[6]}<extra></extra>",
       });
-    }
-    if (uncertainRows.length) {
-      traces.push({
-        type: "bar",
-        orientation: "h",
-        name: "Uncertain Side",
-        x: uncertainRows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
-        base: uncertainRows.map((item) => item.start),
-        y: uncertainRows.map((item) => item.track || item.sub_step || "-"),
-        marker: { color: "#d97706", opacity: 0.56, line: { color: "#b42318", width: 1.4 } },
-        hovertext: uncertainRows.map((item) => `Uncertain side · original=${item.original_side_scope || item.side_scope || "-"}`),
-        hovertemplate: "%{hovertext}<br>%{y}<br>%{base} → %{x} ms<extra></extra>",
-      });
-    }
+    });
     const errorGroups = new Map();
     safeArray(errors).forEach((item) => {
       const severity = firstNonEmpty(item?.severity, "unknown");

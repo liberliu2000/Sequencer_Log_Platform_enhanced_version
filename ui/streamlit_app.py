@@ -36,6 +36,14 @@ st.set_page_config(page_title="测序仪日志整理及问题反馈系统", layo
 DEFAULT_API_BASE = os.getenv("STREAMLIT_API_BASE", "http://127.0.0.1:8000/api/v1")
 DURATION_UNITS = {"毫秒(ms)": "ms", "秒(s)": "s", "分钟(min)": "min", "小时(h)": "h"}
 PLOTLY_COLOR_SEQUENCE = ["#052659", "#0B5CAD", "#5483B3", "#7DA0CA", "#38A3E0", "#C1E8FF"]
+TIMELINE_COLOR_SEQUENCE = list(
+    dict.fromkeys(
+        px.colors.qualitative.Safe
+        + px.colors.qualitative.Bold
+        + px.colors.qualitative.Plotly
+        + px.colors.qualitative.Dark24
+    )
+)
 ERROR_SEVERITY_COLORS = {
     "fatal": "#8C1C13",
     "error": "#D94841",
@@ -3273,6 +3281,12 @@ def _timeline_lane_index(value: Any) -> int:
     return int(match.group(1)) if match else 1
 
 
+def _stable_timeline_color(value: Any) -> str:
+    text = str(value or "").strip() or "timeline"
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    return TIMELINE_COLOR_SEQUENCE[int(digest[:8], 16) % len(TIMELINE_COLOR_SEQUENCE)]
+
+
 def _build_timeline_track_order(df: pd.DataFrame, order_mode: str) -> list[str]:
     if df.empty:
         return []
@@ -3391,23 +3405,30 @@ def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, 
 def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, order_mode: str, show_error_points: bool):
     working_df = df.copy()
     working_df["component_display"] = working_df.get("component", pd.Series(dtype=object)).fillna("未知组件").astype(str)
-    working_df["side_display"] = working_df.get("side_scope", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+    render_side_series = working_df.get("render_side_scope", pd.Series(index=working_df.index, dtype=object)).replace("", pd.NA)
+    raw_side_series = working_df.get("side_scope", pd.Series(index=working_df.index, dtype=object)).replace("", pd.NA)
+    working_df["side_display"] = render_side_series.fillna(raw_side_series).fillna("Unassigned").astype(str)
     working_df["chip_display"] = working_df.get("chip_name", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
     working_df["track"] = working_df["track"].fillna("未知轨道").astype(str)
     working_df["base_track"] = working_df["track"].map(_timeline_base_track)
     working_df["track_lane"] = working_df["track"].map(_timeline_lane_index)
     working_df["chuck_no"] = working_df.get("chuck_no", pd.Series(dtype=object)).fillna("").astype(str)
     working_df["source_file"] = working_df.get("source_file", pd.Series(dtype=object)).fillna("").astype(str)
+    working_df["timeline_color_key"] = working_df["side_display"] + " | " + working_df["component_display"]
     working_df = working_df.sort_values(["cycle_no", "side_display", "component_display", "track_lane", "start", "end"], na_position="last")
     track_order = _build_timeline_track_order(working_df, order_mode)
-    color_field = "side_display" if working_df["side_display"].nunique(dropna=False) > 1 else "component_display"
+    color_map = {
+        key: _stable_timeline_color(key)
+        for key in working_df["timeline_color_key"].dropna().astype(str).unique().tolist()
+    }
 
     fig = px.timeline(
         working_df,
         x_start="start",
         x_end="end",
         y="track",
-        color=color_field,
+        color="timeline_color_key",
+        color_discrete_map=color_map,
         category_orders={"track": track_order},
         custom_data=[
             "component_display",
@@ -3450,7 +3471,9 @@ def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, 
     error_output = error_df.copy()
     if show_error_points and not error_output.empty:
         error_output["component_display"] = error_output.get("component", pd.Series(dtype=object)).fillna("未知组件").astype(str)
-        error_output["side_display"] = error_output.get("side_scope", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+        render_error_side_series = error_output.get("render_side_scope", pd.Series(index=error_output.index, dtype=object)).replace("", pd.NA)
+        raw_error_side_series = error_output.get("side_scope", pd.Series(index=error_output.index, dtype=object)).replace("", pd.NA)
+        error_output["side_display"] = render_error_side_series.fillna(raw_error_side_series).fillna("Unassigned").astype(str)
         error_output["chip_display"] = error_output.get("chip_name", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
         error_output["chuck_no"] = error_output.get("chuck_no", pd.Series(dtype=object)).fillna("").astype(str)
         error_output["source_file"] = error_output.get("source_file", pd.Series(dtype=object)).fillna("").astype(str)
@@ -3983,7 +4006,7 @@ def render_announcement_admin_panel(current_user: dict[str, Any]) -> None:
             safe_dataframe(pd.DataFrame(edit_history_rows), use_container_width=True, height=220)
         else:
             st.info("当前公告还没有编辑历史，后续修改会在这里显示。")
-        with st.expander("查看公告原始数据", expanded=False):
+        if st.checkbox("显示公告原始数据", value=False, key=f"announcement_show_raw_{announcement_id}"):
             safe_json(selected)
 
         save_col, delete_col = st.columns(2)
