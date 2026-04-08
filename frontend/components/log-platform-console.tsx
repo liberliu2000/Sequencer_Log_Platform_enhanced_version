@@ -1131,7 +1131,11 @@ export function LogPlatformConsole() {
     }
     const definitions = await request<any[]>("/parameter-definitions");
     const filtered = safeArray(definitions).filter((item) => item?.parameter_name !== "imaging_time");
-    let active = selectedParameters;
+    const availableNames = new Set(filtered.map((item) => String(item.parameter_name)));
+    let active = selectedParameters.filter((name) => availableNames.has(name));
+    if (active.length !== selectedParameters.length) {
+      setSelectedParameters(active);
+    }
     if (!active.length && filtered.length) {
       active = filtered.slice(0, 4).map((item) => String(item.parameter_name));
       setSelectedParameters(active);
@@ -3062,18 +3066,20 @@ export function LogPlatformConsole() {
           }
           return (
             <SimpleLineChart
-              key={name}
+              key={`parameter-series-${selectedTaskUuid}-${parameterUnit}-${parameterAxisMode}-${name}`}
               title={`${name} 趋势`}
               rows={rows}
               xKey="x_axis_label"
+              xSortKey="x_axis_sort_value"
               yKey="duration_value"
               seriesKey="series_name"
               thresholdLines={thresholds}
+              resetKey={`${selectedTaskUuid}-${parameterUnit}-${parameterAxisMode}-${name}`}
             />
           );
         })}
-        <SimpleLineChart key={`substep-series-${selectedTaskUuid}-${parameterUnit}-${parameterAxisMode}`} title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="x_axis_label" yKey="duration_value" seriesKey="series_name" />
-        <SimpleLineChart title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="x_axis_label" yKey="duration_value" seriesKey="series_name" />
+        <SimpleLineChart key={`substep-series-${selectedTaskUuid}-${parameterUnit}-${parameterAxisMode}`} title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="x_axis_label" xSortKey="x_axis_sort_value" yKey="duration_value" seriesKey="series_name" resetKey={`substep-${selectedTaskUuid}-${parameterUnit}-${parameterAxisMode}`} />
+        <SimpleLineChart key={`metric-series-${selectedTaskUuid}-${parameterAxisMode}`} title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="x_axis_label" xSortKey="x_axis_sort_value" yKey="duration_value" seriesKey="series_name" resetKey={`metric-${selectedTaskUuid}-${parameterAxisMode}`} />
         <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
           <input type="checkbox" checked={parameterShowMetricTable} onChange={(event) => setParameterShowMetricTable(event.target.checked)} />
           显示 metrics 表格明细

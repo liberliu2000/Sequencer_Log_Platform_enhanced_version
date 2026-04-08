@@ -1376,28 +1376,34 @@ export function SimpleLineChart({
   description,
   rows,
   xKey,
+  xSortKey,
   yKey,
   seriesKey,
   thresholdLines = [],
   maxHeight = 320,
+  resetKey,
 }: {
   title: string;
   description?: string;
   rows: AnyRecord[];
   xKey: string;
+  xSortKey?: string;
   yKey: string;
   seriesKey?: string;
   thresholdLines?: Array<{ label: string; value: number; color: string; dash?: string }>;
   maxHeight?: number;
+  resetKey?: string;
 }) {
   const clipId = useId().replace(/:/g, "");
   const normalized = useMemo(() => {
     const filtered = rows
-      .map((row) => ({
+      .map((row, order) => ({
         row,
         xLabel: String(row[xKey] ?? "-"),
         y: safeNumber(row[yKey], Number.NaN),
         series: String(seriesKey ? row[seriesKey] ?? "Default" : "Default"),
+        xSort: xSortKey ? safeNumber(row[xSortKey], Number.NaN) : Number.NaN,
+        order,
       }))
       .filter((row) => Number.isFinite(row.y));
 
@@ -1405,23 +1411,55 @@ export function SimpleLineChart({
       return null;
     }
 
-    const xLabels = Array.from(new Set(filtered.map((row) => row.xLabel)));
-    const xIndexMap = new Map(xLabels.map((label, index) => [label, index]));
-    const grouped = new Map<string, Array<{ xIndex: number; xLabel: string; y: number; row: AnyRecord }>>();
+    const xBuckets = new Map<string, { key: string; xLabel: string; xSort: number; order: number }>();
+    filtered.forEach((item) => {
+      const bucketKey = Number.isFinite(item.xSort) ? `sort:${item.xSort}` : `label:${item.xLabel}`;
+      if (!xBuckets.has(bucketKey)) {
+        xBuckets.set(bucketKey, {
+          key: bucketKey,
+          xLabel: item.xLabel,
+          xSort: Number.isFinite(item.xSort) ? item.xSort : item.order,
+          order: item.order,
+        });
+      }
+    });
+    const sortedBuckets = Array.from(xBuckets.values()).sort(
+      (left, right) => left.xSort - right.xSort || left.order - right.order || compareDisplayValues(left.xLabel, right.xLabel),
+    );
+    const xLabels = sortedBuckets.map((item) => item.xLabel);
+    const xIndexMap = new Map(sortedBuckets.map((item, index) => [item.key, index]));
+    const grouped = new Map<string, Map<string, { xIndex: number; xLabel: string; ySum: number; count: number; row: AnyRecord }>>();
 
     filtered.forEach((item) => {
-      const bucket = grouped.get(item.series) ?? [];
-      bucket.push({
-        xIndex: xIndexMap.get(item.xLabel) ?? 0,
-        xLabel: item.xLabel,
-        y: item.y,
-        row: item.row,
-      });
+      const xBucketKey = Number.isFinite(item.xSort) ? `sort:${item.xSort}` : `label:${item.xLabel}`;
+      const bucket =
+        grouped.get(item.series) ??
+        new Map<string, { xIndex: number; xLabel: string; ySum: number; count: number; row: AnyRecord }>();
+      const current = bucket.get(xBucketKey);
+      if (current) {
+        current.ySum += item.y;
+        current.count += 1;
+      } else {
+        bucket.set(xBucketKey, {
+          xIndex: xIndexMap.get(xBucketKey) ?? 0,
+          xLabel: item.xLabel,
+          ySum: item.y,
+          count: 1,
+          row: item.row,
+        });
+      }
       grouped.set(item.series, bucket);
     });
 
     const seriesList = Array.from(grouped.entries()).map(([name, points], index) => {
-      const sorted = [...points].sort((left, right) => left.xIndex - right.xIndex);
+      const sorted = Array.from(points.values())
+        .map((point) => ({
+          xIndex: point.xIndex,
+          xLabel: point.xLabel,
+          y: point.ySum / Math.max(point.count, 1),
+          row: point.row,
+        }))
+        .sort((left, right) => left.xIndex - right.xIndex);
       return {
         name,
         color: palette(index),
@@ -1437,7 +1475,7 @@ export function SimpleLineChart({
       yMin: Math.min(...allValues),
       yMax: Math.max(...allValues),
     };
-  }, [rows, seriesKey, xKey, yKey]);
+  }, [rows, seriesKey, xKey, xSortKey, yKey]);
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const gestureRef = useRef<{
@@ -1457,6 +1495,13 @@ export function SimpleLineChart({
     xLabel: string;
     entries: Array<{ name: string; color: string; y: number; row: AnyRecord }>;
   } | null>(null);
+
+  useEffect(() => {
+    setHiddenSeries([]);
+    setViewport(null);
+    setBrushRange(null);
+    setTooltip(null);
+  }, [resetKey]);
 
   const width = 980;
   const height = Math.max(280, maxHeight);

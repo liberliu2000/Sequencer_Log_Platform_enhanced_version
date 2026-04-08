@@ -13,6 +13,8 @@ NOISE_PATTERNS = [
     r"create logger",
     r"logger:",
     r"debug trace",
+    r"\bbad message format\b",
+    r"\bunknown message format\b",
 ]
 NOISE_REGEXES = [re.compile(pattern, re.IGNORECASE) for pattern in NOISE_PATTERNS]
 

@@ -10,7 +10,7 @@ from app.correlators.pairing import pair_start_end
 from app.core.settings import get_settings
 from app.db.base import Base
 from app.detectors.error_detection import annotate_errors
-from app.models.db_models import ParameterResultModel, UploadTaskModel
+from app.models.db_models import NormalizedEventModel, ParameterResultModel, UploadTaskModel
 from app.repositories.task_repository import TaskRepository
 from app.schemas.common import NormalizedEvent
 from app.services.cycle_inference import infer_missing_cycles
@@ -229,3 +229,153 @@ def test_query_service_substep_cycle_series_exposes_cycle_alias(tmp_path):
         assert rows[0]["cycle_no"] == 3
         assert rows[0]["cycle"] == 3
         assert rows[0]["duration_value"] == 4200.0
+
+
+def test_parameter_series_collapses_duplicate_points_and_sorts_by_axis(tmp_path):
+    SessionLocal = _create_session_factory(tmp_path)
+
+    with SessionLocal() as db:
+        task = UploadTaskModel(task_uuid="trend-sort-task", filename="trend.log", stored_path=str(tmp_path), status="completed")
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        db.add_all(
+            [
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="transfer_time",
+                    parameter_display_name="transfer time",
+                    cycle_no=2,
+                    duration_seconds=12.0,
+                    duration_ms=12000.0,
+                    start_time_text="2024-03-09 16:02:00",
+                    end_time_text="2024-03-09 16:02:12",
+                    source_file="a.log",
+                    source_type="derived",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="A1",
+                    side_group="A",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="transfer_time",
+                    parameter_display_name="transfer time",
+                    cycle_no=2,
+                    duration_seconds=18.0,
+                    duration_ms=18000.0,
+                    start_time_text="2024-03-09 16:02:01",
+                    end_time_text="2024-03-09 16:02:19",
+                    source_file="a.log",
+                    source_type="derived",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="A1",
+                    side_group="A",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="transfer_time",
+                    parameter_display_name="transfer time",
+                    cycle_no=4,
+                    duration_seconds=9.0,
+                    duration_ms=9000.0,
+                    start_time_text="2024-03-09 16:04:00",
+                    end_time_text="2024-03-09 16:04:09",
+                    source_file="a.log",
+                    source_type="derived",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="A1",
+                    side_group="A",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="transfer_time",
+                    parameter_display_name="transfer time",
+                    cycle_no=1,
+                    duration_seconds=6.0,
+                    duration_ms=6000.0,
+                    start_time_text="2024-03-09 16:01:00",
+                    end_time_text="2024-03-09 16:01:06",
+                    source_file="b.log",
+                    source_type="derived",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                ),
+            ]
+        )
+        db.commit()
+
+        rows = QueryService(db).get_parameter_series(task.id, "transfer_time", unit="s", axis_mode="cycle")
+
+        assert [row["x_axis_sort_value"] for row in rows] == [1, 2, 4]
+        assert rows[1]["series_name"] == "A1"
+        assert rows[1]["sample_count"] == 2
+        assert round(float(rows[1]["duration_value"]), 6) == 15.0
+
+
+def test_timeline_error_points_skip_bad_message_format_noise(tmp_path):
+    SessionLocal = _create_session_factory(tmp_path)
+
+    with SessionLocal() as db:
+        task = UploadTaskModel(task_uuid="timeline-noise-task", filename="timeline.log", stored_path=str(tmp_path), status="completed")
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        db.add_all(
+            [
+                NormalizedEventModel(
+                    task_id=task.id,
+                    source_file="timeline.log",
+                    parser_name="service_log",
+                    original_time_text="2024-03-09 16:10:00",
+                    formatted_ms="2024-03-09 16:10:00.000",
+                    epoch_ms=1710000600000,
+                    level="ERROR",
+                    component="Workflow",
+                    module="Workflow",
+                    message="Move slide from imager to chuck stage failed on B2",
+                    raw_text="Move slide from imager to chuck stage failed on B2",
+                    cycle_no=8,
+                    sub_step="Move slide from imager to chuck stage",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                    normalized_signature="sig-move-fail",
+                    error_family="motion_axis_error",
+                    severity="error",
+                ),
+                NormalizedEventModel(
+                    task_id=task.id,
+                    source_file="timeline.log",
+                    parser_name="service_log",
+                    original_time_text="2024-03-09 16:10:03",
+                    formatted_ms="2024-03-09 16:10:03.000",
+                    epoch_ms=1710000603000,
+                    level="ERROR",
+                    component="Workflow",
+                    module="Workflow",
+                    message="Bad message format Tried to use SessionInfo before it was initialized",
+                    raw_text="Bad message format Tried to use SessionInfo before it was initialized",
+                    cycle_no=8,
+                    sub_step="Bad message format Tried to use SessionInfo before it was initialized",
+                    instrument_scope="Whole Instrument",
+                    side_scope=None,
+                    side_group=None,
+                    normalized_signature="sig-parser-noise",
+                    error_family="general_error",
+                    severity="error",
+                ),
+            ]
+        )
+        db.commit()
+
+        rows = QueryService(db).get_timeline_error_points(task.id)
+
+        assert len(rows["points"]) == 1
+        assert rows["points"][0]["normalized_signature"] == "sig-move-fail"

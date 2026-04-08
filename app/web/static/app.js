@@ -630,18 +630,36 @@
     const grouped = new Map();
     safeArray(rows).forEach((row) => {
       const seriesName = firstNonEmpty(row?.[seriesKey], row?.series_name, "Series");
+      const xLabel = firstNonEmpty(row?.[xKey], "-");
+      const xSort = Number(row?.x_axis_sort_value);
       if (!grouped.has(seriesName)) {
-        grouped.set(seriesName, []);
+        grouped.set(seriesName, new Map());
       }
-      grouped.get(seriesName).push(row);
+      const bucketKey = Number.isFinite(xSort) ? `sort:${xSort}` : `label:${xLabel}`;
+      const bucket = grouped.get(seriesName);
+      const current = bucket.get(bucketKey);
+      if (current) {
+        current.ySum += Number(row?.[yKey] ?? 0);
+        current.count += 1;
+      } else {
+        bucket.set(bucketKey, {
+          xLabel,
+          xSort: Number.isFinite(xSort) ? xSort : bucket.size,
+          ySum: Number(row?.[yKey] ?? 0),
+          count: 1,
+        });
+      }
     });
-    return Array.from(grouped.entries()).map(([seriesName, seriesRows]) => ({
-      type: "scatter",
-      mode: "lines+markers",
-      name: seriesName,
-      x: seriesRows.map((row) => row?.[xKey]),
-      y: seriesRows.map((row) => Number(row?.[yKey] ?? 0)),
-    }));
+    return Array.from(grouped.entries()).map(([seriesName, seriesBuckets]) => {
+      const points = Array.from(seriesBuckets.values()).sort((left, right) => left.xSort - right.xSort || String(left.xLabel).localeCompare(String(right.xLabel)));
+      return {
+        type: "scatter",
+        mode: "lines+markers",
+        name: seriesName,
+        x: points.map((point) => point.xLabel),
+        y: points.map((point) => point.ySum / Math.max(point.count, 1)),
+      };
+    });
   }
 
   function buildTimelineTraces(rows, errors) {

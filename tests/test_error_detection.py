@@ -56,3 +56,11 @@ def test_unmatched_error_falls_back_to_general_error():
     assert sig is not None
     assert family == "general_error"
     assert severity == "error"
+
+
+def test_bad_message_format_is_filtered_as_parser_noise():
+    event = build_event("Bad message format Tried to use SessionInfo before it was initialized", component="Workflow")
+    sig, family, severity = normalize_error_signature(event)
+    assert sig is None
+    assert family is None
+    assert severity is None

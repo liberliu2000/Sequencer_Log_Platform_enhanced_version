@@ -3183,15 +3183,36 @@ def build_parameter_trend_figure(
     *,
     x_col: str,
     y_col: str,
+    series_col: str = "series_name",
+    x_sort_col: str = "x_axis_sort_value",
     low_value_preference: str,
     highlight_low_points: bool,
     hide_low_points: bool,
 ) -> tuple[go.Figure | None, dict[str, Any]]:
     plot_df = df.copy()
     plot_df[y_col] = pd.to_numeric(plot_df[y_col], errors="coerce")
+    if x_sort_col in plot_df.columns:
+        plot_df[x_sort_col] = pd.to_numeric(plot_df[x_sort_col], errors="coerce")
+    else:
+        plot_df[x_sort_col] = plot_df.reset_index().index.astype(float)
+    if series_col not in plot_df.columns:
+        plot_df[series_col] = "Default"
     plot_df = _dropna_frame(plot_df, x_col, y_col)
     if plot_df.empty:
         return None, {"hidden_low_count": 0, "low_reference_label": None, "low_reference_value": None}
+    plot_df[x_col] = plot_df[x_col].astype(str)
+
+    agg_map: dict[str, Any] = {
+        y_col: "mean",
+    }
+    for field in ["threshold_value", "expected_value", "duration_unit", "time_epoch_ms"]:
+        if field in plot_df.columns:
+            agg_map[field] = "first"
+    plot_df = (
+        plot_df.sort_values(by=[x_sort_col, series_col, x_col], na_position="last")
+        .groupby([series_col, x_sort_col, x_col], dropna=False, as_index=False)
+        .agg(agg_map)
+    )
 
     low_reference_label, low_reference_value = _resolve_low_value_reference(plot_df, low_value_preference)
     hidden_low_count = 0
@@ -3206,27 +3227,39 @@ def build_parameter_trend_figure(
                 "low_reference_value": low_reference_value,
             }
 
-    marker_colors = None
-    if highlight_low_points and low_reference_value is not None:
-        marker_colors = ["#D94841" if value < low_reference_value else "#0B5CAD" for value in plot_df[y_col].tolist()]
-
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df[x_col],
-            y=plot_df[y_col],
-            mode="lines+markers",
-            line=dict(color="#0B5CAD", width=2.5),
-            marker=dict(
-                size=9,
-                color=marker_colors or "#0B5CAD",
-                line=dict(color="white", width=0.8),
-            ),
-            customdata=plot_df[["duration_unit"]].to_numpy() if "duration_unit" in plot_df.columns else None,
-            hovertemplate="%{x}<br>%{y:.4f}%{customdata[0]}<extra></extra>" if "duration_unit" in plot_df.columns else None,
-            showlegend=False,
+    unique_series = plot_df[series_col].nunique(dropna=False)
+    tick_df = plot_df[[x_sort_col, x_col]].drop_duplicates().sort_values(by=x_sort_col, na_position="last")
+    tick_vals = tick_df[x_sort_col].tolist()
+    tick_text = tick_df[x_col].tolist()
+    if len(tick_vals) > 14:
+        step = max(1, math.ceil(len(tick_vals) / 14))
+        tick_vals = tick_vals[::step]
+        tick_text = tick_text[::step]
+
+    for index, (series_name, series_df) in enumerate(plot_df.groupby(series_col, dropna=False, sort=False)):
+        marker_colors = None
+        if highlight_low_points and low_reference_value is not None:
+            marker_colors = ["#D94841" if value < low_reference_value else PLOTLY_COLOR_SEQUENCE[index % len(PLOTLY_COLOR_SEQUENCE)] for value in series_df[y_col].tolist()]
+        duration_unit_values = series_df[["duration_unit"]].fillna("").to_numpy() if "duration_unit" in series_df.columns else None
+        fig.add_trace(
+            go.Scatter(
+                x=series_df[x_sort_col],
+                y=series_df[y_col],
+                mode="lines+markers",
+                name=str(series_name or "Default"),
+                line=dict(color=PLOTLY_COLOR_SEQUENCE[index % len(PLOTLY_COLOR_SEQUENCE)], width=2.5),
+                marker=dict(
+                    size=9,
+                    color=marker_colors or PLOTLY_COLOR_SEQUENCE[index % len(PLOTLY_COLOR_SEQUENCE)],
+                    line=dict(color="white", width=0.8),
+                ),
+                customdata=duration_unit_values,
+                hovertemplate="%{text}<br>%{y:.4f}%{customdata[0]}<extra>%{fullData.name}</extra>" if "duration_unit" in series_df.columns else "%{text}<br>%{y:.4f}<extra>%{fullData.name}</extra>",
+                text=series_df[x_col],
+                showlegend=unique_series > 1,
+            )
         )
-    )
 
     if "threshold_value" in plot_df.columns:
         threshold_series = pd.to_numeric(plot_df["threshold_value"], errors="coerce").dropna()
@@ -3236,6 +3269,13 @@ def build_parameter_trend_figure(
         expected_series = pd.to_numeric(plot_df["expected_value"], errors="coerce").dropna()
         if not expected_series.empty:
             fig.add_hline(y=float(expected_series.iloc[0]), line_dash="dot", line_color="#1E8E6A")
+
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=tick_vals,
+        ticktext=tick_text,
+        type="linear",
+    )
 
     return fig, {
         "hidden_low_count": hidden_low_count,
@@ -4765,50 +4805,50 @@ elif page == "参数趋势分析":
                             df = df.sort_values(by=["x_axis_sort_value", "series_name"], na_position="last")
                         elif "time_epoch_ms" in df.columns:
                             df = df.sort_values(by=["time_epoch_ms", "series_name"], na_position="last")
-                        if df["series_name"].nunique(dropna=False) <= 1:
-                            fig, low_value_meta = build_parameter_trend_figure(
-                                df,
-                                x_col="x_axis_label",
-                                y_col="duration_value",
-                                low_value_preference=low_value_reference,
-                                highlight_low_points=highlight_low_points,
-                                hide_low_points=hide_low_points,
-                            )
-                            if fig is None:
-                                if low_value_meta.get("hidden_low_count"):
-                                    st.info(f"{name} 趋势中，全部点都低于当前基线，已被隐藏。")
-                                else:
-                                    st.info(f"{name} 趋势暂无可绘制数据。")
-                                continue
-                            render_fig(fig, key=f"trend_{name}_{axis_mode}", height=360, title=f"{name} 趋势")
-                            low_label = low_value_meta.get("low_reference_label")
-                            low_value = low_value_meta.get("low_reference_value")
-                            hidden_low_count = int(low_value_meta.get("hidden_low_count") or 0)
-                            if low_label and low_value is not None:
-                                note_parts = [f"低值判定基线: {low_label} = {low_value:.4f} {unit}"]
-                                if highlight_low_points:
-                                    note_parts.append("低于基线的点已标红")
-                                if hide_low_points:
-                                    note_parts.append(f"已隐藏 {hidden_low_count} 个低于基线的点")
-                                st.caption("；".join(note_parts))
-                        else:
-                            render_fig(
-                                px.line(df, x="x_axis_label", y="duration_value", color="series_name", markers=True),
-                                key=f"trend_{name}_{axis_mode}",
-                                height=360,
-                                title=f"{name} 趋势",
-                            )
+                        fig, low_value_meta = build_parameter_trend_figure(
+                            df,
+                            x_col="x_axis_label",
+                            y_col="duration_value",
+                            series_col="series_name",
+                            x_sort_col="x_axis_sort_value",
+                            low_value_preference=low_value_reference,
+                            highlight_low_points=highlight_low_points,
+                            hide_low_points=hide_low_points,
+                        )
+                        if fig is None:
+                            if low_value_meta.get("hidden_low_count"):
+                                st.info(f"{name} 趋势中，全部点都低于当前基线，已被隐藏。")
+                            else:
+                                st.info(f"{name} 趋势暂无可绘制数据。")
+                            continue
+                        render_fig(fig, key=f"trend_{name}_{axis_mode}", height=360, title=f"{name} 趋势")
+                        low_label = low_value_meta.get("low_reference_label")
+                        low_value = low_value_meta.get("low_reference_value")
+                        hidden_low_count = int(low_value_meta.get("hidden_low_count") or 0)
+                        if low_label and low_value is not None:
+                            note_parts = [f"低值判定基线: {low_label} = {low_value:.4f} {unit}"]
+                            if highlight_low_points:
+                                note_parts.append("低于基线的点已标红")
+                            if hide_low_points:
+                                note_parts.append(f"已隐藏 {hidden_low_count} 个低于基线的点")
+                            st.caption("；".join(note_parts))
                 ok_sub, sub_rows = api_get(f"/tasks/{task_uuid}/substep-cycle-series", agg_mode="mean", unit=unit, axis_mode=axis_mode, **scope_params)
                 if ok_sub and sub_rows:
                     sub_df = pd.DataFrame(sub_rows)
                     if "x_axis_sort_value" in sub_df.columns:
                         sub_df = sub_df.sort_values(by=["x_axis_sort_value", "series_name"], na_position="last")
-                    render_fig(
-                        px.line(sub_df, x="x_axis_label", y="duration_value", color="series_name", markers=True),
-                        key=f"substep_cycle_facets_{axis_mode}",
-                        height=480,
-                        title="Sub-step 趋势",
+                    sub_fig, _ = build_parameter_trend_figure(
+                        sub_df,
+                        x_col="x_axis_label",
+                        y_col="duration_value",
+                        series_col="series_name",
+                        x_sort_col="x_axis_sort_value",
+                        low_value_preference=low_value_reference,
+                        highlight_low_points=False,
+                        hide_low_points=False,
                     )
+                    if sub_fig is not None:
+                        render_fig(sub_fig, key=f"substep_cycle_facets_{axis_mode}", height=480, title="Sub-step 趋势")
         else:
             st.error(defs)
         ok_metric, metric_rows = api_get(f"/tasks/{task_uuid}/row-scan-metric-series", unit="ms", axis_mode=axis_mode, **scope_params)
@@ -4816,7 +4856,18 @@ elif page == "参数趋势分析":
             metric_df = pd.DataFrame(metric_rows)
             if "x_axis_sort_value" in metric_df.columns:
                 metric_df = metric_df.sort_values(by=["x_axis_sort_value", "series_name"], na_position="last")
-            render_fig(px.line(metric_df, x="x_axis_label", y="duration_value", color="series_name", markers=True), key=f"metric_trend_{axis_mode}", height=420, title="Row Scan Metrics 各阶段趋势")
+            metric_fig, _ = build_parameter_trend_figure(
+                metric_df,
+                x_col="x_axis_label",
+                y_col="duration_value",
+                series_col="series_name",
+                x_sort_col="x_axis_sort_value",
+                low_value_preference=low_value_reference if 'low_value_reference' in locals() else "优先期望值",
+                highlight_low_points=False,
+                hide_low_points=False,
+            )
+            if metric_fig is not None:
+                render_fig(metric_fig, key=f"metric_trend_{axis_mode}", height=420, title="Row Scan Metrics 各阶段趋势")
             if st.checkbox("显示 metrics 表格明细", value=False):
                 safe_dataframe(metric_df, use_container_width=True, height=280)
 

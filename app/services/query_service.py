@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import mimetypes
+import re
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,13 @@ _SETTINGS = get_settings()
 _QUERY_CACHE = TTLCache(max_entries=_SETTINGS.service_cache_max_entries, ttl_seconds=_SETTINGS.service_cache_ttl_seconds)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 UTC_TZ = ZoneInfo("UTC")
+TIMELINE_ERROR_NOISE_REGEXES = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\bbad message format\b",
+        r"\bunknown message format\b",
+    ]
+]
 
 
 class QueryService:
@@ -187,6 +195,79 @@ class QueryService:
         if unit == "h":
             return round(float(ms) / 3600000.0, 6)
         return round(float(ms), 3)
+
+    @staticmethod
+    def _numeric_sort_value(value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    @classmethod
+    def _sort_trend_points(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def key(item: dict[str, Any]) -> tuple[Any, ...]:
+            x_sort = cls._numeric_sort_value(item.get("x_axis_sort_value"))
+            time_epoch_ms = cls._numeric_sort_value(item.get("time_epoch_ms"))
+            return (
+                0 if x_sort is not None else 1,
+                x_sort if x_sort is not None else float("inf"),
+                item.get("series_name") or "",
+                time_epoch_ms if time_epoch_ms is not None else float("inf"),
+                item.get("x_axis_label") or "",
+                item.get("parameter_name") or item.get("metric_stage") or item.get("sub_step") or "",
+                item.get("chip_name") or "",
+            )
+
+        return sorted(rows, key=key)
+
+    @classmethod
+    def _collapse_trend_points(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for row in cls._sort_trend_points(rows):
+            x_sort = cls._numeric_sort_value(row.get("x_axis_sort_value"))
+            key = (
+                row.get("series_name") or "",
+                row.get("x_axis_type") or "",
+                x_sort if x_sort is not None else row.get("x_axis_label") or "",
+                row.get("x_axis_label") or "",
+            )
+            grouped.setdefault(key, []).append(row)
+
+        output: list[dict[str, Any]] = []
+        for bucket in grouped.values():
+            exemplar = dict(bucket[0])
+            sample_count = 0
+            for item in bucket:
+                sample_count += int(item.get("sample_count") or 1)
+            exemplar["sample_count"] = sample_count
+            exemplar["aggregated_point_count"] = len(bucket)
+
+            for field in ("duration_value", "duration_ms", "duration_seconds"):
+                values: list[float] = []
+                for item in bucket:
+                    value = cls._numeric_sort_value(item.get(field))
+                    if value is not None:
+                        values.append(value)
+                if values:
+                    exemplar[field] = sum(values) / len(values)
+
+            output.append(exemplar)
+
+        return cls._sort_trend_points(output)
+
+    @classmethod
+    def _is_timeline_error_relevant(cls, item: dict[str, Any]) -> bool:
+        message = str(item.get("message") or item.get("normalized_signature") or "").strip()
+        if not message:
+            return False
+        lowered = message.lower()
+        if any(pattern.search(lowered) for pattern in TIMELINE_ERROR_NOISE_REGEXES):
+            return False
+        component = str(item.get("component") or item.get("module") or "").strip()
+        sub_step = item.get("sub_step") or message
+        return cls._is_movement_like(sub_step, component)
 
     @staticmethod
     def _normalize_filter_values(value: Any) -> list[str]:
@@ -1148,23 +1229,7 @@ class QueryService:
                 "time_epoch_ms": time_epoch_ms,
                 "series_name": series_name,
             })
-        if x_axis_type == "time":
-            out.sort(
-                key=lambda item: (
-                    item.get("x_axis_sort_value") if item.get("x_axis_sort_value") is not None else float("inf"),
-                    item.get("series_name") or "",
-                    item.get("parameter_name") or "",
-                )
-            )
-        else:
-            out.sort(
-                key=lambda item: (
-                    item.get("series_name") or "",
-                    item.get("x_axis_sort_value") if item.get("x_axis_sort_value") is not None else -1,
-                    item.get("time_epoch_ms") if item.get("time_epoch_ms") is not None else float("inf"),
-                )
-            )
-        return out
+        return self._collapse_trend_points(out)
 
     def get_row_scan_metric_stage_series(
         self,
@@ -1222,15 +1287,7 @@ class QueryService:
                 "time_epoch_ms": time_epoch_ms,
                 "series_name": series_name,
             })
-        return sorted(
-            out,
-            key=lambda item: (
-                item.get("time_epoch_ms") if x_axis_type == "time" and item.get("time_epoch_ms") is not None else float("inf") if x_axis_type == "time" else (item.get("series_name") or ""),
-                item.get("series_name") or "",
-                item.get("cycle") if item.get("cycle") is not None else -1,
-                item.get("chip_name") or "",
-            ),
-        )
+        return self._collapse_trend_points(out)
 
     def _event_schema_to_llm_row(self, ev: NormalizedEvent) -> dict[str, Any]:
         return {
@@ -1901,6 +1958,8 @@ class QueryService:
                 }
             )
             item["is_uncertain_side"] = self._is_uncertain_side(item["side_scope"], item["side_confidence"])
+            if not self._is_timeline_error_relevant(item):
+                continue
             if not self._row_matches_scope_filters(
                 item,
                 side_scopes=side_scope_values,
@@ -2063,14 +2122,7 @@ class QueryService:
             ):
                 continue
             out.append(item)
-        return sorted(
-            out,
-            key=lambda item: (
-                item.get("time_epoch_ms") if x_axis_type == "time" and item.get("time_epoch_ms") is not None else float("inf") if x_axis_type == "time" else (item.get("series_name") or ""),
-                item.get("series_name") or "",
-                item.get("cycle") if item.get("cycle") is not None else -1,
-            ),
-        )
+        return self._collapse_trend_points(out)
 
     def get_error_clusters(
         self,
