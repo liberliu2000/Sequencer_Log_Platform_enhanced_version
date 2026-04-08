@@ -3794,6 +3794,39 @@ def render_account_controls(current_user: dict[str, Any]) -> None:
             _clear_login_state()
             st.rerun()
 
+def _announcement_edit_history_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
+    history = item.get("edit_history")
+    if not isinstance(history, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for index, entry in enumerate(history, start=1):
+        if not isinstance(entry, dict):
+            continue
+        rows.append(
+            {
+                "序号": index,
+                "编辑人": str(entry.get("editor") or entry.get("updated_by") or "系统发布").strip() or "系统发布",
+                "编辑时间": _display_datetime_text(entry.get("edited_at") or entry.get("updated_at") or entry.get("created_at")),
+                "标题": str(entry.get("title") or "").strip(),
+                "摘要": str(entry.get("summary") or "").strip(),
+            }
+        )
+    return rows
+
+
+def _announcement_last_edit_meta(item: dict[str, Any]) -> tuple[str, str, int]:
+    history_rows = _announcement_edit_history_rows(item)
+    if history_rows:
+        latest = history_rows[-1]
+        return (
+            str(latest.get("编辑人") or "系统发布").strip() or "系统发布",
+            str(latest.get("编辑时间") or "-").strip() or "-",
+            len(history_rows),
+        )
+    editor = str(item.get("updated_by") or "系统发布").strip() or "系统发布"
+    edited_at = _display_datetime_text(item.get("updated_at") or item.get("created_at"))
+    return editor, edited_at, 0
+
 
 def render_announcement_feed(limit: int = 6) -> None:
     st.markdown("### 更新公告")
@@ -3830,8 +3863,10 @@ def render_announcement_feed(limit: int = 6) -> None:
         title = escape(str(item.get("title") or ("置顶公告" if item.get("is_pinned") else "更新公告")).strip())
         summary_text = str(item.get("summary") or "").strip() or "暂无摘要"
         summary = escape(summary_text).replace("\n", "<br>")
-        updated_by = escape(str(item.get("updated_by") or "系统发布").strip() or "系统发布")
-        updated_at = escape(_display_datetime_text(item.get("updated_at")))
+        latest_editor, latest_edit_at, edit_count = _announcement_last_edit_meta(item)
+        updated_by = escape(latest_editor)
+        updated_at = escape(latest_edit_at)
+        edit_count_text = f" | 编辑次数: {edit_count}" if edit_count > 0 else ""
         pinned_badge = (
             '<span style="display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;'
             'background:rgba(11,92,173,0.10);color:#0b5cad;font-size:11px;font-weight:700;">置顶</span>'
@@ -3846,7 +3881,7 @@ def render_announcement_feed(limit: int = 6) -> None:
                 f'<div style="font-size:14px;font-weight:700;color:#12324f;line-height:1.5;">{title}</div>'
                 f"{pinned_badge}</div>"
                 f'<div style="margin-top:8px;font-size:12px;line-height:1.6;color:#4f6478;">{summary}</div>'
-                f'<div style="margin-top:8px;font-size:11px;color:#70859b;">{updated_at}</div>'
+                f'<div style="margin-top:8px;font-size:11px;color:#70859b;">最近编辑: {updated_by} | {updated_at}{escape(edit_count_text)}</div>'
                 "</article>"
             )
         return (
@@ -3858,7 +3893,7 @@ def render_announcement_feed(limit: int = 6) -> None:
             f"{escape(tag)}</span>{pinned_badge}</div>"
             f'<div style="margin-top:12px;font-size:15px;font-weight:700;color:#12324f;line-height:1.6;">{title}</div>'
             f'<div style="margin-top:10px;font-size:13px;line-height:1.75;color:#38556f;white-space:normal;">{summary}</div>'
-            f'<div style="margin-top:12px;font-size:11px;color:#70859b;">发布人: {updated_by} | 更新时间: {updated_at}</div>'
+            f'<div style="margin-top:12px;font-size:11px;color:#70859b;">最近编辑: {updated_by} | 编辑时间: {updated_at}{escape(edit_count_text)}</div>'
             "</article>"
         )
 
@@ -3941,7 +3976,15 @@ def render_announcement_admin_panel(current_user: dict[str, Any]) -> None:
             placeholder="填写本次更新摘要",
         )
         st.checkbox("设为置顶消息", value=bool(selected.get("is_pinned")), key=pinned_key)
-        st.caption(f"最近更新人: {selected.get('updated_by') or '-'} | 更新时间: {_display_datetime_text(selected.get('updated_at'))}")
+        edit_history_rows = _announcement_edit_history_rows(selected)
+        latest_editor, latest_edit_at, edit_count = _announcement_last_edit_meta(selected)
+        st.caption(f"最近编辑人: {latest_editor} | 编辑时间: {latest_edit_at} | 编辑次数: {edit_count}")
+        if edit_history_rows:
+            safe_dataframe(pd.DataFrame(edit_history_rows), use_container_width=True, height=220)
+        else:
+            st.info("当前公告还没有编辑历史，后续修改会在这里显示。")
+        with st.expander("查看公告原始数据", expanded=False):
+            safe_json(selected)
 
         save_col, delete_col = st.columns(2)
         if save_col.button("保存修改", key=f"announcement_save_button_{announcement_id}", use_container_width=True):
@@ -4376,6 +4419,34 @@ elif page == "首页 / 仪表盘":
 
 elif page == "历史项目中心":
     paged_table("/tasks", page_key="tasks_page", page_size_key="tasks_page_size", title="任务列表", default_page_size=50, max_page_size=200)
+    if tasks:
+        history_labels = [
+            f"{str(item.get('task_uuid', ''))[:8]} | {item.get('filename', '-') or '-'} | {item.get('uploaded_by', '-') or '-'} | {item.get('total_size_text', '-') or '-'}"
+            for item in tasks
+        ]
+        picked_history = st.selectbox("选择历史任务", history_labels, key="history_detail_pick")
+        selected_task = tasks[history_labels.index(picked_history)]
+        st.markdown("### 历史任务详情")
+        safe_dataframe(
+            pd.DataFrame(
+                [
+                    {"Field": "task_uuid", "Value": selected_task.get("task_uuid")},
+                    {"Field": "filename", "Value": selected_task.get("filename")},
+                    {"Field": "uploaded_by", "Value": selected_task.get("uploaded_by")},
+                    {"Field": "total_size_text", "Value": selected_task.get("total_size_text") or "0 B"},
+                    {"Field": "status", "Value": selected_task.get("status")},
+                    {"Field": "progress_percent", "Value": f"{selected_task.get('progress_percent', 0)}%"},
+                    {"Field": "total_errors", "Value": selected_task.get("total_errors")},
+                    {"Field": "created_at", "Value": _display_datetime_text(selected_task.get("created_at"))},
+                    {"Field": "updated_at", "Value": _display_datetime_text(selected_task.get("updated_at"))},
+                ]
+            ),
+            use_container_width=True,
+            height=320,
+        )
+        download_query = _query_params_for_link()
+        download_suffix = f"?{download_query}" if download_query else ""
+        st.markdown(f"[下载上传文件]({_api_base()}/tasks/{selected_task.get('task_uuid')}/download{download_suffix})")
 
 elif page == "文件上传":
     with st.form("upload_form"):
@@ -4421,22 +4492,45 @@ elif page == "统一事件流":
         cycle_no = f3.text_input("Cycle")
         chip_name = f4.text_input("芯片名")
         search = f5.text_input("关键词")
-        paged_table(f"/tasks/{task_uuid}/events", params={"component": component or None, "level": level or None, "cycle_no": int(cycle_no) if cycle_no.strip() else None, "chip_name": chip_name or None, "search": search or None}, page_key="events_page", page_size_key="events_page_size", title="统一事件流", default_page_size=100, max_page_size=500)
+        paged_table(
+            f"/tasks/{task_uuid}/events",
+            params={
+                "component": component or None,
+                "level": level or None,
+                "cycle_no": int(cycle_no) if cycle_no.strip() else None,
+                "chip_name": chip_name or None,
+                "search": search or None,
+                **scope_params,
+            },
+            page_key="events_page",
+            page_size_key="events_page_size",
+            title="统一事件流",
+            default_page_size=100,
+            max_page_size=500,
+        )
 
 elif page == "耗时分析":
     if not task_uuid:
         st.info("请先选择任务 UUID。")
     else:
         unit = DURATION_UNITS[st.selectbox("Cycle 总耗时单位", list(DURATION_UNITS.keys()), key="ana_unit")]
-        render_scope_filter_panel(task_uuid, "timing_scope")
-        ok2, cycle_rows = api_get(f"/tasks/{task_uuid}/cycle-summary", unit=unit)
+        scope_params = render_scope_filter_panel(task_uuid, "timing_scope")
+        ok2, cycle_rows = api_get(f"/tasks/{task_uuid}/cycle-summary", unit=unit, **scope_params)
         if ok2:
             cycle_df = pd.DataFrame(cycle_rows)
             if not cycle_df.empty:
                 render_fig(px.line(cycle_df, x="cycle_no", y="total_duration_value", color="chip_name", markers=True), key="ana_cycle", title=f"Cycle 总耗时趋势({unit})", height=420, title_outside=True)
                 safe_dataframe(cycle_df, use_container_width=True, height=260)
-        paged_table(f"/tasks/{task_uuid}/steps", page_key="steps_page", page_size_key="steps_page_size", title="Sub-step 耗时表", default_page_size=100, max_page_size=500)
-        ok3, ops = api_get(f"/tasks/{task_uuid}/operational-metrics")
+        paged_table(
+            f"/tasks/{task_uuid}/steps",
+            params=scope_params,
+            page_key="steps_page",
+            page_size_key="steps_page_size",
+            title="Sub-step 耗时表",
+            default_page_size=100,
+            max_page_size=500,
+        )
+        ok3, ops = api_get(f"/tasks/{task_uuid}/operational-metrics", **scope_params)
         if ok3:
             photo_df = pd.DataFrame(ops.get("photo_summary", []))
             if not photo_df.empty:
@@ -4447,100 +4541,145 @@ elif page == "事件流时间轴":
     if not task_uuid:
         st.info("请先选择任务 UUID。")
     else:
-        render_scope_filter_panel(task_uuid, "timeline_scope")
+        scope_params = render_scope_filter_panel(task_uuid, "timeline_scope")
         cycles_ok, cycles = api_get(f"/tasks/{task_uuid}/cycles")
         options = ["全程"] + [str(c) for c in (cycles if cycles_ok else [])]
         cycle_pick = st.selectbox("选择 Cycle", options, key="timeline_cycle")
         track_order = st.selectbox("纵轴顺序", ["default", "cycle"], format_func=lambda x: "默认顺序" if x == "default" else "按 cycle 排序")
         cycle_no = None if cycle_pick == "全程" else int(cycle_pick)
         track_granularity = st.selectbox("轨道粒度", ["component", "side", "side_chip"], index=2)
-        ok, rows = api_get(f"/tasks/{task_uuid}/movement-timeline", cycle_no=cycle_no, track_order=track_order, track_granularity=track_granularity)
-        ok_errors, error_rows = api_get(f"/tasks/{task_uuid}/movement-timeline/errors", cycle_no=cycle_no, track_granularity=track_granularity)
+        ok, rows = api_get(
+            f"/tasks/{task_uuid}/movement-timeline",
+            cycle_no=cycle_no,
+            track_order=track_order,
+            track_granularity=track_granularity,
+            **scope_params,
+        )
+        ok_errors, error_rows = api_get(
+            f"/tasks/{task_uuid}/movement-timeline/errors",
+            cycle_no=cycle_no,
+            track_granularity=track_granularity,
+            **scope_params,
+        )
         if ok:
-            df = pd.DataFrame(rows)
-            if not df.empty:
-                # Avoid relying on pandas' newer "mixed" parser so timeline rendering
-                # still works in environments with slightly different pandas versions.
+            timeline_payload = rows if isinstance(rows, dict) else {"rows": rows}
+            error_payload = error_rows if ok_errors and isinstance(error_rows, dict) else {"points": error_rows if ok_errors else []}
+            side_groups = timeline_payload.get("by_side", []) or []
+            all_rows = timeline_payload.get("rows", []) or []
+            all_error_rows = error_payload.get("points", []) or []
+
+            if side_groups:
+                side_labels = ["整机全部边"]
+                side_map = {"整机全部边": None}
+                for item in side_groups:
+                    base_label = str(item.get("side_label") or item.get("side_scope") or "Unassigned")
+                    uncertain_count = int(item.get("uncertain_count") or 0)
+                    side_label = f"{base_label}（含 {uncertain_count} 条不确定时间轴）" if uncertain_count > 0 else base_label
+                    side_labels.append(side_label)
+                    side_map[side_label] = str(item.get("side_scope") or "")
+                picked_side = st.selectbox("查看哪一边", side_labels, key="timeline_side_pick")
+                target_side_scope = side_map.get(picked_side)
+                visible_groups = side_groups if target_side_scope is None else [item for item in side_groups if str(item.get("side_scope") or "") == target_side_scope]
+            else:
+                visible_groups = [{"side_scope": None, "side_label": "Unassigned", "rows": all_rows, "uncertain_count": len(timeline_payload.get("unassigned_side_rows", []) or [])}]
+
+            error_df_all = pd.DataFrame(all_error_rows)
+            show_error_points = st.checkbox("标记错误发生时间点", value=True, key="timeline_show_errors")
+            selected_families: list[str] = []
+            selected_severities: list[str] = []
+            if show_error_points and not error_df_all.empty:
+                error_df_all = enrich_error_family_frame(error_df_all)
+                error_df_all["severity"] = error_df_all["severity"].fillna("unknown").astype(str)
+                family_options = sorted(error_df_all["error_family_display"].dropna().unique().tolist())
+                severity_options = sorted(error_df_all["severity"].dropna().unique().tolist())
+                c1, c2 = st.columns(2)
+                with c1:
+                    selected_families = st.multiselect("显示哪些错误家族", family_options, default=family_options, key="timeline_error_families")
+                with c2:
+                    selected_severities = st.multiselect("显示哪些严重级别", severity_options, default=severity_options, key="timeline_error_severities")
+                error_df_all = error_df_all[
+                    error_df_all["error_family_display"].isin(selected_families)
+                    & error_df_all["severity"].isin(selected_severities)
+                ].copy()
+                error_df_all["time"] = pd.to_datetime(error_df_all["time"], errors="coerce")
+                error_df_all = _dropna_frame(error_df_all, "time").copy()
+
+            for index, group in enumerate(visible_groups):
+                group_rows = group.get("rows", []) or []
+                df = pd.DataFrame(group_rows)
+                if df.empty:
+                    continue
                 df["start"] = pd.to_datetime(df["start"], errors="coerce")
                 df["end"] = pd.to_datetime(df["end"], errors="coerce")
                 df = _dropna_frame(df, "start", "end").copy()
                 if df.empty:
-                    st.info("当前时间轴数据缺少可解析的开始/结束时间，暂时无法绘制甘特图。")
-                else:
-                    error_df = pd.DataFrame(error_rows if ok_errors and isinstance(error_rows, list) else [])
-                    show_error_points = st.checkbox("标记错误发生时间点", value=True, key="timeline_show_errors")
-                    selected_families: list[str] = []
-                    selected_severities: list[str] = []
-                    if show_error_points and not error_df.empty:
-                        error_df = enrich_error_family_frame(error_df)
-                        error_df["severity"] = error_df["severity"].fillna("unknown").astype(str)
-                        family_options = sorted(error_df["error_family_display"].dropna().unique().tolist())
-                        severity_options = sorted(error_df["severity"].dropna().unique().tolist())
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            selected_families = st.multiselect("显示哪些错误家族", family_options, default=family_options, key="timeline_error_families")
-                        with c2:
-                            selected_severities = st.multiselect("显示哪些严重级别", severity_options, default=severity_options, key="timeline_error_severities")
+                    continue
+                if "is_uncertain_side" in df.columns:
+                    df["track"] = df.apply(
+                        lambda row: f"[?] {row['track']}" if bool(row.get("is_uncertain_side")) else row["track"],
+                        axis=1,
+                    )
+                group_side_scope = str(group.get("side_scope") or "")
+                group_error_rows = []
+                if not error_df_all.empty:
+                    group_error_rows = [
+                        item
+                        for item in all_error_rows
+                        if str(item.get("render_side_scope") or item.get("side_scope") or "") == group_side_scope
+                    ]
+                error_df = pd.DataFrame(group_error_rows)
+                if not error_df.empty:
+                    error_df = enrich_error_family_frame(error_df)
+                    error_df["severity"] = error_df["severity"].fillna("unknown").astype(str)
+                    if selected_families:
                         error_df = error_df[
                             error_df["error_family_display"].isin(selected_families)
                             & error_df["severity"].isin(selected_severities)
                         ].copy()
-                        error_df["time"] = pd.to_datetime(error_df["time"], errors="coerce")
-                        error_df = _dropna_frame(error_df, "time").copy()
-                    fig, error_df, track_order_values = build_movement_timeline_figure(df, error_df, order_mode=track_order, show_error_points=show_error_points)
-                    if False and show_error_points and not error_df.empty:
-                        for severity_value, severity_group in error_df.groupby("severity", dropna=False):
-                            severity_text = str(severity_value or "unknown")
-                            fig.add_trace(
-                                go.Scatter(
-                                    x=severity_group["time"],
-                                    y=severity_group["track"],
-                                    mode="markers",
-                                    name=f"错误点 {severity_text}",
-                                    marker={
-                                        "size": 11,
-                                        "symbol": "diamond",
-                                        "color": ERROR_SEVERITY_COLORS.get(severity_text.lower(), ERROR_SEVERITY_COLORS["unknown"]),
-                                        "line": {"width": 1, "color": "#FFFFFF"},
-                                    },
-                                    customdata=severity_group[["time_text", "normalized_signature", "error_family_display", "severity", "component", "message"]].to_numpy(),
-                                    hovertemplate=(
-                                        "时间: %{customdata[0]}<br>"
-                                        "错误签名: %{customdata[1]}<br>"
-                                        "错误家族: %{customdata[2]}<br>"
-                                        "严重级别: %{customdata[3]}<br>"
-                                        "组件: %{customdata[4]}<br>"
-                                        "消息: %{customdata[5]}<extra></extra>"
-                                    ),
-                                )
-                            )
-                    timeline_key_seed = json.dumps(
-                        {
-                            "task_uuid": task_uuid,
-                            "cycle_pick": cycle_pick,
-                            "track_order": track_order,
-                            "track_granularity": track_granularity,
-                            "show_error_points": show_error_points,
-                            "families": selected_families,
-                            "severities": selected_severities,
-                            "track_count": int(df["track"].nunique()),
-                            "error_count": int(len(error_df)),
-                        },
-                        ensure_ascii=False,
+                    error_df["time"] = pd.to_datetime(error_df["time"], errors="coerce")
+                    error_df = _dropna_frame(error_df, "time").copy()
+                fig, error_df, track_order_values = build_movement_timeline_figure(df, error_df, order_mode=track_order, show_error_points=show_error_points)
+                chart_title = f"运动时间轴 · {group.get('side_label') or group.get('side_scope') or 'Unassigned'}"
+                timeline_key_seed = json.dumps(
+                    {
+                        "task_uuid": task_uuid,
+                        "side_scope": group_side_scope,
+                        "cycle_pick": cycle_pick,
+                        "track_order": track_order,
+                        "track_granularity": track_granularity,
+                        "show_error_points": show_error_points,
+                        "families": selected_families,
+                        "severities": selected_severities,
+                        "track_count": int(df["track"].nunique()),
+                        "error_count": int(len(error_df)),
+                    },
+                    ensure_ascii=False,
+                )
+                timeline_render_key = f"timeline_{hashlib.sha1(timeline_key_seed.encode('utf-8')).hexdigest()[:12]}"
+                render_fig(fig, key=timeline_render_key, height=min(max(500, 24 * len(df['track'].unique()) + 180), 2200), title=chart_title, title_outside=True)
+                uncertain_count = int(group.get("uncertain_count") or 0)
+                if uncertain_count > 0:
+                    st.caption(f"当前图包含 {uncertain_count} 条边归属不确定的时间轴，已复制到该边视图中供对比。")
+                if show_error_points:
+                    if ok_errors and not error_df.empty:
+                        st.caption(f"当前图已标记 {len(error_df)} 个错误时间点，可按错误家族和严重级别自由筛选。")
+                    elif ok_errors:
+                        st.caption("当前筛选条件下没有可显示的错误时间点。")
+                    else:
+                        st.caption("错误时间点加载失败，当前仅展示甘特图。")
+                if st.checkbox(f"显示时间轴表格明细 · {group.get('side_label') or group.get('side_scope') or 'Unassigned'}", value=False, key=f"timeline_table_{index}"):
+                    safe_dataframe(
+                        df[[c for c in ["side_scope", "track", "cycle_no", "component", "sub_step", "is_uncertain_side", "start_time_sec", "end_time_sec", "duration_ms", "message"] if c in df.columns]],
+                        use_container_width=True,
+                        height=300,
                     )
-                    timeline_render_key = f"timeline_{hashlib.sha1(timeline_key_seed.encode('utf-8')).hexdigest()[:12]}"
-                    render_fig(fig, key=timeline_render_key, height=min(max(500, 24 * len(df['track'].unique()) + 180), 2200), title="按 Cycle / 全程查看各组件运动时间轴", title_outside=True)
-                    if show_error_points:
-                        if ok_errors and not error_df.empty:
-                            st.caption(f"当前已标记 {len(error_df)} 个错误时间点，可按错误家族和严重级别自由筛选。")
-                        elif ok_errors:
-                            st.caption("当前筛选条件下没有可显示的错误时间点。")
-                        else:
-                            st.caption("错误时间点加载失败，当前仅展示甘特图。")
-                    if st.checkbox("显示时间轴表格明细", value=False):
-                        safe_dataframe(df[[c for c in ["track","cycle_no","component","sub_step","start_time_sec","end_time_sec","duration_ms","message"] if c in df.columns]], use_container_width=True, height=300)
-            else:
+            if not all_rows:
                 st.info("当前筛选条件下暂无可展示的运动时间轴。")
+            else:
+                with st.expander("查看原始时间轴与错误点数据", expanded=False):
+                    safe_json(timeline_payload)
+                    if ok_errors:
+                        safe_json(error_payload)
         else:
             st.error(rows)
 
@@ -4548,9 +4687,17 @@ elif page == "错误分析":
     if not task_uuid:
         st.info("请先选择任务 UUID。")
     else:
-        paged_table(f"/tasks/{task_uuid}/errors", page_key="errors_page", page_size_key="errors_page_size", title="错误簇", default_page_size=100, max_page_size=500)
-        render_scope_filter_panel(task_uuid, "error_scope")
-        ok, rows = api_get(f"/tasks/{task_uuid}/errors", limit=100, offset=0)
+        scope_params = render_scope_filter_panel(task_uuid, "error_scope")
+        paged_table(
+            f"/tasks/{task_uuid}/errors",
+            params=scope_params,
+            page_key="errors_page",
+            page_size_key="errors_page_size",
+            title="错误簇",
+            default_page_size=100,
+            max_page_size=500,
+        )
+        ok, rows = api_get(f"/tasks/{task_uuid}/errors", limit=100, offset=0, **scope_params)
         if ok and rows.get("items"):
             df = enrich_error_family_frame(rows["items"])
             tabs = st.tabs(["错误簇 Top N", "错误家族分布", "家族说明"])
@@ -4575,6 +4722,8 @@ elif page == "参数趋势分析":
     if not task_uuid:
         st.info("请先选择任务 UUID。")
     else:
+        scope_params = render_scope_filter_panel(task_uuid, "parameter_scope")
+        axis_mode = st.selectbox("横轴模式", ["cycle", "time"], format_func=lambda value: "按 cycle 排列" if value == "cycle" else "按时间排列", key="trend_axis_mode")
         ok_defs, defs = api_get("/parameter-definitions")
         if ok_defs:
             defs = [d for d in defs if d.get("parameter_name") != "imaging_time"]
@@ -4586,45 +4735,65 @@ elif page == "参数趋势分析":
             hide_low_points = st.checkbox("隐藏低于基线的点", value=False, key="trend_hide_low_points")
             if selected:
                 for name in selected:
-                    ok, rows = api_get(f"/tasks/{task_uuid}/parameter-series/{name}", unit=unit)
+                    ok, rows = api_get(f"/tasks/{task_uuid}/parameter-series/{name}", unit=unit, axis_mode=axis_mode, **scope_params)
                     if ok and rows:
                         df = pd.DataFrame(rows)
-                        x_col = "cycle"
-                        if str(name).startswith("temperature_"):
-                            x_col = "start_time"
-                        df = df.sort_values(by=[x_col, "cycle"], na_position="last")
-                        fig, low_value_meta = build_parameter_trend_figure(
-                            df,
-                            x_col=x_col,
-                            y_col="duration_value",
-                            low_value_preference=low_value_reference,
-                            highlight_low_points=highlight_low_points,
-                            hide_low_points=hide_low_points,
-                        )
-                        if fig is None:
-                            if low_value_meta.get("hidden_low_count"):
-                                st.info(f"{name} 趋势中，全部点都低于当前基线，已被隐藏。")
-                            else:
-                                st.info(f"{name} 趋势暂无可绘制数据。")
-                            continue
-                        render_fig(fig, key=f"trend_{name}", height=360, title=f"{name} 趋势")
-                        low_label = low_value_meta.get("low_reference_label")
-                        low_value = low_value_meta.get("low_reference_value")
-                        hidden_low_count = int(low_value_meta.get("hidden_low_count") or 0)
-                        if low_label and low_value is not None:
-                            note_parts = [f"低值判定基线: {low_label} = {low_value:.4f} {unit}"]
-                            if highlight_low_points:
-                                note_parts.append("低于基线的点已标红")
-                            if hide_low_points:
-                                note_parts.append(f"已隐藏 {hidden_low_count} 个低于基线的点")
-                            st.caption("；".join(note_parts))
-                ok_sub, sub_rows = api_get(f"/tasks/{task_uuid}/substep-cycle-series", agg_mode="mean", unit=unit)
+                        if "x_axis_sort_value" in df.columns:
+                            df = df.sort_values(by=["x_axis_sort_value", "series_name"], na_position="last")
+                        elif "time_epoch_ms" in df.columns:
+                            df = df.sort_values(by=["time_epoch_ms", "series_name"], na_position="last")
+                        if df["series_name"].nunique(dropna=False) <= 1:
+                            fig, low_value_meta = build_parameter_trend_figure(
+                                df,
+                                x_col="x_axis_label",
+                                y_col="duration_value",
+                                low_value_preference=low_value_reference,
+                                highlight_low_points=highlight_low_points,
+                                hide_low_points=hide_low_points,
+                            )
+                            if fig is None:
+                                if low_value_meta.get("hidden_low_count"):
+                                    st.info(f"{name} 趋势中，全部点都低于当前基线，已被隐藏。")
+                                else:
+                                    st.info(f"{name} 趋势暂无可绘制数据。")
+                                continue
+                            render_fig(fig, key=f"trend_{name}_{axis_mode}", height=360, title=f"{name} 趋势")
+                            low_label = low_value_meta.get("low_reference_label")
+                            low_value = low_value_meta.get("low_reference_value")
+                            hidden_low_count = int(low_value_meta.get("hidden_low_count") or 0)
+                            if low_label and low_value is not None:
+                                note_parts = [f"低值判定基线: {low_label} = {low_value:.4f} {unit}"]
+                                if highlight_low_points:
+                                    note_parts.append("低于基线的点已标红")
+                                if hide_low_points:
+                                    note_parts.append(f"已隐藏 {hidden_low_count} 个低于基线的点")
+                                st.caption("；".join(note_parts))
+                        else:
+                            render_fig(
+                                px.line(df, x="x_axis_label", y="duration_value", color="series_name", markers=True),
+                                key=f"trend_{name}_{axis_mode}",
+                                height=360,
+                                title=f"{name} 趋势",
+                            )
+                ok_sub, sub_rows = api_get(f"/tasks/{task_uuid}/substep-cycle-series", agg_mode="mean", unit=unit, axis_mode=axis_mode, **scope_params)
                 if ok_sub and sub_rows:
-                    render_substep_cycle_facets(pd.DataFrame(sub_rows), value_col="duration_value", key="substep_cycle_facets")
-        ok_metric, metric_rows = api_get(f"/tasks/{task_uuid}/row-scan-metric-series", unit="ms")
+                    sub_df = pd.DataFrame(sub_rows)
+                    if "x_axis_sort_value" in sub_df.columns:
+                        sub_df = sub_df.sort_values(by=["x_axis_sort_value", "series_name"], na_position="last")
+                    render_fig(
+                        px.line(sub_df, x="x_axis_label", y="duration_value", color="series_name", markers=True),
+                        key=f"substep_cycle_facets_{axis_mode}",
+                        height=480,
+                        title="Sub-step 趋势",
+                    )
+        else:
+            st.error(defs)
+        ok_metric, metric_rows = api_get(f"/tasks/{task_uuid}/row-scan-metric-series", unit="ms", axis_mode=axis_mode, **scope_params)
         if ok_metric and metric_rows:
             metric_df = pd.DataFrame(metric_rows)
-            render_fig(px.line(metric_df, x="cycle", y="duration_value", color="metric_stage", markers=True), key="metric_trend", height=420, title="Row Scan Metrics 各阶段趋势")
+            if "x_axis_sort_value" in metric_df.columns:
+                metric_df = metric_df.sort_values(by=["x_axis_sort_value", "series_name"], na_position="last")
+            render_fig(px.line(metric_df, x="x_axis_label", y="duration_value", color="series_name", markers=True), key=f"metric_trend_{axis_mode}", height=420, title="Row Scan Metrics 各阶段趋势")
             if st.checkbox("显示 metrics 表格明细", value=False):
                 safe_dataframe(metric_df, use_container_width=True, height=280)
 

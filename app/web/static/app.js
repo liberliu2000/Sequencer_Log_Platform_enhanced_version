@@ -9,6 +9,19 @@
     latestDiagnosisSignature: "",
     latestReviewResult: null,
     latestSimilarCases: [],
+    selectedHistoryTaskUuid: "",
+    timelineFilters: {
+      cycleNo: "",
+      sideScope: "all",
+      trackOrder: "default",
+      trackGranularity: "side_chip",
+    },
+    parameterFilters: {
+      parameterName: "",
+      axisMode: "cycle",
+      unit: "s",
+      sideScope: "all",
+    },
     solutionDraft: {
       error_name: "",
       error_category: "",
@@ -89,9 +102,21 @@
     return String(value);
   }
 
+  function safeArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  function safeObject(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  }
+
   function clip(value, limit = 88) {
     const text = safeString(value);
     return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
+  }
+
+  function emptyState(message) {
+    return `<div class="empty-state">${escapeHtml(message || "No data.")}</div>`;
   }
 
   function formatNumber(value) {
@@ -136,6 +161,31 @@
       return safeString(value);
     }
     return date.toLocaleString("zh-CN", { hour12: false, timeZone: BEIJING_TIMEZONE });
+  }
+
+  function formatFileSize(value) {
+    const bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+      return "0 B";
+    }
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let size = bytes;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex += 1;
+    }
+    return `${size.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
+  }
+
+  function firstNonEmpty(...values) {
+    for (const value of values) {
+      const text = safeString(value).trim();
+      if (text) {
+        return text;
+      }
+    }
+    return "";
   }
 
   function statusTone(status) {
@@ -241,6 +291,18 @@
     return payload;
   }
 
+  async function apiJson(path, method, payload, requireAuth = true) {
+    return apiRequest(
+      path,
+      {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload ?? {}),
+      },
+      requireAuth
+    );
+  }
+
   function fmtJson(data) {
     return `<pre>${escapeHtml(JSON.stringify(data ?? {}, null, 2))}</pre>`;
   }
@@ -285,7 +347,7 @@
 
   function renderTable(columns, rows, rowActions = []) {
     if (!rows || !rows.length) {
-      return `<div class="empty-state">鏆傛棤鏁版嵁銆?/div>`;
+      return emptyState("暂无数据。");
     }
     return `
       <div class="table-wrap">
@@ -309,7 +371,7 @@
                   ? `<td>${rowActions
                       .map(
                         (action) => `
-                          <button class="table-action" type="button" data-action="${escapeHtml(action.action)}" data-row="${index}">
+                          <button class="table-action${action.className ? ` ${escapeHtml(action.className)}` : ""}" type="button" data-action="${escapeHtml(action.action)}" data-group="${escapeHtml(action.group || "")}" data-row="${index}">
                             ${escapeHtml(action.label)}
                           </button>
                         `
@@ -423,11 +485,19 @@
   }
 
   function hydrateActionTable(rows, handler) {
-    dom.pageMount.querySelectorAll("[data-action]").forEach((button) => {
+    let targetRows = rows;
+    let targetHandler = handler;
+    let selector = "[data-action]";
+    if (typeof rows === "string") {
+      selector = `[data-action][data-group="${rows}"]`;
+      targetRows = arguments[1];
+      targetHandler = arguments[2];
+    }
+    dom.pageMount.querySelectorAll(selector).forEach((button) => {
       button.addEventListener("click", async () => {
-        const row = rows[Number(button.getAttribute("data-row"))];
+        const row = targetRows[Number(button.getAttribute("data-row"))];
         const action = button.getAttribute("data-action");
-        await handler(action, row);
+        await targetHandler(action, row);
       });
     });
   }
@@ -465,9 +535,12 @@
   async function refreshTasks() {
     try {
       const data = await apiRequest(`${config.apiPrefix}/tasks?page=1&page_size=50`);
-      state.tasks = Array.isArray(data.items) ? data.items : [];
+      state.tasks = safeArray(data.items);
       if (!state.selectedTaskUuid && state.tasks.length) {
         saveSelectedTask(state.tasks[0].task_uuid);
+      }
+      if (!state.selectedHistoryTaskUuid && state.tasks.length) {
+        state.selectedHistoryTaskUuid = state.tasks[0].task_uuid;
       }
       dom.globalTaskSelect.innerHTML =
         ['<option value="">鏈€夋嫨浠诲姟</option>']
@@ -475,7 +548,7 @@
             state.tasks.map(
               (item) => `
                 <option value="${escapeHtml(item.task_uuid)}" ${item.task_uuid === getSelectedTask() ? "selected" : ""}>
-                  ${escapeHtml(`${item.task_uuid} 路 ${item.filename || item.status || ""}`)}
+                  ${escapeHtml(`${item.task_uuid} · ${item.filename || item.status || ""} · ${item.uploaded_by || "unknown"} · ${item.total_size_text || formatFileSize(item.total_size_bytes)}`)}
                 </option>
               `
             )
@@ -496,18 +569,127 @@
     return taskUuid;
   }
 
+  function renderAnnouncementCards(items, { compact = false } = {}) {
+    return safeArray(items)
+      .map((item) => {
+        const latestEdit = safeArray(item.edit_history).slice(-1)[0] || {};
+        const editor = firstNonEmpty(latestEdit.editor, item.updated_by, "system");
+        const editedAt = firstNonEmpty(latestEdit.edited_at, item.updated_at, item.created_at);
+        return `
+          <article class="subpanel">
+            <div class="button-row" style="justify-content:space-between;">
+              <strong>${escapeHtml(firstNonEmpty(item.title, "未命名公告"))}</strong>
+              <span class="status-pill ${item.is_pinned ? "" : "muted"}">${escapeHtml(item.is_pinned ? "置顶" : "公告")}</span>
+            </div>
+            <p class="panel-copy" style="margin-top:10px;">${escapeHtml(firstNonEmpty(item.summary, "暂无摘要"))}</p>
+            <p class="small-note" style="margin-top:8px;">最近编辑: ${escapeHtml(editor)} · ${escapeHtml(formatDateTime(editedAt))}</p>
+            ${compact ? "" : safeArray(item.edit_history).length ? `<details style="margin-top:10px;"><summary>编辑历史</summary>${fmtJson(item.edit_history)}</details>` : ""}
+          </article>
+        `;
+      })
+      .join("");
+  }
+
+  function buildLineSeries(rows, xKey, yKey, seriesKey) {
+    const grouped = new Map();
+    safeArray(rows).forEach((row) => {
+      const seriesName = firstNonEmpty(row?.[seriesKey], row?.series_name, "Series");
+      if (!grouped.has(seriesName)) {
+        grouped.set(seriesName, []);
+      }
+      grouped.get(seriesName).push(row);
+    });
+    return Array.from(grouped.entries()).map(([seriesName, seriesRows]) => ({
+      type: "scatter",
+      mode: "lines+markers",
+      name: seriesName,
+      x: seriesRows.map((row) => row?.[xKey]),
+      y: seriesRows.map((row) => Number(row?.[yKey] ?? 0)),
+    }));
+  }
+
+  function buildTimelineTraces(rows, errors) {
+    const knownRows = safeArray(rows).filter((row) => !row?.is_uncertain_side);
+    const uncertainRows = safeArray(rows).filter((row) => row?.is_uncertain_side);
+    const traces = [];
+    if (knownRows.length) {
+      traces.push({
+        type: "bar",
+        orientation: "h",
+        name: "Movement",
+        x: knownRows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
+        base: knownRows.map((item) => item.start),
+        y: knownRows.map((item) => item.track || item.sub_step || "-"),
+        marker: { color: "#0d5c63", opacity: 0.78, line: { color: "rgba(255,255,255,0.25)", width: 1 } },
+        hovertext: knownRows.map((item) => `${item.side_scope || "Unassigned"} · Cycle ${item.cycle_no ?? "-"}`),
+        hovertemplate: "%{hovertext}<br>%{y}<br>%{base} → %{x} ms<extra></extra>",
+      });
+    }
+    if (uncertainRows.length) {
+      traces.push({
+        type: "bar",
+        orientation: "h",
+        name: "Uncertain Side",
+        x: uncertainRows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
+        base: uncertainRows.map((item) => item.start),
+        y: uncertainRows.map((item) => item.track || item.sub_step || "-"),
+        marker: { color: "#d97706", opacity: 0.56, line: { color: "#b42318", width: 1.4 } },
+        hovertext: uncertainRows.map((item) => `Uncertain side · original=${item.original_side_scope || item.side_scope || "-"}`),
+        hovertemplate: "%{hovertext}<br>%{y}<br>%{base} → %{x} ms<extra></extra>",
+      });
+    }
+    const errorGroups = new Map();
+    safeArray(errors).forEach((item) => {
+      const severity = firstNonEmpty(item?.severity, "unknown");
+      if (!errorGroups.has(severity)) {
+        errorGroups.set(severity, []);
+      }
+      errorGroups.get(severity).push(item);
+    });
+    errorGroups.forEach((groupRows, severity) => {
+      traces.push({
+        type: "scatter",
+        mode: "markers",
+        name: `Error · ${severity}`,
+        x: groupRows.map((item) => item.time),
+        y: groupRows.map((item) => item.track || item.component || "-"),
+        marker: { size: 10, symbol: "diamond", color: severity === "error" ? "#b42318" : "#bf6b3f" },
+      });
+    });
+    return traces;
+  }
+
   async function renderHomePage() {
     const task = getSelectedTask();
+    const announcementResp = await apiRequest(`${config.apiPrefix}/announcements?limit=6`, {}, false).catch(() => ({ items: [] }));
+    const announcements = safeArray(announcementResp.items);
     if (!task) {
       mountPage(
         "Home Overview",
         "Upload logs first or pick a historical task.",
-        renderCards([
-          { label: "Tasks", value: formatNumber(state.tasks.length) },
-          { label: "Environment", value: config.environment || "dev" },
-          { label: "Current User", value: state.currentUser ? state.currentUser.username : "Guest" },
-          { label: "API Prefix", value: config.apiPrefix || "/api/v1" },
-        ])
+        `
+          ${renderCards([
+            { label: "Tasks", value: formatNumber(state.tasks.length) },
+            { label: "Environment", value: config.environment || "dev" },
+            { label: "Current User", value: state.currentUser ? state.currentUser.username : "Guest" },
+            { label: "API Prefix", value: config.apiPrefix || "/api/v1" },
+          ])}
+          <div class="split-grid">
+            <div class="subpanel">
+              <h4>Recent Announcements</h4>
+              ${announcements.length ? renderAnnouncementCards(announcements.slice(0, 3), { compact: true }) : emptyState("暂无公告。")}
+            </div>
+            <div class="subpanel">
+              <h4>Tips</h4>
+              ${renderDefinitionList([
+                { label: "Timeline", value: "按边拆分显示多边甘特图" },
+                { label: "Parameters", value: "支持 cycle / time 横轴切换" },
+                { label: "History", value: "支持下载原始上传文件" },
+                { label: "Announcements", value: "支持查看编辑人和编辑时间" },
+              ])}
+            </div>
+          </div>
+        `
       );
       return;
     }
@@ -516,8 +698,8 @@
       apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/dashboard`),
       apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/performance-summary`),
     ]);
-    const topErrors = Array.isArray(dashboard.top_errors) ? dashboard.top_errors.slice(0, 10) : [];
-    const components = Array.isArray(dashboard.component_distribution) ? dashboard.component_distribution : [];
+    const topErrors = safeArray(dashboard.top_errors).slice(0, 10);
+    const components = safeArray(dashboard.component_distribution);
     mountPage(
       "Home Overview",
       "Task status, density, distribution and performance summary.",
@@ -531,10 +713,29 @@
           { label: "Stage", value: status.current_stage || "-" },
           { label: "Files", value: formatNumber(status.file_count || 0) },
           { label: "Queue", value: formatNumber(status.queue_position || "-") },
+          { label: "Uploader", value: status.uploaded_by || "-" },
+          { label: "Upload Size", value: status.total_size_text || formatFileSize(status.total_size_bytes) },
         ])}
         <div class="chart-grid">
           <div class="chart-card"><h4>Top Error Clusters</h4><div class="chart-box" id="homeTopErrorsChart"></div></div>
           <div class="chart-card"><h4>Component Distribution</h4><div class="chart-box" id="homeComponentsChart"></div></div>
+        </div>
+        <div class="split-grid">
+          <div class="subpanel">
+            <h4>Announcements</h4>
+            ${announcements.length ? renderAnnouncementCards(announcements.slice(0, 4), { compact: true }) : emptyState("暂无公告。")}
+          </div>
+          <div class="subpanel">
+            <h4>Task Detail</h4>
+            ${renderDefinitionList([
+              { label: "Task UUID", value: task },
+              { label: "Filename", value: status.filename || "-" },
+              { label: "Uploaded By", value: status.uploaded_by || "-" },
+              { label: "File Size", value: status.total_size_text || formatFileSize(status.total_size_bytes) },
+              { label: "Created At", value: formatDateTime(status.created_at) },
+              { label: "Updated At", value: formatDateTime(status.updated_at) },
+            ])}
+          </div>
         </div>
         <div class="split-grid">
           <div class="subpanel"><h4>Dashboard</h4>${fmtJson(dashboard)}</div>
@@ -554,43 +755,106 @@
 
   async function renderHistoryPage() {
     const rows = state.tasks || [];
+    const selectedTask =
+      rows.find((item) => item.task_uuid === state.selectedHistoryTaskUuid) ||
+      rows.find((item) => item.task_uuid === getSelectedTask()) ||
+      rows[0] ||
+      null;
+    if (selectedTask) {
+      state.selectedHistoryTaskUuid = selectedTask.task_uuid;
+    }
     mountPage(
       "History Center",
-      "Switch current task or delete historical tasks.",
-      `<div id="historyMessage" class="inline-message"></div>${renderTable(
-        [
-          { key: "task_uuid", label: "Task UUID", render: (row) => escapeHtml(row.task_uuid) },
-          { key: "filename", label: "Filename", render: (row) => escapeHtml(safeString(row.filename, "-")) },
-          { key: "status", label: "Status", render: (row) => pill(row.status || "-") },
-          { key: "progress_percent", label: "Progress", render: (row) => `${formatNumber(row.progress_percent || 0)}%` },
-          { key: "total_errors", label: "Errors", render: (row) => formatNumber(row.total_errors || 0) },
-          { key: "updated_at", label: "Updated At", render: (row) => formatDateTime(row.updated_at) },
-        ],
-        rows,
-        [
-          { action: "pick", label: "Pick", group: "history" },
-          { action: "delete", label: "Delete", className: "danger", group: "history" },
-        ]
-      )}`,
+      "Review uploader, file size, status and download the original uploaded package.",
+      `
+        <div id="historyMessage" class="inline-message"></div>
+        ${renderTable(
+          [
+            { key: "task_uuid", label: "Task UUID", render: (row) => escapeHtml(row.task_uuid) },
+            { key: "filename", label: "Filename", render: (row) => escapeHtml(safeString(row.filename, "-")) },
+            { key: "uploaded_by", label: "Uploader", render: (row) => escapeHtml(safeString(row.uploaded_by, "-")) },
+            { key: "total_size_text", label: "File Size", render: (row) => escapeHtml(row.total_size_text || formatFileSize(row.total_size_bytes)) },
+            { key: "status", label: "Status", render: (row) => pill(row.status || "-") },
+            { key: "progress_percent", label: "Progress", render: (row) => `${formatNumber(row.progress_percent || 0)}%` },
+            { key: "total_errors", label: "Errors", render: (row) => formatNumber(row.total_errors || 0) },
+            { key: "updated_at", label: "Updated At", render: (row) => formatDateTime(row.updated_at) },
+          ],
+          rows,
+          [
+            { action: "pick", label: "Use", group: "history" },
+            { action: "download", label: "Download", group: "history" },
+            { action: "delete", label: "Delete", className: "danger", group: "history" },
+          ]
+        )}
+        <div class="split-grid" style="margin-top:16px;">
+          <div class="subpanel">
+            <h4>Selected Task</h4>
+            ${
+              selectedTask
+                ? renderDefinitionList([
+                    { label: "Task UUID", value: selectedTask.task_uuid },
+                    { label: "Filename", value: selectedTask.filename || "-" },
+                    { label: "Uploader", value: selectedTask.uploaded_by || "-" },
+                    { label: "File Size", value: selectedTask.total_size_text || formatFileSize(selectedTask.total_size_bytes) },
+                    { label: "Status", html: pill(selectedTask.status || "-") },
+                    { label: "Progress", value: `${formatNumber(selectedTask.progress_percent || 0)}%` },
+                    { label: "Errors", value: formatNumber(selectedTask.total_errors || 0) },
+                    { label: "Updated At", value: formatDateTime(selectedTask.updated_at) },
+                  ])
+                : emptyState("暂无历史任务。")
+            }
+            ${
+              selectedTask
+                ? `<div class="button-row" style="margin-top:14px;">
+                    <button type="button" id="historyUseCurrentButton">设为当前任务</button>
+                    <a class="button-link ghost" href="${escapeHtml(buildDownloadUrl(`${config.apiPrefix}/tasks/${encodeURIComponent(selectedTask.task_uuid)}/download`))}" target="_blank" rel="noreferrer">下载上传文件</a>
+                  </div>`
+                : ""
+            }
+          </div>
+          <div class="subpanel">
+            <h4>Raw Task Payload</h4>
+            ${selectedTask ? fmtJson(selectedTask) : emptyState("暂无详情。")}
+          </div>
+        </div>
+      `,
       () => {
         hydrateActionTable("history", rows, async (action, row) => {
           const message = byId("historyMessage");
           if (!row) return;
           if (action === "pick") {
+            state.selectedHistoryTaskUuid = row.task_uuid;
             saveSelectedTask(row.task_uuid);
             await refreshTasks();
+            await renderHistoryPage();
             message.textContent = `Switched to ${row.task_uuid}`;
+            return;
+          }
+          if (action === "download") {
+            window.open(buildDownloadUrl(`${config.apiPrefix}/tasks/${encodeURIComponent(row.task_uuid)}/download`), "_blank", "noreferrer");
             return;
           }
           if (action === "delete") {
             if (!window.confirm(`Delete task ${row.task_uuid}?`)) return;
             await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(row.task_uuid)}`, { method: "DELETE" });
             if (getSelectedTask() === row.task_uuid) saveSelectedTask("");
+            if (state.selectedHistoryTaskUuid === row.task_uuid) {
+              state.selectedHistoryTaskUuid = "";
+            }
             await refreshTasks();
             await renderHistoryPage();
             message.textContent = `Deleted task ${row.task_uuid}.`;
           }
         });
+        const useCurrentButton = byId("historyUseCurrentButton");
+        if (useCurrentButton && selectedTask) {
+          useCurrentButton.addEventListener("click", async () => {
+            saveSelectedTask(selectedTask.task_uuid);
+            await refreshTasks();
+            await renderHistoryPage();
+            byId("historyMessage").textContent = `Switched to ${selectedTask.task_uuid}`;
+          });
+        }
       }
     );
   }
@@ -685,36 +949,112 @@
 
   async function renderTimelinePage() {
     const task = requireTask();
-    const [rows, errorRows] = await Promise.all([
-      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/movement-timeline?track_order=default`),
-      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/movement-timeline/errors`),
+    const [cycles, scopeCatalog] = await Promise.all([
+      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/cycles`),
+      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/scope-catalog`),
     ]);
-    const movements = Array.isArray(rows) ? rows : [];
-    const errors = Array.isArray(errorRows) ? errorRows : [];
+    const query = new URLSearchParams();
+    if (state.timelineFilters.cycleNo) {
+      query.set("cycle_no", state.timelineFilters.cycleNo);
+    }
+    if (state.timelineFilters.trackOrder) {
+      query.set("track_order", state.timelineFilters.trackOrder);
+    }
+    if (state.timelineFilters.trackGranularity) {
+      query.set("track_granularity", state.timelineFilters.trackGranularity);
+    }
+    if (state.timelineFilters.sideScope && state.timelineFilters.sideScope !== "all") {
+      query.set("side_scope", state.timelineFilters.sideScope);
+    }
+    const [rows, errorRows] = await Promise.all([
+      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/movement-timeline?${query.toString()}`),
+      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/movement-timeline/errors?${query.toString()}`),
+    ]);
+    const movementPayload = safeObject(rows);
+    const errorPayload = safeObject(errorRows);
+    const sideGroups = safeArray(movementPayload.by_side);
+    const errorBySide = new Map(safeArray(errorPayload.by_side).map((item) => [item.side_scope || "", safeArray(item.points)]));
+    const sideOptions = [{ value: "all", label: "All sides" }].concat(
+      safeArray(scopeCatalog.sides).map((item) => ({ value: item.value, label: item.label || item.value }))
+    );
     mountPage(
       "Timeline",
-      "Observe operation order and error points along the timeline.",
+      "View separate movement timelines per side. Uncertain rows stay visible and are highlighted inside each side chart.",
       `
         ${renderCards([
-          { label: "Movements", value: formatNumber(movements.length) },
-          { label: "Error Points", value: formatNumber(errors.length) },
-          { label: "Order", value: "default" },
+          { label: "Movements", value: formatNumber(safeArray(movementPayload.rows).length) },
+          { label: "Error Points", value: formatNumber(safeArray(errorPayload.points).length) },
+          { label: "Sides", value: formatNumber(sideGroups.length) },
+          { label: "Uncertain Rows", value: formatNumber(safeArray(movementPayload.unassigned_side_rows).length) },
           { label: "Task", value: task },
         ])}
-        <div class="chart-grid"><div class="chart-card"><h4>Timeline</h4><div class="chart-box" id="timelineChart"></div></div></div>
+        <div class="inline-form">
+          <label>Cycle
+            <select id="timelineCycleSelect">
+              <option value="">All</option>
+              ${safeArray(cycles).map((value) => `<option value="${escapeHtml(value)}" ${String(state.timelineFilters.cycleNo) === String(value) ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Side
+            <select id="timelineSideSelect">
+              ${sideOptions.map((item) => `<option value="${escapeHtml(item.value)}" ${state.timelineFilters.sideScope === item.value ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Track Granularity
+            <select id="timelineGranularitySelect">
+              ${["component", "side", "side_chip"].map((value) => `<option value="${value}" ${state.timelineFilters.trackGranularity === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Track Order
+            <select id="timelineOrderSelect">
+              ${["default", "cycle"].map((value) => `<option value="${value}" ${state.timelineFilters.trackOrder === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="chart-stack">
+          ${
+            sideGroups.length
+              ? sideGroups
+                  .map((group, index) => `
+                    <div class="chart-card">
+                      <h4>Timeline · ${escapeHtml(firstNonEmpty(group.side_label, group.side_scope, "Unassigned"))}</h4>
+                      <p class="small-note">
+                        ${Number(group.uncertain_count || 0) > 0 ? `Includes ${Number(group.uncertain_count || 0)} uncertain-side rows highlighted below.` : "Only rows assigned to this side are shown."}
+                      </p>
+                      <div class="chart-box" id="timelineChart_${index}"></div>
+                    </div>
+                  `)
+                  .join("")
+              : emptyState("No timeline rows match the current filters.")
+          }
+        </div>
         ${renderTabs("timelineTabs", [
-          { key: "movements", label: "Movements", content: fmtJson(movements) },
-          { key: "errors", label: "Errors", content: fmtJson(errors) },
+          { key: "movements", label: "Movement Payload", content: fmtJson(movementPayload) },
+          { key: "errors", label: "Error Payload", content: fmtJson(errorPayload) },
         ])}
       `,
       () => {
-        if (movements.length) {
-          const data = [{ type: "bar", orientation: "h", x: movements.map((item) => Math.max(Number(item.duration_ms || 0), 1)), base: movements.map((item) => item.start), y: movements.map((item) => item.track || item.sub_step || "-"), marker: { color: "#0d5c63", opacity: 0.72 }, name: "Move" }];
-          if (errors.length) {
-            data.push({ type: "scatter", mode: "markers", x: errors.map((item) => item.time), y: errors.map((item) => item.track || item.component || "-"), marker: { size: 10, color: "#b42318", symbol: "diamond" }, name: "Error" });
+        [["timelineCycleSelect", "cycleNo"], ["timelineSideSelect", "sideScope"], ["timelineGranularitySelect", "trackGranularity"], ["timelineOrderSelect", "trackOrder"]].forEach(([id, key]) => {
+          const target = byId(id);
+          if (!target) {
+            return;
           }
-          drawPlot("timelineChart", data, { barmode: "overlay", xaxis: { type: "date" }, yaxis: { automargin: true, autorange: "reversed" } });
-        }
+          target.addEventListener("change", async () => {
+            state.timelineFilters[key] = target.value;
+            await renderTimelinePage();
+          });
+        });
+        sideGroups.forEach((group, index) => {
+          const traces = buildTimelineTraces(group.rows, errorBySide.get(group.side_scope || ""));
+          if (!traces.length) {
+            return;
+          }
+          drawPlot(`timelineChart_${index}`, traces, {
+            barmode: "overlay",
+            xaxis: { type: "date", title: "Original Log Time" },
+            yaxis: { automargin: true, autorange: "reversed" },
+          });
+        });
       }
     );
   }
@@ -755,43 +1095,109 @@
 
   async function renderParametersPage() {
     const task = requireTask();
-    const definitions = await apiRequest(`${config.apiPrefix}/parameter-definitions`);
-    const items = Array.isArray(definitions) ? definitions : definitions.items || [];
-    const firstName = items[0] ? items[0].parameter_name : "";
+    const [definitions, scopeCatalog] = await Promise.all([
+      apiRequest(`${config.apiPrefix}/parameter-definitions`),
+      apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/scope-catalog`),
+    ]);
+    const items = safeArray(Array.isArray(definitions) ? definitions : definitions.items).filter((item) => item?.parameter_name !== "imaging_time");
+    if (!state.parameterFilters.parameterName && items[0]) {
+      state.parameterFilters.parameterName = items[0].parameter_name;
+    }
+    const sideScope = state.parameterFilters.sideScope !== "all" ? state.parameterFilters.sideScope : "";
+    const parameterQuery = new URLSearchParams({
+      unit: state.parameterFilters.unit,
+      axis_mode: state.parameterFilters.axisMode,
+    });
+    if (sideScope) {
+      parameterQuery.set("side_scope", sideScope);
+    }
     const payload = {
-      parameter_definitions: definitions,
-      parameter_series: firstName ? await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/parameter-series/${encodeURIComponent(firstName)}?unit=s`) : [],
-      row_scan_metric_series: await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/row-scan-metric-series?unit=ms`),
-      substep_cycle_series: await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/substep-cycle-series?agg_mode=mean&unit=s`),
+      parameter_definitions: items,
+      parameter_series: state.parameterFilters.parameterName
+        ? await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/parameter-series/${encodeURIComponent(state.parameterFilters.parameterName)}?${parameterQuery.toString()}`)
+        : [],
+      row_scan_metric_series: await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/row-scan-metric-series?unit=ms&axis_mode=${encodeURIComponent(state.parameterFilters.axisMode)}${sideScope ? `&side_scope=${encodeURIComponent(sideScope)}` : ""}`),
+      substep_cycle_series: await apiRequest(`${config.apiPrefix}/tasks/${encodeURIComponent(task)}/substep-cycle-series?agg_mode=mean&unit=${encodeURIComponent(state.parameterFilters.unit)}&axis_mode=${encodeURIComponent(state.parameterFilters.axisMode)}${sideScope ? `&side_scope=${encodeURIComponent(sideScope)}` : ""}`),
     };
-    const parameterRows = Array.isArray(payload.parameter_series) ? payload.parameter_series : [];
-    const substepRows = Array.isArray(payload.substep_cycle_series) ? payload.substep_cycle_series : [];
+    const parameterRows = safeArray(payload.parameter_series);
+    const substepRows = safeArray(payload.substep_cycle_series);
+    const metricRows = safeArray(payload.row_scan_metric_series);
+    const sideOptions = [{ value: "all", label: "All sides" }].concat(
+      safeArray(scopeCatalog.sides).map((item) => ({ value: item.value, label: item.label || item.value }))
+    );
     mountPage(
       "Parameter Analysis",
-      "Parameter definitions, parameter curve and aggregated sub-step metrics.",
+      "Switch parameter axis between cycle and original log time, with optional side filtering.",
       `
         ${renderCards([
           { label: "Definitions", value: formatNumber(items.length) },
-          { label: "Current Parameter", value: firstName || "-" },
+          { label: "Current Parameter", value: state.parameterFilters.parameterName || "-" },
+          { label: "Axis Mode", value: state.parameterFilters.axisMode },
           { label: "Series Points", value: formatNumber(parameterRows.length) },
           { label: "Sub-step Points", value: formatNumber(substepRows.length) },
+          { label: "Row Scan Points", value: formatNumber(metricRows.length) },
         ])}
+        <div class="inline-form">
+          <label>Parameter
+            <select id="parameterNameSelect">
+              ${items.map((item) => `<option value="${escapeHtml(item.parameter_name)}" ${state.parameterFilters.parameterName === item.parameter_name ? "selected" : ""}>${escapeHtml(item.parameter_name)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Axis Mode
+            <select id="parameterAxisModeSelect">
+              ${["cycle", "time"].map((value) => `<option value="${value}" ${state.parameterFilters.axisMode === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Unit
+            <select id="parameterUnitSelect">
+              ${["ms", "s", "min", "h"].map((value) => `<option value="${value}" ${state.parameterFilters.unit === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Side
+            <select id="parameterSideSelect">
+              ${sideOptions.map((item) => `<option value="${escapeHtml(item.value)}" ${state.parameterFilters.sideScope === item.value ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}
+            </select>
+          </label>
+        </div>
         <div class="chart-grid">
           <div class="chart-card"><h4>Parameter Series</h4><div class="chart-box" id="parameterSeriesChart"></div></div>
           <div class="chart-card"><h4>Sub-step / Cycle</h4><div class="chart-box" id="parameterSubstepChart"></div></div>
         </div>
+        <div class="chart-grid">
+          <div class="chart-card"><h4>Row Scan Metrics</h4><div class="chart-box" id="parameterMetricChart"></div></div>
+          <div class="chart-card"><h4>Definition Detail</h4>${fmtJson(items.find((item) => item.parameter_name === state.parameterFilters.parameterName) || {})}</div>
+        </div>
         ${renderTabs("parameterTabs", [
           { key: "definitions", label: "Definitions", content: fmtJson(items) },
-          { key: "rowScan", label: "Row Scan", content: fmtJson(payload.row_scan_metric_series) },
+          { key: "rowScan", label: "Row Scan", content: fmtJson(metricRows) },
           { key: "raw", label: "Raw", content: fmtJson(payload) },
         ])}
       `,
       () => {
+        [["parameterNameSelect", "parameterName"], ["parameterAxisModeSelect", "axisMode"], ["parameterUnitSelect", "unit"], ["parameterSideSelect", "sideScope"]].forEach(([id, key]) => {
+          const target = byId(id);
+          if (!target) {
+            return;
+          }
+          target.addEventListener("change", async () => {
+            state.parameterFilters[key] = target.value;
+            await renderParametersPage();
+          });
+        });
         if (parameterRows.length) {
-          drawPlot("parameterSeriesChart", [{ type: "scatter", mode: "lines+markers", x: parameterRows.map((item) => item.cycle_no || item.timestamp || item.seq_no), y: parameterRows.map((item) => Number(item.value || item.parameter_value || 0)), marker: { color: "#0d5c63" } }]);
+          drawPlot("parameterSeriesChart", buildLineSeries(parameterRows, "x_axis_label", "duration_value", "series_name"), {
+            xaxis: { title: state.parameterFilters.axisMode === "time" ? "Original Log Time" : "Cycle" },
+          });
         }
         if (substepRows.length) {
-          drawPlot("parameterSubstepChart", [{ type: "scatter", mode: "markers", x: substepRows.map((item) => item.cycle_no), y: substepRows.map((item) => Number(item.agg_value || item.value || 0)), marker: { color: "#bf6b3f", size: 10 } }]);
+          drawPlot("parameterSubstepChart", buildLineSeries(substepRows, "x_axis_label", "duration_value", "series_name"), {
+            xaxis: { title: state.parameterFilters.axisMode === "time" ? "Original Log Time" : "Cycle" },
+          });
+        }
+        if (metricRows.length) {
+          drawPlot("parameterMetricChart", buildLineSeries(metricRows, "x_axis_label", "duration_value", "series_name"), {
+            xaxis: { title: state.parameterFilters.axisMode === "time" ? "Original Log Time" : "Cycle" },
+          });
         }
       }
     );
@@ -1985,33 +2391,88 @@
       mountPage("User Admin", "", emptyState("Current user is not an admin."));
       return;
     }
-    const users = await apiRequest(`${config.apiPrefix}/admin/users`);
-    const rows = Array.isArray(users.items) ? users.items : [];
+    const [users, announcementResp] = await Promise.all([
+      apiRequest(`${config.apiPrefix}/admin/users`),
+      apiRequest(`${config.apiPrefix}/announcements?limit=50`),
+    ]);
+    const rows = safeArray(users.items);
+    const announcements = safeArray(announcementResp.items);
     mountPage(
       "User Admin",
-      "Approve registrations, enable or disable accounts, and update roles.",
+      "Approve registrations, update roles, and manage announcement history.",
       `
-        ${renderTable(
-          [
-            { key: "id", label: "ID", render: (row) => formatNumber(row.id) },
-            { key: "username", label: "Username", render: (row) => escapeHtml(safeString(row.username, "-")) },
-            { key: "email", label: "Email", render: (row) => escapeHtml(safeString(row.email, "-")) },
-            { key: "status", label: "Status", render: (row) => pill(row.status || "-") },
-            { key: "roles", label: "Roles", render: (row) => escapeHtml((row.roles || []).join(", ")) },
-          ],
-          rows,
-          [
-            { action: "approve", label: "Approve", group: "admin" },
-            { action: "reject", label: "Reject", className: "danger", group: "admin" },
-            { action: "disable", label: "Disable", className: "warn", group: "admin" },
-            { action: "enable", label: "Enable", group: "admin" },
-            { action: "roles", label: "Roles", group: "admin" },
-          ]
-        )}
-        <div id="adminEditor" class="subpanel" style="margin-top:16px;"></div>
+        ${renderTabs("adminTabs", [
+          {
+            key: "users",
+            label: "Users",
+            content: `
+              ${renderTable(
+                [
+                  { key: "id", label: "ID", render: (row) => formatNumber(row.id) },
+                  { key: "username", label: "Username", render: (row) => escapeHtml(safeString(row.username, "-")) },
+                  { key: "email", label: "Email", render: (row) => escapeHtml(safeString(row.email, "-")) },
+                  { key: "status", label: "Status", render: (row) => pill(row.status || "-") },
+                  { key: "roles", label: "Roles", render: (row) => escapeHtml((row.roles || []).join(", ")) },
+                ],
+                rows,
+                [
+                  { action: "approve", label: "Approve", group: "adminUsers" },
+                  { action: "reject", label: "Reject", className: "danger", group: "adminUsers" },
+                  { action: "disable", label: "Disable", className: "warn", group: "adminUsers" },
+                  { action: "enable", label: "Enable", group: "adminUsers" },
+                  { action: "roles", label: "Roles", group: "adminUsers" },
+                ]
+              )}
+              <div id="adminEditor" class="subpanel" style="margin-top:16px;"></div>
+            `,
+          },
+          {
+            key: "announcements",
+            label: "Announcements",
+            content: `
+              <div class="split-grid">
+                <div class="subpanel">
+                  <h4>Create Announcement</h4>
+                  <label>Title<input id="announcementCreateTitle" /></label>
+                  <label>Summary<textarea id="announcementCreateSummary"></textarea></label>
+                  <label class="checkbox-row"><input id="announcementCreatePinned" type="checkbox" />Pin announcement</label>
+                  <div class="button-row"><button id="announcementCreateButton" type="button">Publish</button></div>
+                  <p id="announcementCreateMessage" class="inline-message"></p>
+                </div>
+                <div class="subpanel">
+                  <h4>Announcement Feed</h4>
+                  ${announcements.length ? renderAnnouncementCards(announcements) : emptyState("暂无公告。")}
+                </div>
+              </div>
+              <div class="split-grid" style="margin-top:16px;">
+                <div class="subpanel">
+                  <h4>Manage Announcements</h4>
+                  ${renderTable(
+                    [
+                      { key: "title", label: "Title", render: (row) => escapeHtml(firstNonEmpty(row.title, "未命名公告")) },
+                      { key: "is_pinned", label: "Pinned", render: (row) => pill(row.is_pinned ? "Pinned" : "Normal", row.is_pinned ? "" : "muted") },
+                      { key: "updated_by", label: "Editor", render: (row) => escapeHtml(firstNonEmpty(row.updated_by, "-")) },
+                      { key: "updated_at", label: "Updated At", render: (row) => formatDateTime(row.updated_at) },
+                    ],
+                    announcements,
+                    [
+                      { action: "edit", label: "Edit", group: "adminAnnouncements" },
+                      { action: "delete", label: "Delete", className: "danger", group: "adminAnnouncements" },
+                    ]
+                  )}
+                </div>
+                <div id="announcementEditor" class="subpanel">
+                  <h4>Editor</h4>
+                  ${announcements[0] ? fmtJson(announcements[0]) : emptyState("暂无公告。")}
+                </div>
+              </div>
+            `,
+          },
+        ])}
       `,
       () => {
-        hydrateActionTable("admin", rows, async (action, row) => {
+        hydrateTabs(dom.pageMount);
+        hydrateActionTable("adminUsers", rows, async (action, row) => {
           if (action === "roles") {
             byId("adminEditor").innerHTML = `
               <h4>Role Settings: ${escapeHtml(row.username)}</h4>
@@ -2031,6 +2492,50 @@
           }
           const response = await apiJson(`${config.apiPrefix}/admin/users/${encodeURIComponent(row.id)}/status`, "POST", { action });
           byId("adminEditor").innerHTML = `${fmtJson(response.item)}<p class="inline-message">Executed ${action} for ${row.username}.</p>`;
+        });
+        const createButton = byId("announcementCreateButton");
+        if (createButton) {
+          createButton.addEventListener("click", async () => {
+            const response = await apiJson(`${config.apiPrefix}/admin/announcements`, "POST", {
+              title: byId("announcementCreateTitle").value.trim(),
+              summary: byId("announcementCreateSummary").value,
+              is_pinned: byId("announcementCreatePinned").checked,
+            });
+            byId("announcementCreateMessage").textContent = `Published announcement #${response.item.id}.`;
+            await renderAdminPage();
+          });
+        }
+        hydrateActionTable("adminAnnouncements", announcements, async (action, row) => {
+          if (!row) {
+            return;
+          }
+          if (action === "delete") {
+            if (!window.confirm(`Delete announcement ${row.id}?`)) {
+              return;
+            }
+            await apiRequest(`${config.apiPrefix}/admin/announcements/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+            await renderAdminPage();
+            return;
+          }
+          byId("announcementEditor").innerHTML = `
+            <h4>Edit Announcement #${escapeHtml(row.id)}</h4>
+            <label>Title<input id="announcementEditTitle" value="${escapeHtml(firstNonEmpty(row.title))}" /></label>
+            <label>Summary<textarea id="announcementEditSummary">${escapeHtml(firstNonEmpty(row.summary))}</textarea></label>
+            <label class="checkbox-row"><input id="announcementEditPinned" type="checkbox" ${row.is_pinned ? "checked" : ""} />Pin announcement</label>
+            <div class="button-row"><button id="announcementSaveButton" type="button">Save</button></div>
+            <p id="announcementEditMessage" class="inline-message"></p>
+            <h4 style="margin-top:16px;">Edit History</h4>
+            ${safeArray(row.edit_history).length ? fmtJson(row.edit_history) : emptyState("No edit history yet.")}
+          `;
+          byId("announcementSaveButton").addEventListener("click", async () => {
+            const response = await apiJson(`${config.apiPrefix}/admin/announcements/${encodeURIComponent(row.id)}`, "PUT", {
+              title: byId("announcementEditTitle").value.trim(),
+              summary: byId("announcementEditSummary").value,
+              is_pinned: byId("announcementEditPinned").checked,
+            });
+            byId("announcementEditMessage").textContent = `Announcement #${response.item.id} updated.`;
+            await renderAdminPage();
+          });
         });
       }
     );
