@@ -2,18 +2,61 @@
 
 基于 `FastAPI + Streamlit + Next.js + SQLite` 的测序日志分析平台。
 
-当前仓库同步的是源码版本，便于继续开发、部署和调试；一键启动程序、安装包和打包产物不作为主分支源码的一部分维护。
+当前仓库维护的是源码版本，适合继续开发、联调、部署与测试。本次版本在不重写现有系统的前提下，对多边日志解析、时间轴绘图、参数趋势分析、公告编辑记录、历史任务中心等能力做了增量增强。
 
 ## 项目概览
 
-平台面向多源测序日志的整理、解析、聚合和问题定位，核心目标是：
+平台面向多来源测序日志的采集、解析、结构化、聚合与问题定位，核心目标包括：
 
-- 支持大体积日志和压缩包的上传与解析
-- 将多种日志格式统一归一为结构化事件流
-- 提供时间轴、错误聚类、参数趋势、周期分析等视图
-- 提供任务状态、实时进度、性能摘要和导出能力
-- 提供账号、注册审核、权限控制和方案库相关能力
-- 预留 LLM 诊断、规则建议和主动学习能力
+- 支持大体积日志与压缩包上传
+- 将多种日志格式统一为结构化事件流
+- 提供时间轴、错误分析、参数趋势、Cycle 分析等可视化页面
+- 提供任务状态、进度、性能快照、文件预览与导出
+- 提供用户、权限、公告、方案库与审核流程
+
+## 本次增量优化
+
+### 1. 多边日志按边独立统计 Cycle
+
+- 对多边运行日志按 `side / edge / board / chip` 的真实归属独立识别
+- 每一边拥有独立的 cycle 序列，不再把不同边的事件混在一起统一编号
+- Cycle 划分严格基于日志中的真实事件边界、真实步骤边界和真实时间顺序
+- 对日志不完整的边采用保守推断策略；无法安全判断时保留不确定状态，不虚构 cycle
+
+### 2. 甘特图改为按边分组返回与展示
+
+- 后端时间轴接口不再只返回一个混合列表，而是按边输出 `by_side`
+- 前端按边分别绘制时间轴/甘特图，每个边单独一张图
+- 支持查看整机全部边的图表列表，也支持按单边筛选
+- 对边归属不确定的时间轴，在每个单边图中复制展示并高亮显示
+
+### 3. 时间轴默认使用日志原始时间
+
+- 时间轴、事件流、参数趋势优先使用日志中的原始时间字段
+- 不再为了展示而覆盖原始时间、强制归零或生成伪时间
+- 若业务需要仍可保留相对时间字段，但默认图表横轴使用原始时间语义
+- 兼容毫秒、微秒和多种时间文本格式，并按真实时间顺序排序
+
+### 4. 参数趋势支持横轴模式切换
+
+- 参数趋势分析页面支持两种横轴模式：
+  - 按 cycle
+  - 按时间
+- 横轴模式由前端切换，但排序与数据组织由后端接口直接支持
+- 按 cycle 模式下遵守“各边独立 cycle”体系
+- 按时间模式下直接使用原始日志时间
+
+### 5. 公告编辑审计
+
+- 公告新增 `edit_history`
+- 每次编辑记录编辑人、编辑时间和关键变更快照
+- 页面可查看最新编辑元信息
+
+### 6. 历史项目中心增强
+
+- 历史任务列表展示上传人、文件大小
+- 支持下载该任务原始上传文件
+- 单文件直接下载，多文件目录自动打包为 zip 下载
 
 ## 当前能力
 
@@ -27,8 +70,8 @@
 
 ### 运行时与性能
 
-- 任务实时进度、阶段、ETA、预计完成时间展示
-- SQLite 锁竞争缓解，减少瞬时写入导致的失败
+- 任务实时进度、阶段、ETA、预计完成时间
+- SQLite 锁竞争缓解，减少瞬时写入失败
 - CPU / 内存软阈值保护与自适应并发分配
 - 任务进度历史和性能快照持久化
 
@@ -44,6 +87,71 @@
 - 注册审核与用户状态管理
 - 角色与权限控制
 - 方案库、审核流、错误码生成等业务能力
+
+## 关键接口变更说明
+
+### 时间轴接口
+
+`GET /api/v1/tasks/{task_uuid}/movement-timeline`
+
+返回结构从“仅一组混合行”扩展为：
+
+```json
+{
+  "rows": [],
+  "side_order": ["A1", "A2", "B1"],
+  "by_side": [
+    {
+      "side_scope": "A1",
+      "side_label": "A1",
+      "rows": [],
+      "uncertain_count": 2
+    }
+  ],
+  "unassigned_side_rows": []
+}
+```
+
+说明：
+
+- `rows`：完整平铺结果，兼容已有处理逻辑
+- `by_side`：前端单边甘特图直接使用
+- `unassigned_side_rows`：归属不确定的原始时间轴
+
+### 时间轴错误点接口
+
+`GET /api/v1/tasks/{task_uuid}/movement-timeline/errors`
+
+返回结构与时间轴主接口保持一致，顶层字段为 `points` 与 `by_side`。
+
+### 参数趋势接口
+
+以下接口新增查询参数 `axis_mode`，支持 `cycle` / `time`：
+
+- `GET /api/v1/tasks/{task_uuid}/parameter-series/{parameter_name}`
+- `GET /api/v1/tasks/{task_uuid}/substep-cycle-series`
+- `GET /api/v1/tasks/{task_uuid}/row-scan-metric-series`
+
+返回结果统一补充：
+
+- `x_axis_type`
+- `x_axis_value`
+- `x_axis_label`
+- `x_axis_sort_value`
+- `time_epoch_ms`
+- `series_name`
+
+### 任务列表 / 状态接口
+
+以下接口新增任务元信息：
+
+- `uploaded_by`
+- `total_size_bytes`
+- `total_size_text`
+
+并新增下载接口：
+
+- `GET /api/v1/tasks/{task_uuid}/download`
 
 ## 目录结构
 
@@ -143,7 +251,7 @@ npm run build
 
 ## 常用配置
 
-配置由 `app/core/settings.py` 定义，默认从项目根目录 `.env` 加载。常用项包括：
+配置由 `app/core/settings.py` 定义，默认从项目根目录 `.env` 加载。常用项目包括：
 
 - `APP_ENV` / `APP_HOST` / `APP_PORT`
 - `DATABASE_URL`
@@ -164,7 +272,7 @@ npm run build
 - `AUTH_DEFAULT_ADMIN_USERNAME`
 - `AUTH_DEFAULT_ADMIN_PASSWORD`
 
-建议在首次执行 `scripts.init_db` 之前就改成你自己的值，不要在生产环境沿用示例默认值。
+建议在首次执行 `scripts.init_db` 之前就改成自己的值，不要在生产环境沿用示例默认值。
 
 ## 测试与验证
 
@@ -174,21 +282,19 @@ npm run build
 pytest -q
 ```
 
-如果只做快速验证，可优先运行：
+若做快速验证，建议优先运行：
 
 ```powershell
 pytest tests/test_api_basic.py -q
-pytest tests/test_auth_service.py -q
+pytest tests/test_parameter_result_query.py -q
 pytest tests/test_streaming_aggregation.py -q
-pytest tests/test_task_state_cache.py -q
 ```
 
 前端验证：
 
 ```powershell
 cd frontend
-npm run lint
-npm run build
+npm exec -- tsc --noEmit
 ```
 
 ## 关键文件
@@ -196,17 +302,16 @@ npm run build
 - `app/main.py`：FastAPI 入口
 - `app/api/routes.py`：主要业务接口
 - `app/api/auth_routes.py`：认证与用户相关接口
-- `app/db/session.py`：数据库会话与 SQLite 相关配置
+- `app/db/session.py`：数据库会话与 SQLite 配置
 - `app/services/ingestion_service.py`：任务处理主流程
-- `app/services/streaming_aggregation.py`：流式聚合
-- `app/services/query_service.py`：查询与结果读取
+- `app/services/streaming_aggregation.py`：流式聚合、cycle 推断、多边归属
+- `app/services/query_service.py`：结果查询与图表数据组织
 - `app/services/task_state_cache.py`：任务状态缓存与进度
 - `ui/streamlit_app.py`：Streamlit 界面
-- `frontend/`：Next.js Web 前端
+- `frontend/components/log-platform-console.tsx`：Next.js 主控制台
 
 ## 仓库说明
 
-- 主分支当前以源码维护为主
+- 当前主分支以源码维护为主
 - 安装包、打包器和一键启动产物不作为本仓库主线同步目标
-- 大体积真实日志建议放在本地运行目录或对象存储中，不建议直接进入源码历史
-
+- 大体积真实日志建议放在本地运行目录或对象存储，不建议直接进入源码历史

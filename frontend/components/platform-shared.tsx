@@ -217,7 +217,9 @@ function parseTimelineValue(value: unknown): number | null {
   if (Number.isFinite(numeric)) {
     return parseTimelineValue(numeric);
   }
-  const normalized = text.includes("T") ? text : text.replace(" ", "T");
+  const normalizedFraction = text.replace(/:(\d{3,6})$/, ".$1").replace(/([.:]\d{3})\d+$/, "$1");
+  const slashNormalized = normalizedFraction.replace(/\//g, "-");
+  const normalized = slashNormalized.includes("T") ? slashNormalized : slashNormalized.replace(" ", "T");
   if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
     const parsedDateOnly = Date.parse(`${normalized}T00:00:00+08:00`);
     return Number.isNaN(parsedDateOnly) ? null : parsedDateOnly;
@@ -2449,7 +2451,10 @@ function StreamlitTimelineChart({
                               rx="5"
                               ry="5"
                               fill={row.color}
-                              opacity={0.95}
+                              opacity={row.is_uncertain_side ? 0.65 : 0.95}
+                              stroke={row.is_uncertain_side ? "#D95D54" : "none"}
+                              strokeWidth={row.is_uncertain_side ? 1.5 : 0}
+                              strokeDasharray={row.is_uncertain_side ? "5 3" : undefined}
                             />
                             {barWidth > 64 ? (
                               <text x={x + 8} y={barY + 12} fontSize="10.5" fill="white">

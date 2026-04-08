@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
-import shutil
 from types import SimpleNamespace
 from typing import Any, Iterable
 
@@ -35,6 +35,8 @@ def _row_to_task_like(row: Any) -> SimpleNamespace:
             "task_uuid": getattr(row, "task_uuid", None),
             "filename": getattr(row, "filename", None),
             "stored_path": getattr(row, "stored_path", None),
+            "uploaded_by": getattr(row, "uploaded_by", None),
+            "total_size_bytes": getattr(row, "total_size_bytes", 0),
             "status": getattr(row, "status", None),
             "file_count": getattr(row, "file_count", 0),
             "total_events": getattr(row, "total_events", 0),
@@ -93,11 +95,22 @@ class TaskRepository:
             mapping["task_id"] = task_id
             yield mapping
 
-    def create_task(self, task_uuid: str, filename: str, stored_path: str) -> UploadTaskModel:
+    def create_task(
+        self,
+        task_uuid: str,
+        filename: str,
+        stored_path: str,
+        *,
+        uploaded_by: str | None = None,
+        total_size_bytes: int = 0,
+    ) -> UploadTaskModel:
+        actor = str(uploaded_by or "").strip() or None
         task = UploadTaskModel(
             task_uuid=task_uuid,
             filename=filename,
             stored_path=stored_path,
+            uploaded_by=actor,
+            total_size_bytes=max(0, int(total_size_bytes or 0)),
             status="uploaded",
             progress_percent=0,
             current_stage="已上传",
@@ -112,6 +125,7 @@ class TaskRepository:
                 status="success",
                 stage="上传",
                 detail=f"文件: {filename}",
+                actor=actor,
             )
         )
         self.db.commit()
@@ -221,6 +235,8 @@ class TaskRepository:
                 task_uuid,
                 filename,
                 stored_path,
+                uploaded_by,
+                COALESCE(total_size_bytes, 0) AS total_size_bytes,
                 status,
                 file_count,
                 total_events,
@@ -243,7 +259,18 @@ class TaskRepository:
             return [_row_to_task_like(r) for r in rows]
         except OperationalError as exc:
             msg = str(exc).lower()
-            if any(tok in msg for tok in ["no such column", "queue_position", "progress_percent", "current_stage", "message"]):
+            if any(
+                tok in msg
+                for tok in [
+                    "no such column",
+                    "queue_position",
+                    "progress_percent",
+                    "current_stage",
+                    "message",
+                    "uploaded_by",
+                    "total_size_bytes",
+                ]
+            ):
                 rows = self.db.execute(text(self._fallback_task_select_sql())).mappings().all()
                 return [_row_to_task_like(r) for r in rows]
             raise
@@ -254,7 +281,18 @@ class TaskRepository:
             return _row_to_task_like(row) if row else None
         except OperationalError as exc:
             msg = str(exc).lower()
-            if any(tok in msg for tok in ["no such column", "queue_position", "progress_percent", "current_stage", "message"]):
+            if any(
+                tok in msg
+                for tok in [
+                    "no such column",
+                    "queue_position",
+                    "progress_percent",
+                    "current_stage",
+                    "message",
+                    "uploaded_by",
+                    "total_size_bytes",
+                ]
+            ):
                 rows = self.db.execute(
                     text(self._fallback_task_select_sql(where_clause="WHERE task_uuid = :task_uuid", limit_clause="LIMIT 1")),
                     {"task_uuid": task_uuid},
@@ -312,16 +350,38 @@ class TaskRepository:
 
     def get_dashboard_counts(self, task_id: int) -> dict:
         total_events = self.db.scalar(select(func.count()).select_from(NormalizedEventModel).where(NormalizedEventModel.task_id == task_id)) or 0
-        total_errors = self.db.scalar(select(func.count()).select_from(NormalizedEventModel).where(NormalizedEventModel.task_id == task_id, NormalizedEventModel.normalized_signature.is_not(None))) or 0
-        unique_errors = self.db.scalar(select(func.count(func.distinct(NormalizedEventModel.normalized_signature))).where(NormalizedEventModel.task_id == task_id, NormalizedEventModel.normalized_signature.is_not(None))) or 0
+        total_errors = self.db.scalar(
+            select(func.count()).select_from(NormalizedEventModel).where(
+                NormalizedEventModel.task_id == task_id,
+                NormalizedEventModel.normalized_signature.is_not(None),
+            )
+        ) or 0
+        unique_errors = self.db.scalar(
+            select(func.count(func.distinct(NormalizedEventModel.normalized_signature))).where(
+                NormalizedEventModel.task_id == task_id,
+                NormalizedEventModel.normalized_signature.is_not(None),
+            )
+        ) or 0
         return {"total_events": total_events, "total_errors": total_errors, "unique_error_count": unique_errors}
 
     def get_latest_llm_result(self, task_id: int, normalized_signature: str) -> LLMAnalysisResultModel | None:
-        stmt = select(LLMAnalysisResultModel).where(LLMAnalysisResultModel.task_id == task_id, LLMAnalysisResultModel.normalized_signature == normalized_signature).order_by(LLMAnalysisResultModel.created_at.desc())
+        stmt = (
+            select(LLMAnalysisResultModel)
+            .where(
+                LLMAnalysisResultModel.task_id == task_id,
+                LLMAnalysisResultModel.normalized_signature == normalized_signature,
+            )
+            .order_by(LLMAnalysisResultModel.created_at.desc())
+        )
         return self.db.scalar(stmt)
 
     def list_llm_results(self, task_id: int) -> list[LLMAnalysisResultModel]:
-        return list(self.db.scalars(select(LLMAnalysisResultModel).where(LLMAnalysisResultModel.task_id == task_id).order_by(LLMAnalysisResultModel.created_at.desc())))
+        stmt = (
+            select(LLMAnalysisResultModel)
+            .where(LLMAnalysisResultModel.task_id == task_id)
+            .order_by(LLMAnalysisResultModel.created_at.desc())
+        )
+        return list(self.db.scalars(stmt))
 
     def list_audit_logs(self, task_id: int, limit: int = 200) -> list[TaskAuditLogModel]:
         stmt = select(TaskAuditLogModel).where(TaskAuditLogModel.task_id == task_id).order_by(TaskAuditLogModel.created_at.desc()).limit(limit)
@@ -377,6 +437,8 @@ class TaskRepository:
             return {
                 "task_uuid": getattr(t, "task_uuid", ""),
                 "filename": getattr(t, "filename", ""),
+                "uploaded_by": getattr(t, "uploaded_by", None),
+                "total_size_bytes": getattr(t, "total_size_bytes", 0),
                 "status": getattr(t, "status", ""),
                 "file_count": getattr(t, "file_count", 0),
                 "total_events": getattr(t, "total_events", 0),

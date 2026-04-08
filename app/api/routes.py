@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import shutil
 import uuid
 from datetime import datetime, timedelta
 
@@ -54,6 +55,17 @@ def _coerce_form_bool(value):
     if text in {"0", "false", "no", "off"}:
         return False
     return None
+
+
+def _format_size_bytes(size_bytes: int | None) -> str:
+    size = float(size_bytes or 0)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024.0
+        unit_index += 1
+    precision = 0 if unit_index == 0 else 2
+    return f"{size:.{precision}f} {units[unit_index]}"
 
 
 def _load_json(path: Path):
@@ -290,6 +302,7 @@ async def upload_logs(
     enable_process_pool: str | None = Form(default=None),
     enable_streaming_parse: str | None = Form(default=None),
     db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     settings = get_settings()
     repo = TaskRepository(db)
@@ -323,7 +336,13 @@ async def upload_logs(
         await upload.close()
         saved_count += 1
     display_name = files[0].filename if len(files) == 1 else f'batch_{saved_count}files'
-    task = repo.create_task(task_uuid=task_uuid, filename=display_name or f'batch_{saved_count}files', stored_path=str(batch_dir))
+    task = repo.create_task(
+        task_uuid=task_uuid,
+        filename=display_name or f'batch_{saved_count}files',
+        stored_path=str(batch_dir),
+        uploaded_by=str(current_user.get('username') or ''),
+        total_size_bytes=total_bytes,
+    )
     repo.update_task_progress(task.id, status='queued', current_stage='等待异步任务队列调度', file_count=saved_count, message=f'批量上传完成，共 {saved_count} 个文件，{round(total_bytes / 1024 / 1024, 2)} MB')
     task_state_cache.init_task(task_uuid, display_name, cpu_cores=cpu_cores)
     task_state_cache.update(task_uuid, status='queued', current_stage='等待异步任务队列调度', file_count=saved_count, message=f'批量上传完成，共 {saved_count} 个文件，{round(total_bytes / 1024 / 1024, 2)} MB', cpu_cores=cpu_cores)
@@ -352,7 +371,26 @@ def list_tasks(page: int = Query(default=1, ge=1), page_size: int = Query(defaul
     offset = (page - 1) * page_size
     items = tasks[offset: offset + page_size]
     return {
-        'items': [{'task_uuid': t.task_uuid, 'filename': t.filename, 'status': t.status, 'file_count': t.file_count, 'total_events': t.total_events, 'total_errors': t.total_errors, 'progress_percent': t.progress_percent, 'current_stage': t.current_stage, 'queue_position': t.queue_position, 'message': t.message, 'created_at': _dt_text(t.created_at), 'updated_at': _dt_text(t.updated_at)} for t in items],
+        'items': [
+            {
+                'task_uuid': t.task_uuid,
+                'filename': t.filename,
+                'uploaded_by': getattr(t, 'uploaded_by', None),
+                'total_size_bytes': int(getattr(t, 'total_size_bytes', 0) or 0),
+                'total_size_text': _format_size_bytes(getattr(t, 'total_size_bytes', 0)),
+                'status': t.status,
+                'file_count': t.file_count,
+                'total_events': t.total_events,
+                'total_errors': t.total_errors,
+                'progress_percent': t.progress_percent,
+                'current_stage': t.current_stage,
+                'queue_position': t.queue_position,
+                'message': t.message,
+                'created_at': _dt_text(t.created_at),
+                'updated_at': _dt_text(t.updated_at),
+            }
+            for t in items
+        ],
         'total': total,
         'page': page,
         'page_size': page_size,
@@ -368,7 +406,7 @@ def task_status_legacy(task_uuid: str, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail='任务不存在')
     perf = PerformanceService().read_summary(task_uuid)
-    return {'task_uuid': task.task_uuid, 'filename': task.filename, 'status': task.status, 'file_count': task.file_count, 'total_events': task.total_events, 'total_errors': task.total_errors, 'progress_percent': task.progress_percent, 'current_stage': task.current_stage, 'queue_position': task.queue_position or queue.queue_position(task.task_uuid), 'message': task.message, 'created_at': _dt_text(task.created_at), 'updated_at': _dt_text(task.updated_at), 'cpu_cores': perf.get('cpu_cores'), 'elapsed_seconds': perf.get('stage_timings', {}).get('total_seconds'), 'started_at': None, 'finished_at': None}
+    return {'task_uuid': task.task_uuid, 'filename': task.filename, 'uploaded_by': getattr(task, 'uploaded_by', None), 'total_size_bytes': int(getattr(task, 'total_size_bytes', 0) or 0), 'total_size_text': _format_size_bytes(getattr(task, 'total_size_bytes', 0)), 'status': task.status, 'file_count': task.file_count, 'total_events': task.total_events, 'total_errors': task.total_errors, 'progress_percent': task.progress_percent, 'current_stage': task.current_stage, 'queue_position': task.queue_position or queue.queue_position(task.task_uuid), 'message': task.message, 'created_at': _dt_text(task.created_at), 'updated_at': _dt_text(task.updated_at), 'cpu_cores': perf.get('cpu_cores'), 'elapsed_seconds': perf.get('stage_timings', {}).get('total_seconds'), 'started_at': None, 'finished_at': None}
 
 
 @router.get('/tasks/{task_uuid}/status')
@@ -384,6 +422,9 @@ def task_status(task_uuid: str, db: Session = Depends(get_db)):
     response = {
         'task_uuid': task_uuid,
         'filename': getattr(task, 'filename', None),
+        'uploaded_by': getattr(task, 'uploaded_by', None),
+        'total_size_bytes': int(getattr(task, 'total_size_bytes', 0) or 0),
+        'total_size_text': _format_size_bytes(getattr(task, 'total_size_bytes', 0)),
         'status': getattr(task, 'status', None),
         'file_count': getattr(task, 'file_count', 0),
         'total_events': getattr(task, 'total_events', 0),
@@ -729,6 +770,22 @@ def preview_file(task_uuid: str, relative_path: str, max_lines: int = 200, db: S
     return query.preview_task_file(task.id, relative_path, max_lines=max_lines)
 
 
+@router.get('/tasks/{task_uuid}/download')
+def download_task(task_uuid: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+    query = QueryService(db)
+    task = query.get_task_or_raise(task_uuid)
+    root = Path(task.stored_path)
+    if not root.exists():
+        raise HTTPException(status_code=404, detail='task files not found')
+    if root.is_file():
+        return FileResponse(path=root, filename=root.name)
+    download_dir = Path(get_settings().data_dir) / 'downloads'
+    download_dir.mkdir(parents=True, exist_ok=True)
+    archive_base = download_dir / f'{task_uuid}_{uuid.uuid4().hex[:8]}'
+    archive_path = Path(shutil.make_archive(str(archive_base), 'zip', root_dir=str(root)))
+    return FileResponse(path=archive_path, filename=f'{task_uuid}.zip')
+
+
 @router.get('/config')
 def get_config():
     return ConfigService().get_all()
@@ -793,6 +850,7 @@ def parameter_series(
     task_uuid: str,
     parameter_name: str,
     unit: str = Query(default='s'),
+    axis_mode: str = Query(default='cycle'),
     side_scope: str | None = None,
     side_group: str | None = None,
     chip_name: str | None = None,
@@ -804,6 +862,7 @@ def parameter_series(
         task.id,
         parameter_name,
         unit=unit,
+        axis_mode=axis_mode,
         side_scopes=_csv_or_none(side_scope),
         side_groups=_csv_or_none(side_group),
         chip_names=_csv_or_none(chip_name),
@@ -814,6 +873,7 @@ def parameter_series(
 def row_scan_metric_series(
     task_uuid: str,
     unit: str = Query(default='ms'),
+    axis_mode: str = Query(default='cycle'),
     side_scope: str | None = None,
     side_group: str | None = None,
     chip_name: str | None = None,
@@ -824,6 +884,7 @@ def row_scan_metric_series(
     return query.get_row_scan_metric_stage_series(
         task.id,
         unit=unit,
+        axis_mode=axis_mode,
         side_scopes=_csv_or_none(side_scope),
         side_groups=_csv_or_none(side_group),
         chip_names=_csv_or_none(chip_name),
@@ -835,6 +896,7 @@ def substep_cycle_series(
     task_uuid: str,
     agg_mode: str = Query(default='mean'),
     unit: str = Query(default='s'),
+    axis_mode: str = Query(default='cycle'),
     side_scope: str | None = None,
     side_group: str | None = None,
     chip_name: str | None = None,
@@ -846,6 +908,7 @@ def substep_cycle_series(
         task.id,
         agg_mode=agg_mode,
         unit=unit,
+        axis_mode=axis_mode,
         side_scopes=_csv_or_none(side_scope),
         side_groups=_csv_or_none(side_group),
         chip_names=_csv_or_none(chip_name),

@@ -15,6 +15,8 @@ class UploadTaskModel(Base):
     task_uuid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     filename: Mapped[str] = mapped_column(String(512))
     stored_path: Mapped[str] = mapped_column(String(1024))
+    uploaded_by: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    total_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="uploaded")
     file_count: Mapped[int] = mapped_column(Integer, default=0)
     total_events: Mapped[int] = mapped_column(Integer, default=0)
@@ -252,6 +254,7 @@ class AnnouncementModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    edit_history_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class EmailVerificationCodeModel(Base):

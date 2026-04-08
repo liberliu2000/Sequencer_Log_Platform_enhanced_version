@@ -181,12 +181,16 @@ def _safe_seconds(ms: float | None) -> float | None:
 def _event_time_text(ev: NormalizedEvent | None) -> str | None:
     if not ev:
         return None
+    if ev.original_time_text:
+        return ev.original_time_text
+    if ev.formatted_ms:
+        return ev.formatted_ms
     if ev.parsed_datetime:
         try:
             return ev.parsed_datetime.isoformat(timespec="seconds")
         except TypeError:
             return ev.parsed_datetime.isoformat()
-    return ev.formatted_ms or ev.original_time_text
+    return None
 
 
 def _definition_values(parameter_name: str) -> tuple[float | None, float | None]:
@@ -206,12 +210,12 @@ def _cycle_time_choice_key(result: ParameterResult) -> tuple[float, int, int, in
 
 
 def collapse_cycle_time_results(results: list[ParameterResult]) -> list[ParameterResult]:
-    grouped: dict[int | None, list[ParameterResult]] = defaultdict(list)
+    grouped: dict[tuple[int | None, str | None, str | None], list[ParameterResult]] = defaultdict(list)
     for result in results:
-        grouped[result.cycle].append(result)
+        grouped[(result.cycle, result.side_scope, result.chip_name)].append(result)
 
     collapsed: list[ParameterResult] = []
-    for cycle, candidates in grouped.items():
+    for (_cycle, _side_scope, _chip_name), candidates in grouped.items():
         if len(candidates) == 1:
             collapsed.append(candidates[0])
             continue
@@ -242,6 +246,8 @@ def collapse_cycle_time_results(results: list[ParameterResult]) -> list[Paramete
         collapsed,
         key=lambda item: (
             item.cycle if item.cycle is not None else -1,
+            item.side_scope or "",
+            item.chip_name or "",
             item.start_time or "",
             item.end_time or "",
         ),
@@ -313,14 +319,42 @@ def _mk_result(
 def _build_cycle_time_results(existing_steps: list[StepSummary], events: list[NormalizedEvent]) -> list[ParameterResult]:
     out: list[ParameterResult] = []
     anchors = [ev for ev in events if ev.epoch_ms is not None and "current imaging cycle" in (ev.message or "").lower()]
-    anchors = sorted(anchors, key=lambda x: x.epoch_ms or 0)
-    if len(anchors) >= 2:
-        for i in range(len(anchors) - 1):
-            cur_ev = anchors[i]
-            next_ev = anchors[i + 1]
+    anchors_by_scope: dict[tuple[str | None, str | None], list[NormalizedEvent]] = defaultdict(list)
+    for anchor in anchors:
+        anchors_by_scope[(anchor.side_scope, anchor.chip_name)].append(anchor)
+
+    built_from_anchor = False
+    for key in sorted(anchors_by_scope.keys(), key=lambda item: (item[0] or "", item[1] or "")):
+        side_anchors = sorted(anchors_by_scope[key], key=lambda x: x.epoch_ms or 0)
+        if len(side_anchors) < 2:
+            continue
+        built_from_anchor = True
+        for i in range(len(side_anchors) - 1):
+            cur_ev = side_anchors[i]
+            next_ev = side_anchors[i + 1]
             if cur_ev.epoch_ms is None or next_ev.epoch_ms is None:
                 continue
-            out.append(_mk_result("cycle_time", "cycle time", cur_ev.cycle_no, None, cur_ev.chip_name or next_ev.chip_name, cur_ev, next_ev, float(next_ev.epoch_ms - cur_ev.epoch_ms), cur_ev.source_file, "derived", component="Workflow", extra={"method": "current_imaging_cycle_anchor"}))
+            out.append(
+                _mk_result(
+                    "cycle_time",
+                    "cycle time",
+                    cur_ev.cycle_no,
+                    None,
+                    cur_ev.chip_name or next_ev.chip_name,
+                    cur_ev,
+                    next_ev,
+                    float(next_ev.epoch_ms - cur_ev.epoch_ms),
+                    cur_ev.source_file,
+                    "derived",
+                    component="Workflow",
+                    extra={
+                        "method": "current_imaging_cycle_anchor",
+                        "anchor_side_scope": cur_ev.side_scope or next_ev.side_scope,
+                        "anchor_chip_name": cur_ev.chip_name or next_ev.chip_name,
+                    },
+                )
+            )
+    if built_from_anchor:
         return collapse_cycle_time_results(out)
 
     for c in summarize_cycles(existing_steps):

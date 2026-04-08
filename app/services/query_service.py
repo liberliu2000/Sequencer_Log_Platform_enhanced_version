@@ -24,7 +24,7 @@ from app.services.performance_service import PerformanceService
 from app.services.streaming_aggregation import StreamingAggregationCoordinator
 from app.utils.error_family import get_error_family_metadata
 from app.utils.side_inference import UNASSIGNED_SCOPE_TOKEN
-from app.utils.timeparse import format_seconds
+from app.utils.timeparse import format_seconds, parse_datetime, to_epoch_ms
 
 _SETTINGS = get_settings()
 _QUERY_CACHE = TTLCache(max_entries=_SETTINGS.service_cache_max_entries, ttl_seconds=_SETTINGS.service_cache_ttl_seconds)
@@ -119,6 +119,61 @@ class QueryService:
             return None
         dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC_TZ).astimezone(BEIJING_TZ)
         return dt.isoformat(timespec="seconds")
+
+    @staticmethod
+    def _preferred_time_text(*values: Any) -> str | None:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    def _time_text_to_epoch_ms(self, value: Any) -> int | None:
+        text = self._preferred_time_text(value)
+        if not text:
+            return None
+        parsed = parse_datetime(text)
+        if parsed is not None:
+            return to_epoch_ms(parsed)
+        return None
+
+    def _parameter_time_epoch_ms(self, row: dict[str, Any]) -> int | None:
+        extra = self._llm_extra(row.get("extra")) if isinstance(row.get("extra"), str) else (row.get("extra") or {})
+        if isinstance(extra, dict):
+            for key in ("started_at_epoch_ms", "ended_at_epoch_ms"):
+                value = extra.get(key)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except Exception:
+                        pass
+        for key in ("start_epoch_ms", "end_epoch_ms", "epoch_ms"):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    pass
+        return self._time_text_to_epoch_ms(row.get("start_time") or row.get("start_time_text") or row.get("end_time") or row.get("end_time_text"))
+
+    @staticmethod
+    def _series_scope_label(side_scope: str | None, chip_name: str | None) -> str:
+        if side_scope and chip_name:
+            return f"{side_scope} | {chip_name}"
+        if side_scope:
+            return str(side_scope)
+        if chip_name:
+            return f"Unassigned | {chip_name}"
+        return "Unassigned"
+
+    @staticmethod
+    def _is_uncertain_side(side_scope: str | None, side_confidence: Any) -> bool:
+        if not side_scope:
+            return True
+        try:
+            return float(side_confidence or 0.0) < 0.75
+        except Exception:
+            return False
 
     def _convert_duration(self, ms: float | None, unit: str) -> float | None:
         if ms is None:
@@ -234,6 +289,68 @@ class QueryService:
             token in sub_step_text
             for token in ["move", "align", "scan", "transfer", "temperature", "priming", "coarsetheta", "finealign"]
         ) or component_text in {"XYZStage", "Scanner_1", "Scanner_2", "Workflow", "StageRunMgr", "ImagingMetrics"}
+
+    def _group_timeline_records_by_side(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        row_key: str,
+    ) -> dict[str, Any]:
+        normalized_rows = [dict(row) for row in rows]
+        known_side_order = list(
+            dict.fromkeys(
+                str(row.get("side_scope"))
+                for row in normalized_rows
+                if row.get("side_scope") not in (None, "")
+            )
+        )
+        uncertain_rows = [row for row in normalized_rows if self._is_uncertain_side(row.get("side_scope"), row.get("side_confidence"))]
+
+        if not known_side_order:
+            side_groups = [
+                {
+                    "side_scope": None,
+                    "side_label": "Unassigned",
+                    row_key: normalized_rows,
+                    "uncertain_count": len(uncertain_rows),
+                }
+            ]
+        else:
+            side_groups = []
+            for side_scope in known_side_order:
+                side_rows = [
+                    row
+                    for row in normalized_rows
+                    if row.get("side_scope") == side_scope and not self._is_uncertain_side(row.get("side_scope"), row.get("side_confidence"))
+                ]
+                replicated_uncertain = []
+                for row in uncertain_rows:
+                    copy_row = dict(row)
+                    copy_row["is_uncertain_side"] = True
+                    copy_row["original_side_scope"] = row.get("side_scope")
+                    copy_row["render_side_scope"] = side_scope
+                    replicated_uncertain.append(copy_row)
+                side_groups.append(
+                    {
+                        "side_scope": side_scope,
+                        "side_label": self._scope_display(side_scope),
+                        row_key: sorted(
+                            side_rows + replicated_uncertain,
+                            key=lambda item: (
+                                item.get("start_epoch_ms") if item.get("start_epoch_ms") is not None else item.get("epoch_ms") if item.get("epoch_ms") is not None else float("inf"),
+                                item.get("cycle_no") if item.get("cycle_no") is not None else -1,
+                                item.get("track") or "",
+                            ),
+                        ),
+                        "uncertain_count": len(replicated_uncertain),
+                    }
+                )
+        return {
+            "side_order": known_side_order,
+            "by_side": side_groups,
+            "unassigned_side_rows": uncertain_rows,
+            row_key: normalized_rows,
+        }
 
     def _dict_to_step(self, row: dict[str, Any]) -> StepSummary:
         return StepSummary(
@@ -920,6 +1037,7 @@ class QueryService:
         task_id: int,
         parameter_name: str,
         unit: str = "s",
+        axis_mode: str = "cycle",
         side_scopes: str | list[str] | None = None,
         side_groups: str | list[str] | None = None,
         chip_names: str | list[str] | None = None,
@@ -927,6 +1045,7 @@ class QueryService:
         side_scope_values = self._normalize_filter_values(side_scopes)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
+        x_axis_type = "time" if str(axis_mode or "").strip().lower() == "time" else "cycle"
         rows = [
             r
             for r in self.get_parameter_results(task_id)
@@ -943,19 +1062,49 @@ class QueryService:
             duration_ms = r.get("duration_ms")
             threshold = r.get("threshold")
             expected = r.get("expected")
+            time_epoch_ms = self._parameter_time_epoch_ms(r)
+            series_name = self._series_scope_label(r.get("side_scope"), r.get("chip_name"))
+            x_axis_value = (
+                self._preferred_time_text(r.get("start_time"), r.get("end_time"), self._epoch_to_seconds(time_epoch_ms))
+                if x_axis_type == "time"
+                else (r.get("cycle") if r.get("cycle") is not None else "NA")
+            )
             out.append({
                 **r,
                 "duration_value": self._convert_duration(duration_ms, unit),
                 "duration_unit": unit,
                 "threshold_value": threshold if unit == "s" else self._convert_duration((threshold or 0) * 1000 if threshold is not None else None, unit),
                 "expected_value": expected if unit == "s" else self._convert_duration((expected or 0) * 1000 if expected is not None else None, unit),
+                "x_axis_type": x_axis_type,
+                "x_axis_value": x_axis_value,
+                "x_axis_label": str(x_axis_value),
+                "x_axis_sort_value": time_epoch_ms if x_axis_type == "time" else (r.get("cycle") if r.get("cycle") is not None else -1),
+                "time_epoch_ms": time_epoch_ms,
+                "series_name": series_name,
             })
+        if x_axis_type == "time":
+            out.sort(
+                key=lambda item: (
+                    item.get("x_axis_sort_value") if item.get("x_axis_sort_value") is not None else float("inf"),
+                    item.get("series_name") or "",
+                    item.get("parameter_name") or "",
+                )
+            )
+        else:
+            out.sort(
+                key=lambda item: (
+                    item.get("series_name") or "",
+                    item.get("x_axis_sort_value") if item.get("x_axis_sort_value") is not None else -1,
+                    item.get("time_epoch_ms") if item.get("time_epoch_ms") is not None else float("inf"),
+                )
+            )
         return out
 
     def get_row_scan_metric_stage_series(
         self,
         task_id: int,
         unit: str = "ms",
+        axis_mode: str = "cycle",
         side_scopes: str | list[str] | None = None,
         side_groups: str | list[str] | None = None,
         chip_names: str | list[str] | None = None,
@@ -963,6 +1112,7 @@ class QueryService:
         side_scope_values = self._normalize_filter_values(side_scopes)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
+        x_axis_type = "time" if str(axis_mode or "").strip().lower() == "time" else "cycle"
         rows = [
             r
             for r in self.get_parameter_results(task_id)
@@ -977,6 +1127,13 @@ class QueryService:
         out = []
         for r in rows:
             stage = r.get("extra", {}).get("metric_stage")
+            time_epoch_ms = self._parameter_time_epoch_ms(r)
+            series_name = f"{self._series_scope_label(r.get('side_scope'), r.get('chip_name'))} | {stage or 'unknown'}"
+            x_axis_value = (
+                self._preferred_time_text(r.get("start_time"), r.get("end_time"), self._epoch_to_seconds(time_epoch_ms))
+                if x_axis_type == "time"
+                else (r.get("cycle") if r.get("cycle") is not None else "NA")
+            )
             out.append({
                 "cycle": r.get("cycle"),
                 "side_scope": r.get("side_scope"),
@@ -992,8 +1149,22 @@ class QueryService:
                 "duration_unit": unit,
                 "row_count": r.get("extra", {}).get("row_count"),
                 "source_file": r.get("source_file"),
+                "x_axis_type": x_axis_type,
+                "x_axis_value": x_axis_value,
+                "x_axis_label": str(x_axis_value),
+                "x_axis_sort_value": time_epoch_ms if x_axis_type == "time" else (r.get("cycle") if r.get("cycle") is not None else -1),
+                "time_epoch_ms": time_epoch_ms,
+                "series_name": series_name,
             })
-        return sorted(out, key=lambda x: (x["metric_stage"] or "", x.get("side_scope") or "", x["cycle"] or -1, x.get("chip_name") or ""))
+        return sorted(
+            out,
+            key=lambda item: (
+                item.get("time_epoch_ms") if x_axis_type == "time" and item.get("time_epoch_ms") is not None else float("inf") if x_axis_type == "time" else (item.get("series_name") or ""),
+                item.get("series_name") or "",
+                item.get("cycle") if item.get("cycle") is not None else -1,
+                item.get("chip_name") or "",
+            ),
+        )
 
     def _event_schema_to_llm_row(self, ev: NormalizedEvent) -> dict[str, Any]:
         return {
@@ -1459,7 +1630,7 @@ class QueryService:
         side_scopes: str | list[str] | None = None,
         side_groups: str | list[str] | None = None,
         chip_names: str | list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         side_scope_values = self._normalize_filter_values(side_scopes)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
@@ -1484,6 +1655,8 @@ class QueryService:
                 StepSummaryModel.is_over_threshold,
                 StepSummaryModel.start_time_text,
                 StepSummaryModel.end_time_text,
+                StepSummaryModel.side_confidence,
+                StepSummaryModel.side_evidence,
             )
             .where(StepSummaryModel.task_id == task_id)
         )
@@ -1524,11 +1697,13 @@ class QueryService:
             item["start_time_sec"] = self._epoch_to_seconds(start_ms)
             item["end_time_sec"] = self._epoch_to_seconds(end_ms)
             item["source_file"] = None
-            item["start"] = self._epoch_to_iso_text(start_ms)
-            item["end"] = self._epoch_to_iso_text(end_ms)
+            item["start"] = self._preferred_time_text(item.get("start_time_text"), self._epoch_to_seconds(start_ms), self._epoch_to_iso_text(start_ms))
+            item["end"] = self._preferred_time_text(item.get("end_time_text"), self._epoch_to_seconds(end_ms), self._epoch_to_iso_text(end_ms))
             item["base_track"] = base_track
             item["track"] = track
             item["track_granularity"] = granularity
+            item["is_uncertain_side"] = self._is_uncertain_side(item.get("side_scope"), item.get("side_confidence"))
+            item["side_evidence"] = self._llm_extra(item.get("side_evidence")) or {}
             output.append(item)
         if track_order == "cycle":
             output.sort(
@@ -1540,7 +1715,15 @@ class QueryService:
                     item.get("track") or "",
                 )
             )
-        return output
+        else:
+            output.sort(
+                key=lambda item: (
+                    item.get("start_epoch_ms") if item.get("start_epoch_ms") is not None else float("inf"),
+                    item.get("cycle_no") if item.get("cycle_no") is not None else -1,
+                    item.get("track") or "",
+                )
+            )
+        return self._group_timeline_records_by_side(output, row_key="rows")
 
     def get_timeline_error_points(
         self,
@@ -1550,7 +1733,7 @@ class QueryService:
         side_scopes: str | list[str] | None = None,
         side_groups: str | list[str] | None = None,
         chip_names: str | list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         side_scope_values = self._normalize_filter_values(side_scopes)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
@@ -1571,6 +1754,7 @@ class QueryService:
                 NormalizedEventModel.slot_no,
                 NormalizedEventModel.stage_key,
                 NormalizedEventModel.epoch_ms,
+                NormalizedEventModel.original_time_text,
                 NormalizedEventModel.formatted_ms,
                 NormalizedEventModel.message,
                 NormalizedEventModel.normalized_signature,
@@ -1579,6 +1763,8 @@ class QueryService:
                 NormalizedEventModel.error_code,
                 NormalizedEventModel.exception_type,
                 NormalizedEventModel.source_file,
+                NormalizedEventModel.side_confidence,
+                NormalizedEventModel.side_evidence,
             )
             .where(
                 NormalizedEventModel.task_id == task_id,
@@ -1622,8 +1808,8 @@ class QueryService:
                     "track": base_track,
                     "base_track": base_track,
                     "track_granularity": granularity,
-                    "time": self._epoch_to_iso_text(epoch_ms),
-                    "time_text": row["formatted_ms"] or self._epoch_to_seconds(epoch_ms),
+                    "time": self._preferred_time_text(row["original_time_text"], row["formatted_ms"], self._epoch_to_seconds(epoch_ms), self._epoch_to_iso_text(epoch_ms)),
+                    "time_text": self._preferred_time_text(row["original_time_text"], row["formatted_ms"], self._epoch_to_seconds(epoch_ms)),
                     "epoch_ms": epoch_ms,
                     "message": row["message"],
                     "normalized_signature": row["normalized_signature"],
@@ -1632,9 +1818,12 @@ class QueryService:
                     "error_code": row["error_code"],
                     "exception_type": row["exception_type"],
                     "source_file": row["source_file"],
+                    "side_confidence": row["side_confidence"],
+                    "side_evidence": self._llm_extra(row["side_evidence"]) or {},
+                    "is_uncertain_side": self._is_uncertain_side(row["side_scope"], row["side_confidence"]),
                 }
             )
-        return points
+        return self._group_timeline_records_by_side(points, row_key="points")
 
     def get_operational_metrics(
         self,
@@ -1691,6 +1880,7 @@ class QueryService:
         task_id: int,
         agg_mode: str = "mean",
         unit: str = "s",
+        axis_mode: str = "cycle",
         side_scopes: str | list[str] | None = None,
         side_groups: str | list[str] | None = None,
         chip_names: str | list[str] | None = None,
@@ -1699,6 +1889,7 @@ class QueryService:
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
         agg_fn = func.sum if agg_mode == "sum" else func.avg
+        x_axis_type = "time" if str(axis_mode or "").strip().lower() == "time" else "cycle"
         stmt = (
             select(
                 StepSummaryModel.cycle_no.label("cycle_no"),
@@ -1710,6 +1901,10 @@ class QueryService:
                 func.max(StepSummaryModel.chip_position).label("chip_position"),
                 func.max(StepSummaryModel.chuck_no).label("chuck_no"),
                 func.max(StepSummaryModel.slot_no).label("slot_no"),
+                func.min(StepSummaryModel.start_epoch_ms).label("min_start_epoch_ms"),
+                func.max(StepSummaryModel.end_epoch_ms).label("max_end_epoch_ms"),
+                func.min(StepSummaryModel.start_time_text).label("start_time_text"),
+                func.max(StepSummaryModel.end_time_text).label("end_time_text"),
                 agg_fn(StepSummaryModel.duration_ms).label("agg_duration_ms"),
                 func.count(StepSummaryModel.id).label("sample_count"),
             )
@@ -1739,6 +1934,16 @@ class QueryService:
         out: list[dict[str, Any]] = []
         for row in self.db.execute(stmt).mappings():
             duration_ms = float(row["agg_duration_ms"] or 0.0)
+            time_epoch_ms = row["min_start_epoch_ms"] or row["max_end_epoch_ms"]
+            x_axis_value = (
+                self._preferred_time_text(
+                    row["start_time_text"],
+                    row["end_time_text"],
+                    self._epoch_to_seconds(time_epoch_ms),
+                )
+                if x_axis_type == "time"
+                else (row["cycle_no"] if row["cycle_no"] is not None else "NA")
+            )
             out.append(
                 {
                     "cycle": row["cycle_no"],
@@ -1755,9 +1960,24 @@ class QueryService:
                     "duration_value": self._convert_duration(duration_ms, unit),
                     "duration_unit": unit,
                     "sample_count": int(row["sample_count"] or 0),
+                    "time_epoch_ms": time_epoch_ms,
+                    "start_time_text": row["start_time_text"],
+                    "end_time_text": row["end_time_text"],
+                    "x_axis_type": x_axis_type,
+                    "x_axis_value": x_axis_value,
+                    "x_axis_label": str(x_axis_value),
+                    "x_axis_sort_value": time_epoch_ms if x_axis_type == "time" else (row["cycle_no"] if row["cycle_no"] is not None else -1),
+                    "series_name": f"{self._series_scope_label(row['side_scope'], row['chip_name'])} | {row['sub_step'] or 'unknown'}",
                 }
             )
-        return out
+        return sorted(
+            out,
+            key=lambda item: (
+                item.get("time_epoch_ms") if x_axis_type == "time" and item.get("time_epoch_ms") is not None else float("inf") if x_axis_type == "time" else (item.get("series_name") or ""),
+                item.get("series_name") or "",
+                item.get("cycle") if item.get("cycle") is not None else -1,
+            ),
+        )
 
     def get_error_clusters(
         self,

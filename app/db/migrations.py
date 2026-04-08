@@ -30,8 +30,15 @@ def _add_columns_if_missing(engine: Engine, table_name: str, columns: Iterable[t
         existing = _get_columns(inspector, table_name)
         for col_name, col_def in columns:
             if col_name not in existing:
-                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}"))
-                added.append(col_name)
+                try:
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}"))
+                    added.append(col_name)
+                    existing.add(col_name)
+                except Exception as exc:
+                    if "duplicate column name" in str(exc).lower():
+                        existing.add(col_name)
+                        continue
+                    raise
     return added
 
 
@@ -151,6 +158,8 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
         return result
 
     upload_task_columns = [
+        ("uploaded_by", "VARCHAR(64)"),
+        ("total_size_bytes", "INTEGER DEFAULT 0"),
         ("progress_percent", "INTEGER DEFAULT 0"),
         ("current_stage", "VARCHAR(128)"),
         ("queue_position", "INTEGER"),
@@ -198,6 +207,9 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
         ("side_confidence", "FLOAT"),
         ("side_evidence", "TEXT"),
     ]
+    announcement_columns = [
+        ("edit_history_json", "TEXT"),
+    ]
 
     if _has_table(inspector, "upload_tasks"):
         added = _add_columns_if_missing(engine, "upload_tasks", upload_task_columns)
@@ -224,6 +236,11 @@ def migrate_sqlite_schema(engine: Engine) -> dict[str, Any]:
         added = _add_columns_if_missing(engine, "parameter_results", parameter_result_columns)
         if added:
             result["added_columns"]["parameter_results"] = added
+            result["migrated"] = True
+    if _has_table(inspector, "announcements"):
+        added = _add_columns_if_missing(engine, "announcements", announcement_columns)
+        if added:
+            result["added_columns"]["announcements"] = added
             result["migrated"] = True
 
     _create_indexes_if_possible(engine)

@@ -4,6 +4,7 @@ import gc
 import heapq
 import os
 import time
+from bisect import bisect_right
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -113,13 +114,17 @@ class AnchorPoint:
     position: int
     cycle_no: int
     epoch_ms: int | None
+    side_scope: str | None
 
 
 @dataclass(slots=True)
 class CycleInferenceContext:
     anchors: list[AnchorPoint]
     anchor_positions: list[int]
-    component_cycle_votes: dict[tuple[str | None, str | None], Counter]
+    anchors_by_side: dict[str | None, list[AnchorPoint]]
+    anchor_positions_by_side: dict[str | None, list[int]]
+    component_cycle_votes: dict[tuple[str | None, str | None, str | None], Counter]
+    known_side_scopes: set[str]
     total_events: int
     side_registry: TaskSideRegistry
 
@@ -335,30 +340,40 @@ class StreamingAggregationCoordinator:
         progress_callback: ProgressCallback | None = None,
     ) -> CycleInferenceContext:
         anchors: list[AnchorPoint] = []
-        component_cycle_votes: dict[tuple[str | None, str | None], Counter] = defaultdict(Counter)
+        anchors_by_side: dict[str | None, list[AnchorPoint]] = defaultdict(list)
+        component_cycle_votes: dict[tuple[str | None, str | None, str | None], Counter] = defaultdict(Counter)
+        known_side_scopes: set[str] = set()
         side_registry = TaskSideRegistry()
         processed = 0
 
         for payload in self._iter_intermediate_event_payloads():
-            cycle_no = payload.get("cycle_no")
-            if cycle_no is not None:
-                anchors.append(
-                    AnchorPoint(
-                        position=processed,
-                        cycle_no=int(cycle_no),
-                        epoch_ms=self._to_int(payload.get("epoch_ms")),
-                    )
-                )
-                component_cycle_votes[(payload.get("component"), payload.get("sub_step"))][int(cycle_no)] += 1
-
-            side_registry.observe_event(
+            extra = _coerce_extra_json(payload.get("extra_json"))
+            inference = side_registry.observe_event(
                 source_file=str(payload.get("source_file") or ""),
                 message=str(payload.get("message") or ""),
                 raw_text=str(payload.get("raw_text") or payload.get("message") or ""),
                 chip_name=payload.get("chip_name"),
                 stage_name=payload.get("stage_name"),
-                extra=_coerce_extra_json(payload.get("extra_json")),
+                extra=extra,
             )
+            side_scope = (
+                prefer_specific_side(payload.get("side_scope"), inference.side_scope)
+                or payload.get("side_scope")
+                or inference.side_scope
+            )
+            if side_scope:
+                known_side_scopes.add(str(side_scope))
+            cycle_no = payload.get("cycle_no")
+            if cycle_no is not None:
+                anchor = AnchorPoint(
+                    position=processed,
+                    cycle_no=int(cycle_no),
+                    epoch_ms=self._to_int(payload.get("epoch_ms")),
+                    side_scope=str(side_scope) if side_scope is not None else None,
+                )
+                anchors.append(anchor)
+                anchors_by_side[anchor.side_scope].append(anchor)
+                component_cycle_votes[(anchor.side_scope, payload.get("component"), payload.get("sub_step"))][int(cycle_no)] += 1
             processed += 1
 
             if processed % self.scan_batch_size == 0:
@@ -381,7 +396,13 @@ class StreamingAggregationCoordinator:
         return CycleInferenceContext(
             anchors=anchors,
             anchor_positions=[anchor.position for anchor in anchors],
+            anchors_by_side=dict(anchors_by_side),
+            anchor_positions_by_side={
+                side_scope: [anchor.position for anchor in side_anchors]
+                for side_scope, side_anchors in anchors_by_side.items()
+            },
             component_cycle_votes=component_cycle_votes,
+            known_side_scopes=known_side_scopes,
             total_events=processed,
             side_registry=side_registry,
         )
@@ -1247,24 +1268,44 @@ class StreamingAggregationCoordinator:
         context: CycleInferenceContext,
         next_anchor_idx: int,
     ) -> int:
-        anchors = context.anchors
-        if not anchors:
+        if not context.anchors:
             if event.cycle_no is None:
                 _apply_cycle_mark(event, False, "insufficient_context", "low", reason="insufficient_context")
             return next_anchor_idx
-
-        while next_anchor_idx < len(anchors) and anchors[next_anchor_idx].position < event_index:
-            next_anchor_idx += 1
 
         if event.cycle_no is not None:
             _apply_cycle_mark(event, False, "existing", "high")
             return next_anchor_idx
 
         msg = (event.message or "").lower()
-        prev_anchor = anchors[next_anchor_idx - 1] if next_anchor_idx > 0 else None
-        next_anchor = anchors[next_anchor_idx] if next_anchor_idx < len(anchors) else None
-        votes = context.component_cycle_votes.get((event.component, event.sub_step)) or context.component_cycle_votes.get(
-            (event.component, None)
+        anchor_side_scope = event.side_scope
+        if anchor_side_scope is None and len(context.known_side_scopes) == 1:
+            anchor_side_scope = next(iter(context.known_side_scopes))
+
+        anchors = context.anchors_by_side.get(anchor_side_scope)
+        anchor_positions = context.anchor_positions_by_side.get(anchor_side_scope)
+        if not anchors or not anchor_positions:
+            unassigned_anchors = context.anchors_by_side.get(None)
+            unassigned_positions = context.anchor_positions_by_side.get(None)
+            if unassigned_anchors and unassigned_positions:
+                anchors = unassigned_anchors
+                anchor_positions = unassigned_positions
+            elif event.side_scope is None and len(context.known_side_scopes) > 1:
+                _apply_cycle_mark(event, False, "ambiguous_side_scope", "low", reason="ambiguous_side_scope")
+                return next_anchor_idx
+            else:
+                anchors = context.anchors
+                anchor_positions = context.anchor_positions
+
+        if not anchors or not anchor_positions:
+            _apply_cycle_mark(event, False, "insufficient_context", "low", reason="insufficient_context")
+            return next_anchor_idx
+
+        next_anchor_local_idx = bisect_right(anchor_positions, event_index)
+        prev_anchor = anchors[next_anchor_local_idx - 1] if next_anchor_local_idx > 0 else None
+        next_anchor = anchors[next_anchor_local_idx] if next_anchor_local_idx < len(anchors) else None
+        votes = context.component_cycle_votes.get((anchor_side_scope, event.component, event.sub_step)) or context.component_cycle_votes.get(
+            (anchor_side_scope, event.component, None)
         )
         if votes:
             winner, count = votes.most_common(1)[0]
@@ -1394,8 +1435,8 @@ class StreamingAggregationCoordinator:
                         and get_step_threshold_ms(self.thresholds, component, step_key)
                         and duration_ms > float(get_step_threshold_ms(self.thresholds, component, step_key) or 0)
                     ),
-                    start_time_text=start_event.formatted_ms,
-                    end_time_text=event.formatted_ms,
+                    start_time_text=_event_time_text(start_event),
+                    end_time_text=_event_time_text(event),
                     side_confidence=max(float(event.side_confidence or 0.0), float(start_event.side_confidence or 0.0)) or None,
                     side_evidence={**start_event.side_evidence, **event.side_evidence},
                 )
@@ -1422,7 +1463,7 @@ class StreamingAggregationCoordinator:
                     threshold_ms=threshold_ms,
                     is_over_threshold=bool(event.duration_ms and threshold_ms and event.duration_ms > threshold_ms),
                     start_time_text=None,
-                    end_time_text=event.formatted_ms,
+                    end_time_text=_event_time_text(event),
                     side_confidence=event.side_confidence,
                     side_evidence=event.side_evidence,
                 )
@@ -1451,7 +1492,7 @@ class StreamingAggregationCoordinator:
                 threshold_ms=threshold_ms,
                 is_over_threshold=bool(event.duration_ms and threshold_ms and event.duration_ms > threshold_ms),
                 start_time_text=None,
-                end_time_text=event.formatted_ms,
+                end_time_text=_event_time_text(event),
                 side_confidence=event.side_confidence,
                 side_evidence=event.side_evidence,
             )
@@ -1489,7 +1530,7 @@ class StreamingAggregationCoordinator:
                         duration_ms=None,
                         threshold_ms=threshold_ms,
                         is_over_threshold=False,
-                        start_time_text=start_event.formatted_ms,
+                        start_time_text=_event_time_text(start_event),
                         end_time_text=None,
                         side_confidence=start_event.side_confidence,
                         side_evidence=start_event.side_evidence,
@@ -1801,37 +1842,51 @@ class StreamingAggregationCoordinator:
         cycle_summary_stats: dict[tuple[int | None, str | None, str | None], dict[str, Any]],
     ) -> list[ParameterResult]:
         cycle_time_results: list[ParameterResult] = []
-        if len(cycle_anchor_events) >= 2:
-            for idx in range(len(cycle_anchor_events) - 1):
-                current_event = cycle_anchor_events[idx]
-                next_event = cycle_anchor_events[idx + 1]
-                if current_event.epoch_ms is None or next_event.epoch_ms is None:
+        anchor_groups: dict[tuple[str | None, str | None], list[MutableEvent]] = defaultdict(list)
+        for event in cycle_anchor_events:
+            anchor_groups[(event.side_scope, event.chip_name)].append(event)
+        if any(len(events) >= 2 for events in anchor_groups.values()):
+            for (_side_scope, _chip_name), grouped_events in sorted(
+                anchor_groups.items(),
+                key=lambda item: (item[0][0] or "", item[0][1] or ""),
+            ):
+                ordered_events = sorted(grouped_events, key=lambda event: event.epoch_ms or 0)
+                if len(ordered_events) < 2:
                     continue
-                cycle_time_results.append(
-                    _mk_result(
-                        "cycle_time",
-                        "cycle time",
-                        current_event.cycle_no,
-                        None,
-                        current_event.chip_name or next_event.chip_name,
-                        current_event,
-                        next_event,
-                        float(next_event.epoch_ms - current_event.epoch_ms),
-                        current_event.source_file,
-                        "derived",
-                        component="Workflow",
-                        instrument_scope=current_event.instrument_scope or next_event.instrument_scope,
-                        side_scope=current_event.side_scope or next_event.side_scope,
-                        side_group=current_event.side_group or next_event.side_group,
-                        chip_position=current_event.chip_position or next_event.chip_position,
-                        chuck_no=current_event.chuck_no or next_event.chuck_no,
-                        slot_no=current_event.slot_no or next_event.slot_no,
-                        stage_key=current_event.stage_key or next_event.stage_key,
-                        side_confidence=max(float(current_event.side_confidence or 0.0), float(next_event.side_confidence or 0.0)) or None,
-                        side_evidence={**current_event.side_evidence, **next_event.side_evidence},
-                        extra={"method": "current_imaging_cycle_anchor"},
+                for idx in range(len(ordered_events) - 1):
+                    current_event = ordered_events[idx]
+                    next_event = ordered_events[idx + 1]
+                    if current_event.epoch_ms is None or next_event.epoch_ms is None:
+                        continue
+                    cycle_time_results.append(
+                        _mk_result(
+                            "cycle_time",
+                            "cycle time",
+                            current_event.cycle_no,
+                            None,
+                            current_event.chip_name or next_event.chip_name,
+                            current_event,
+                            next_event,
+                            float(next_event.epoch_ms - current_event.epoch_ms),
+                            current_event.source_file,
+                            "derived",
+                            component="Workflow",
+                            instrument_scope=current_event.instrument_scope or next_event.instrument_scope,
+                            side_scope=current_event.side_scope or next_event.side_scope,
+                            side_group=current_event.side_group or next_event.side_group,
+                            chip_position=current_event.chip_position or next_event.chip_position,
+                            chuck_no=current_event.chuck_no or next_event.chuck_no,
+                            slot_no=current_event.slot_no or next_event.slot_no,
+                            stage_key=current_event.stage_key or next_event.stage_key,
+                            side_confidence=max(float(current_event.side_confidence or 0.0), float(next_event.side_confidence or 0.0)) or None,
+                            side_evidence={**current_event.side_evidence, **next_event.side_evidence},
+                            extra={
+                                "method": "current_imaging_cycle_anchor",
+                                "anchor_side_scope": current_event.side_scope or next_event.side_scope,
+                                "anchor_chip_name": current_event.chip_name or next_event.chip_name,
+                            },
+                        )
                     )
-                )
         else:
             threshold, expected = _definition_values("cycle_time")
             sorted_stats = sorted(

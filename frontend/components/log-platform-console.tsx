@@ -125,6 +125,14 @@ type AnnouncementItem = {
   updated_at?: string | null;
   is_pinned?: boolean;
   created_at?: string | null;
+  edit_history?: Array<{
+    action?: string | null;
+    editor?: string | null;
+    edited_at?: string | null;
+    title?: string | null;
+    summary?: string | null;
+    is_pinned?: boolean | null;
+  }>;
 };
 
 const TOKEN_STORAGE_KEY = "sequencer-platform-auth-token";
@@ -471,6 +479,23 @@ function formatStorageLabel(value: unknown, unit: "MB" | "GB") {
   return `${formatRuntimeNumber(numeric, unit === "GB" ? 2 : 1)} ${unit}`;
 }
 
+function formatFileSize(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return "-";
+  }
+  if (numeric < 1024) {
+    return `${Math.round(numeric)} B`;
+  }
+  if (numeric < 1024 * 1024) {
+    return `${formatRuntimeNumber(numeric / 1024, 2)} KB`;
+  }
+  if (numeric < 1024 * 1024 * 1024) {
+    return `${formatRuntimeNumber(numeric / 1024 / 1024, 2)} MB`;
+  }
+  return `${formatRuntimeNumber(numeric / 1024 / 1024 / 1024, 2)} GB`;
+}
+
 function UsageStatusCard({
   label,
   percent,
@@ -538,6 +563,22 @@ function AnnouncementFeedCard({
   const featuredIds = new Set(featured.map((entry) => entry.item.id));
   const historyItems = items.filter((item) => !featuredIds.has(item.id));
 
+  function renderEditMeta(item: AnnouncementItem) {
+    const edits = safeArray(item.edit_history);
+    const latestEdit = edits[edits.length - 1] || null;
+    const priorEdits = Math.max(edits.length - 1, 0);
+    if (!latestEdit?.editor && !latestEdit?.edited_at && priorEdits <= 0) {
+      return null;
+    }
+    return (
+      <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">
+        {latestEdit?.editor ? `最后编辑：${latestEdit.editor}` : "有编辑记录"}
+        {latestEdit?.edited_at ? ` · ${formatDate(latestEdit.edited_at)}` : ""}
+        {priorEdits > 0 ? ` · 编辑次数 ${priorEdits}` : ""}
+      </p>
+    );
+  }
+
   return (
     <div className="space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--muted)]/35 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -580,6 +621,7 @@ function AnnouncementFeedCard({
               <span>{formatDate(entry.item.updated_at || entry.item.created_at || null)}</span>
               <span>{entry.item.updated_by ? `发布人：${entry.item.updated_by}` : "系统发布"}</span>
             </div>
+            {renderEditMeta(entry.item)}
           </article>
         ))}
         {historyItems.length ? (
@@ -604,6 +646,7 @@ function AnnouncementFeedCard({
                 <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">
                   {formatDate(item.updated_at || item.created_at || null)}
                 </p>
+                {renderEditMeta(item)}
               </article>
             ))}
           </div>
@@ -662,11 +705,20 @@ export function LogPlatformConsole() {
 
   const [timelineCycleNo, setTimelineCycleNo] = useState("");
   const [timelineTrackOrder, setTimelineTrackOrder] = useState("default");
-  const [timelineBundle, setTimelineBundle] = useState<AnyRecord>({ cycles: [], rows: [], errors: [] });
+  const [timelineSideFilter, setTimelineSideFilter] = useState("all");
+  const [timelineBundle, setTimelineBundle] = useState<AnyRecord>({
+    cycles: [],
+    rows: [],
+    errors: [],
+    by_side: [],
+    error_by_side: [],
+    side_order: [],
+  });
 
   const [errorsResponse, setErrorsResponse] = useState<AnyRecord>({ items: [], total: 0 });
   const [selectedParameters, setSelectedParameters] = useState<string[]>([]);
   const [parameterUnit, setParameterUnit] = useState("s");
+  const [parameterAxisMode, setParameterAxisMode] = useState("cycle");
   const [parameterBundle, setParameterBundle] = useState<AnyRecord>({
     definitions: [],
     parameterSeries: {},
@@ -1023,20 +1075,35 @@ export function LogPlatformConsole() {
 
   async function loadTimeline() {
     if (!selectedTaskUuid) {
-      setTimelineBundle({ cycles: [], rows: [], errors: [] });
+      setTimelineBundle({ cycles: [], rows: [], errors: [], by_side: [], error_by_side: [], side_order: [] });
       return;
     }
     const cycleParam = timelineCycleNo ? Number(timelineCycleNo) : undefined;
     const [cycles, rows, errors] = await Promise.all([
       request<any[]>(`/tasks/${selectedTaskUuid}/cycles`),
-      request<any[]>(`/tasks/${selectedTaskUuid}/movement-timeline`, {
+      request<AnyRecord>(`/tasks/${selectedTaskUuid}/movement-timeline`, {
         query: { cycle_no: cycleParam, track_order: timelineTrackOrder },
       }),
-      request<any[]>(`/tasks/${selectedTaskUuid}/movement-timeline/errors`, {
+      request<AnyRecord>(`/tasks/${selectedTaskUuid}/movement-timeline/errors`, {
         query: { cycle_no: cycleParam },
       }),
     ]);
-    setTimelineBundle({ cycles: safeArray(cycles), rows: safeArray(rows), errors: safeArray(errors) });
+    const rowGroups = safeArray(rows.by_side);
+    const errorGroups = safeArray(errors.by_side);
+    const sideOrder = safeArray<string>(rows.side_order);
+    setTimelineBundle({
+      cycles: safeArray(cycles),
+      rows: safeArray(rows.rows),
+      errors: safeArray(errors.points),
+      by_side: rowGroups,
+      error_by_side: errorGroups,
+      side_order: sideOrder,
+      unassigned_rows: safeArray(rows.unassigned_side_rows),
+      unassigned_errors: safeArray(errors.unassigned_side_rows),
+    });
+    if (timelineSideFilter !== "all" && !sideOrder.includes(timelineSideFilter)) {
+      setTimelineSideFilter("all");
+    }
   }
 
   async function loadErrors() {
@@ -1072,14 +1139,14 @@ export function LogPlatformConsole() {
     const seriesEntries = await Promise.all(
       active.map(async (name) => {
         const rows = await request<any[]>(`/tasks/${selectedTaskUuid}/parameter-series/${name}`, {
-          query: { unit: parameterUnit },
+          query: { unit: parameterUnit, axis_mode: parameterAxisMode },
         });
         return [name, safeArray(rows)] as const;
       }),
     );
     const [substepSeries, rowScanMetrics] = await Promise.all([
-      request<any[]>(`/tasks/${selectedTaskUuid}/substep-cycle-series`, { query: { agg_mode: "mean", unit: parameterUnit } }),
-      request<any[]>(`/tasks/${selectedTaskUuid}/row-scan-metric-series`, { query: { unit: "ms" } }),
+      request<any[]>(`/tasks/${selectedTaskUuid}/substep-cycle-series`, { query: { agg_mode: "mean", unit: parameterUnit, axis_mode: parameterAxisMode } }),
+      request<any[]>(`/tasks/${selectedTaskUuid}/row-scan-metric-series`, { query: { unit: "ms", axis_mode: parameterAxisMode } }),
     ]);
     setParameterBundle({
       definitions: filtered,
@@ -2056,7 +2123,7 @@ export function LogPlatformConsole() {
     if (isAuthenticated && page === "parameters") {
       void loadParameters().catch(showError);
     }
-  }, [isAuthenticated, page, selectedTaskUuid, parameterUnit, selectedParameters]);
+  }, [isAuthenticated, page, selectedTaskUuid, parameterUnit, selectedParameters, parameterAxisMode]);
 
   useEffect(() => {
     if (isAuthenticated && page === "llm") {
@@ -2191,6 +2258,19 @@ export function LogPlatformConsole() {
   const photoSummaryRows = safeArray(safeObject(performanceBundle.operationalMetrics).photo_summary);
   const timelineRows = safeArray(timelineBundle.rows);
   const timelineErrors = safeArray(timelineBundle.errors);
+  const timelineSideGroups = safeArray(timelineBundle.by_side);
+  const timelineErrorGroups = safeArray(timelineBundle.error_by_side);
+  const visibleTimelineGroups =
+    timelineSideFilter === "all"
+      ? timelineSideGroups
+      : timelineSideGroups.filter((group) => String(group.side_scope || "") === timelineSideFilter);
+  const visibleTimelineErrorGroupMap = new Map(
+    timelineErrorGroups.map((group) => [String(group.side_scope || ""), safeArray(group.points)]),
+  );
+  const timelineSideOptions = [
+    { label: "整机全部边", value: "all" },
+    ...safeArray<string>(timelineBundle.side_order).map((side) => ({ label: side, value: side })),
+  ];
   const timelineFamilyOptions = Array.from(
     new Set(
       timelineErrors
@@ -2419,7 +2499,7 @@ export function LogPlatformConsole() {
       <div className="mx-auto max-w-3xl space-y-6">
         <SectionTitle title="Registration" description="Fill in username, email, and password, then submit for admin review." />
         <Card>
-          <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
             <Field label="用户名">
               <Input value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} />
             </Field>
@@ -2609,12 +2689,24 @@ export function LogPlatformConsole() {
         {selectedHistoryTask ? (
   <>
     <DetailListCard
-      title="History Task Detail"
-      description="Review the selected history task before switching or deleting it."
-      value={selectedHistoryTask}
+      title="历史任务详情"
+      description="包含上传人、文件大小、任务状态等信息，可直接下载原始上传文件。"
+      value={{
+        ...selectedHistoryTask,
+        total_size_text: selectedHistoryTask.total_size_text || formatFileSize(selectedHistoryTask.total_size_bytes),
+      }}
     />
     <div className="flex flex-wrap gap-3">
-      <Button onClick={() => void handleApplyHistoryTask()}>Set As Current Task</Button>
+      <Button onClick={() => void handleApplyHistoryTask()}>设为当前任务</Button>
+      <Button variant="secondary" asChild>
+        <a
+          href={buildApiUrl(apiBase, `/tasks/${selectedHistoryTask.task_uuid}/download`, { access_token: token })}
+          target="_blank"
+          rel="noreferrer"
+        >
+          下载上传文件
+        </a>
+      </Button>
       <Button
         variant="danger"
         onClick={() => {
@@ -2626,7 +2718,7 @@ export function LogPlatformConsole() {
           }
         }}
       >
-        Delete Selected Task
+        删除任务
       </Button>
     </div>
   </>
@@ -2649,7 +2741,7 @@ export function LogPlatformConsole() {
           }
         />
         <Card>
-          <CardContent className="grid gap-4 pt-6 lg:grid-cols-2">
+          <CardContent className="grid gap-4 pt-6 lg:grid-cols-3">
             <Field label="选择日志文件">
               <Input type="file" multiple onChange={(event) => setUploadFiles(Array.from(event.target.files || []))} />
             </Field>
@@ -2792,7 +2884,16 @@ export function LogPlatformConsole() {
                 <option value="cycle">按 cycle 排序</option>
               </Select>
             </Field>
-            <div className="lg:col-span-2 flex flex-wrap gap-6">
+            <Field label="边筛选">
+              <Select value={timelineSideFilter} onChange={(event) => setTimelineSideFilter(event.target.value)}>
+                {timelineSideOptions.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <div className="lg:col-span-3 flex flex-wrap gap-6">
               <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
                 <input type="checkbox" checked={timelineShowErrors} onChange={(event) => setTimelineShowErrors(event.target.checked)} />
                 标记错误发生时间点
@@ -2804,12 +2905,12 @@ export function LogPlatformConsole() {
             </div>
             {timelineShowErrors ? (
               <>
-                <div className="lg:col-span-2">
+                <div className="lg:col-span-3">
                   <Field label="显示哪些错误家族">
                     <ChipToggleGroup options={timelineFamilyOptions} selected={activeTimelineFamilies} onToggle={(value) => setTimelineSelectedFamilies((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])} />
                   </Field>
                 </div>
-                <div className="lg:col-span-2">
+                <div className="lg:col-span-3">
                   <Field label="显示哪些严重级别">
                     <ChipToggleGroup options={timelineSeverityOptions} selected={activeTimelineSeverities} onToggle={(value) => setTimelineSelectedSeverities((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value])} />
                   </Field>
@@ -2818,26 +2919,45 @@ export function LogPlatformConsole() {
             ) : null}
           </CardContent>
         </Card>
-        <TimelineChart
-          title="按 Cycle / 全程查看各组件运动时间轴"
-          rows={timelineRows}
-          errors={filteredTimelineErrors}
-          orderMode={timelineTrackOrder === "cycle" ? "cycle" : "default"}
-          resetKey={`timeline-${selectedTaskUuid}-${timelineCycleNo || "all"}-${timelineTrackOrder}`}
-        />
+        {visibleTimelineGroups.map((group) => (
+          <TimelineChart
+            key={`timeline-${selectedTaskUuid}-${String(group.side_scope || "unassigned")}`}
+            title={`运动时间轴 · ${String(group.side_label || group.side_scope || "Unassigned")}`}
+            rows={safeArray(group.rows)}
+            description={
+              Number(group.uncertain_count || 0) > 0
+                ? `当前图包含 ${Number(group.uncertain_count || 0)} 条边归属不确定的时间轴，并已高亮显示。`
+                : "当前图仅显示该边内部时间轴。"
+            }
+            errors={safeArray(visibleTimelineErrorGroupMap.get(String(group.side_scope || ""))).filter((row) => {
+              if (!timelineShowErrors) {
+                return false;
+              }
+              const family = String(row.error_family_display || row.error_family || "");
+              const severity = String(row.severity || "unknown");
+              return activeTimelineFamilies.includes(family) && activeTimelineSeverities.includes(severity);
+            })}
+            orderMode={timelineTrackOrder === "cycle" ? "cycle" : "default"}
+            resetKey={`timeline-${selectedTaskUuid}-${timelineCycleNo || "all"}-${timelineTrackOrder}-${String(group.side_scope || "unassigned")}`}
+          />
+        ))}
         {timelineShowDetails ? (
           <DataTable
             title="时间轴表格明细"
-            rows={timelineRows.map((row) => ({
-              track: row.track,
-              cycle_no: row.cycle_no,
-              component: row.component,
-              sub_step: row.sub_step,
-              start_time_sec: row.start_time_sec,
-              end_time_sec: row.end_time_sec,
-              duration_ms: row.duration_ms,
-              message: row.message,
-            }))}
+            rows={visibleTimelineGroups.flatMap((group) =>
+              safeArray(group.rows).map((row) => ({
+                side_scope: group.side_scope,
+                track: row.track,
+                cycle_no: row.cycle_no,
+                component: row.component,
+                sub_step: row.sub_step,
+                is_uncertain_side: row.is_uncertain_side,
+                start_time_sec: row.start_time_sec,
+                end_time_sec: row.end_time_sec,
+                duration_ms: row.duration_ms,
+                message: row.message,
+              })),
+            )}
           />
         ) : null}
       </div>
@@ -2922,6 +3042,12 @@ export function LogPlatformConsole() {
                 ))}
               </Select>
             </Field>
+            <Field label="横轴模式">
+              <Select value={parameterAxisMode} onChange={(event) => setParameterAxisMode(event.target.value)}>
+                <option value="cycle">按 cycle 排列</option>
+                <option value="time">按时间排列</option>
+              </Select>
+            </Field>
           </CardContent>
         </Card>
         {selectedParameters.map((name) => {
@@ -2939,14 +3065,15 @@ export function LogPlatformConsole() {
               key={name}
               title={`${name} 趋势`}
               rows={rows}
-              xKey={name.startsWith("temperature_") ? "start_time" : "cycle"}
+              xKey="x_axis_label"
               yKey="duration_value"
+              seriesKey="series_name"
               thresholdLines={thresholds}
             />
           );
         })}
-        <SimpleLineChart key={`substep-series-${selectedTaskUuid}-${parameterUnit}`} title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="cycle" yKey="duration_value" seriesKey="sub_step" />
-        <SimpleLineChart title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="cycle" yKey="duration_value" seriesKey="metric_stage" />
+        <SimpleLineChart key={`substep-series-${selectedTaskUuid}-${parameterUnit}-${parameterAxisMode}`} title="Sub-step Cycle Mean" rows={safeArray(parameterBundle.substepSeries)} xKey="x_axis_label" yKey="duration_value" seriesKey="series_name" />
+        <SimpleLineChart title="Row Scan Metrics 各阶段趋势" rows={safeArray(parameterBundle.rowScanMetrics)} xKey="x_axis_label" yKey="duration_value" seriesKey="series_name" />
         <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
           <input type="checkbox" checked={parameterShowMetricTable} onChange={(event) => setParameterShowMetricTable(event.target.checked)} />
           显示 metrics 表格明细

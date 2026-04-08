@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -315,6 +316,8 @@ def test_announcements_public_and_admin_flow(client: TestClient):
     assert updated["title"] == "updated announcement"
     assert updated["summary"] == "updated summary"
     assert updated["is_pinned"] is False
+    assert len(updated["edit_history"]) >= 2
+    assert updated["edit_history"][-1]["editor"] == "Yanbo"
 
     delete_resp = client.delete(f"/api/v1/admin/announcements/{item['id']}")
     assert delete_resp.status_code == 200
@@ -375,20 +378,21 @@ def test_movement_timeline_error_points_api(client: TestClient):
 
         timeline_resp = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline", params={"cycle_no": 1})
         assert timeline_resp.status_code == 200
-        timeline_rows = timeline_resp.json()
-        assert timeline_rows
-        assert str(timeline_rows[0]["start"]).endswith("+08:00")
-        assert str(timeline_rows[0]["end"]).endswith("+08:00")
-        assert isinstance(timeline_rows[0]["start_time_sec"], str)
+        timeline_payload = timeline_resp.json()
+        assert timeline_payload["rows"]
+        assert timeline_payload["by_side"]
+        assert timeline_payload["rows"][0]["start"] == "2024-03-09 16:00:00"
+        assert timeline_payload["rows"][0]["end"] == "2024-03-09 16:00:05"
+        assert isinstance(timeline_payload["rows"][0]["start_time_sec"], str)
 
         error_resp = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline/errors", params={"cycle_no": 1})
         assert error_resp.status_code == 200
-        error_rows = error_resp.json()
-        assert error_rows
-        assert str(error_rows[0]["time"]).endswith("+08:00")
-        assert error_rows[0]["normalized_signature"] == "scanner_move_timeout"
-        assert error_rows[0]["error_family"] == "timeout"
-        assert error_rows[0]["track"] == "Scanner_1 | Cycle 1"
+        error_payload = error_resp.json()
+        assert error_payload["points"]
+        assert error_payload["points"][0]["time"] == "2024-03-09 16:00:02.500"
+        assert error_payload["points"][0]["normalized_signature"] == "scanner_move_timeout"
+        assert error_payload["points"][0]["error_family"] == "timeout"
+        assert error_payload["points"][0]["track"] == "Scanner_1 | Cycle 1"
     finally:
         cleanup_db = SessionLocal()
         try:
@@ -502,17 +506,21 @@ def test_scope_catalog_and_timeline_filters_api(client: TestClient):
 
         timeline_all = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline")
         assert timeline_all.status_code == 200
-        assert {row["side_scope"] for row in timeline_all.json()} == {"A1", "A2"}
+        timeline_all_payload = timeline_all.json()
+        assert {row["side_scope"] for row in timeline_all_payload["rows"]} == {"A1", "A2"}
+        assert {row["side_scope"] for row in timeline_all_payload["by_side"]} == {"A1", "A2"}
 
         timeline_a1 = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline", params={"side_scope": "A1", "track_granularity": "side_chip"})
         assert timeline_a1.status_code == 200
-        assert {row["side_scope"] for row in timeline_a1.json()} == {"A1"}
-        assert {row["chip_name"] for row in timeline_a1.json()} == {chip_a1}
+        timeline_a1_payload = timeline_a1.json()
+        assert {row["side_scope"] for row in timeline_a1_payload["rows"]} == {"A1"}
+        assert {row["chip_name"] for row in timeline_a1_payload["rows"]} == {chip_a1}
 
         timeline_chip = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline", params={"chip_name": chip_a2, "track_granularity": "side_chip"})
         assert timeline_chip.status_code == 200
-        assert {row["side_scope"] for row in timeline_chip.json()} == {"A2"}
-        assert {row["chip_name"] for row in timeline_chip.json()} == {chip_a2}
+        timeline_chip_payload = timeline_chip.json()
+        assert {row["side_scope"] for row in timeline_chip_payload["rows"]} == {"A2"}
+        assert {row["chip_name"] for row in timeline_chip_payload["rows"]} == {chip_a2}
 
         cycle_a2 = client.get(f"/api/v1/tasks/{task_uuid}/cycle-summary", params={"side_scope": "A2", "unit": "s"})
         assert cycle_a2.status_code == 200
@@ -528,4 +536,67 @@ def test_scope_catalog_and_timeline_filters_api(client: TestClient):
                 cleanup_db.commit()
         finally:
             cleanup_db.close()
+        db.close()
+
+
+def test_task_history_metadata_and_download_api(client: TestClient):
+    seed = uuid4().hex[:8]
+    task_uuid = f"history_api_{seed}"
+    sample_dir = Path("data") / "pytest_task_downloads" / task_uuid
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    sample_file = sample_dir / "segment_a.log"
+    sample_bytes = b"line-1\nline-2\n"
+    sample_file.write_bytes(sample_bytes)
+    db = SessionLocal()
+    try:
+        task = UploadTaskModel(
+            task_uuid=task_uuid,
+            filename="segment_a.log",
+            stored_path=str(sample_dir),
+            status="done",
+            uploaded_by="pytest_uploader",
+            total_size_bytes=len(sample_bytes),
+            file_count=1,
+        )
+        db.add(task)
+        db.commit()
+
+        tasks_resp = client.get("/api/v1/tasks", params={"page": 1, "page_size": 200})
+        assert tasks_resp.status_code == 200
+        tasks_payload = tasks_resp.json()
+        row = next(item for item in tasks_payload["items"] if item["task_uuid"] == task_uuid)
+        assert row["uploaded_by"] == "pytest_uploader"
+        assert row["total_size_bytes"] == len(sample_bytes)
+        assert row["total_size_text"]
+
+        status_resp = client.get(f"/api/v1/tasks/{task_uuid}/status")
+        assert status_resp.status_code == 200
+        status_payload = status_resp.json()
+        assert status_payload["uploaded_by"] == "pytest_uploader"
+        assert status_payload["total_size_bytes"] == len(sample_bytes)
+        assert status_payload["total_size_text"]
+
+        download_resp = client.get(f"/api/v1/tasks/{task_uuid}/download")
+        assert download_resp.status_code == 200
+        assert "zip" in str(download_resp.headers.get("content-type") or "").lower()
+        content_disposition = str(download_resp.headers.get("content-disposition") or "")
+        assert "attachment" in content_disposition.lower()
+        assert f'{task_uuid}.zip' in content_disposition
+        assert len(download_resp.content) > 0
+    finally:
+        cleanup_db = SessionLocal()
+        try:
+            task = cleanup_db.query(UploadTaskModel).filter(UploadTaskModel.task_uuid == task_uuid).one_or_none()
+            if task is not None:
+                cleanup_db.delete(task)
+                cleanup_db.commit()
+        finally:
+            cleanup_db.close()
+        if sample_file.exists():
+            sample_file.unlink()
+        if sample_dir.exists():
+            sample_dir.rmdir()
+        parent_dir = sample_dir.parent
+        if parent_dir.exists() and not any(parent_dir.iterdir()):
+            parent_dir.rmdir()
         db.close()

@@ -112,18 +112,19 @@ def test_query_and_export_scope_filters_keep_a1_a2_separate(tmp_path: Path):
         assert {row["chip_name"] for row in catalog["chips"] if row["chip_name"]} == {chip_a1, chip_a2}
 
         timeline_all = query.get_movement_timeline(task.id, track_granularity="side_chip")
-        assert {row["side_scope"] for row in timeline_all} == {"A1", "A2"}
-        assert {row["chip_name"] for row in timeline_all} == {chip_a1, chip_a2}
+        assert {row["side_scope"] for row in timeline_all["rows"]} == {"A1", "A2"}
+        assert {row["chip_name"] for row in timeline_all["rows"]} == {chip_a1, chip_a2}
+        assert {row["side_scope"] for row in timeline_all["by_side"]} == {"A1", "A2"}
 
         timeline_a1 = query.get_movement_timeline(task.id, track_granularity="side_chip", side_scopes=["A1"])
-        assert timeline_a1
-        assert {row["side_scope"] for row in timeline_a1} == {"A1"}
-        assert {row["chip_name"] for row in timeline_a1} == {chip_a1}
+        assert timeline_a1["rows"]
+        assert {row["side_scope"] for row in timeline_a1["rows"]} == {"A1"}
+        assert {row["chip_name"] for row in timeline_a1["rows"]} == {chip_a1}
 
         timeline_chip = query.get_movement_timeline(task.id, track_granularity="side_chip", chip_names=[chip_a2])
-        assert timeline_chip
-        assert {row["chip_name"] for row in timeline_chip} == {chip_a2}
-        assert {row["side_scope"] for row in timeline_chip} == {"A2"}
+        assert timeline_chip["rows"]
+        assert {row["chip_name"] for row in timeline_chip["rows"]} == {chip_a2}
+        assert {row["side_scope"] for row in timeline_chip["rows"]} == {"A2"}
 
         cycle_all = query.get_cycle_summaries(task.id, unit="s")
         assert {row["side_scope"] for row in cycle_all} == {"A1", "A2"}
