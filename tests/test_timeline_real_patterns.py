@@ -116,7 +116,7 @@ def test_pairing_collapses_running_heartbeat_status_into_single_interval():
     paired = pair_start_end(events)
 
     assert len(paired) == 1
-    assert paired[0].sub_step == "runsprayaction"
+    assert "cpasreagentprime" in paired[0].sub_step.lower()
     assert paired[0].side_scope == "B1"
     assert paired[0].start_epoch_ms == events[0].epoch_ms
     assert paired[0].end_epoch_ms == events[-1].epoch_ms
@@ -146,6 +146,50 @@ def test_pairing_uses_last_heartbeat_when_terminal_status_is_missing():
     assert paired[0].start_epoch_ms == running_first.epoch_ms
     assert paired[0].end_epoch_ms == running_last.epoch_ms
     assert paired[0].duration_ms == float(running_last.epoch_ms - running_first.epoch_ms)
+
+
+def test_pairing_keeps_distinct_spray_scripts_separate():
+    events = [
+        normalize_record(
+            _raw_record(
+                time_text="2026-03-26 11:05:32.7952",
+                message=r"Spray-A2 Fluidic\T100_Fill_IR.py status:Running, errorCode:, updateTime:2026/3/26 11:05:32 +00:00.",
+                component="SprayClient",
+                method_name="RunSprayAction",
+            )
+        ),
+        normalize_record(
+            _raw_record(
+                time_text="2026-03-26 11:05:33.1792",
+                message=r"Spray-A1 Fluidic\T100_Seq2_CpasReagentPrime.py status:Running, errorCode:, updateTime:2026/3/26 11:05:33 +00:00.",
+                component="SprayClient",
+                method_name="RunSprayAction",
+            )
+        ),
+        normalize_record(
+            _raw_record(
+                time_text="2026-03-26 11:05:40.7978",
+                message=r"Spray-A2 Fluidic\T100_Fill_IR.py status:Stopped, errorCode:, updateTime:2026/3/26 11:05:40 +00:00.",
+                component="SprayClient",
+                method_name="RunSprayAction",
+            )
+        ),
+        normalize_record(
+            _raw_record(
+                time_text="2026-03-26 11:05:44.1878",
+                message=r"Spray-A1 Fluidic\T100_Seq2_CpasReagentPrime.py status:Stopped, errorCode:, updateTime:2026/3/26 11:05:44 +00:00.",
+                component="SprayClient",
+                method_name="RunSprayAction",
+            )
+        ),
+    ]
+
+    paired = pair_start_end(events)
+
+    assert len(paired) == 2
+    assert {item.side_scope for item in paired} == {"A1", "A2"}
+    assert any("fill_ir.py" in item.sub_step.lower() for item in paired)
+    assert any("cpasreagentprime.py" in item.sub_step.lower() for item in paired)
 
 
 def test_movement_timeline_includes_spray_tracks_and_inferred_bounds(tmp_path: Path):

@@ -55,6 +55,7 @@ EXPLICIT_SUBSTEP_REGEXES = [
 ]
 IMAGING_COMPLETED_RE = re.compile(r"Imaging Completed for", re.IGNORECASE)
 IMAGING_START_RE = re.compile(r"Imaging start", re.IGNORECASE)
+STATUS_PREFIX_RE = re.compile(r"(.+?)\s+status\s*:\s*[A-Za-z]+\b", re.IGNORECASE)
 
 
 def infer_sub_step(record: RawLogRecord) -> str | None:
@@ -69,6 +70,10 @@ def infer_sub_step(record: RawLogRecord) -> str | None:
             if IMAGING_START_RE.search(msg):
                 return "Imaging"
             return re.sub(r"\s+", " ", found).strip(" <>._-")
+
+    status_match = STATUS_PREFIX_RE.search(msg)
+    if status_match:
+        return re.sub(r"\s+", " ", str(status_match.group(1) or "")).strip(" <>._-")
 
     op = extract_operation_name(msg, method_name=method_name)
     if op:

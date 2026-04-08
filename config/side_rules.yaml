@@ -30,7 +30,6 @@ context_side_patterns:
   - "\\b(A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,80}?\\bcpas\\s+reagent\\s+priming\\b"
   - "\\bcpas\\s+reagent\\s+priming\\b[^\\n]{0,80}?\\b(A\\d{0,2}|B\\d{0,2})\\b"
   - "\\bSpray[-_/ ](A\\d{0,2}|B\\d{0,2})\\b[^\\n]{0,160}?\\b(?:Fluidic|status|[A-Za-z0-9_]+\\.py)\\b"
-  - "(?<!\\S)(A\\d{1,2}|B\\d{1,2})(?!\\S)"
 
 chip_patterns:
   - "\\b(?:SlideUniqueNo|slide\\s*unique\\s*no|slide[_\\s-]?[NF]?|chip[_\\s-]?name|slide\\s*name|flowcell\\s*id)\\s*[:=, ]+(\\d{2}\\.M\\d_[A-Z]{2}_(?:HLAA|HLAB)[A-Za-z0-9]+)\\b"

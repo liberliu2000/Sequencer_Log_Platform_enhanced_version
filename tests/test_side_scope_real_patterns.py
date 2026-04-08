@@ -128,6 +128,21 @@ def test_side_inference_matches_standalone_side_tokens_in_message():
     assert token_overrides_coarse_filename.side_evidence.get("from_context") == "B2"
     assert token_overrides_coarse_filename.side_evidence.get("selected_side_source") == "from_context"
 
+    token_from_raw_text = infer_scope_from_texts(
+        source_file="ISW.ZebraMammoth.Service-All_20260326_00.log",
+        message="status update",
+        raw_text="operator note b1 finished",
+    )
+    assert token_from_raw_text.side_scope == "B1"
+    assert token_from_raw_text.side_evidence.get("from_context") == "B1"
+
+    bare_side_should_not_match = infer_scope_from_texts(
+        source_file="ISW.ZebraMammoth.Service-All_20260326_00.log",
+        message="device action A completed successfully",
+        raw_text="",
+    )
+    assert bare_side_should_not_match.side_scope is None
+
 
 def test_combined_service_all_log_is_split_by_event_side(tmp_path: Path):
     path = tmp_path / "Service-All-A1A2-subset.log"

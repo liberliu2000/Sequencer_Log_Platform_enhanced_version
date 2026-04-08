@@ -35,7 +35,6 @@ _DEFAULT_CONTEXT_PATTERNS = [
     r"\b(A\d{0,2}|B\d{0,2})\b[^\n]{0,80}?\bcpas\s+reagent\s+priming\b",
     r"\bcpas\s+reagent\s+priming\b[^\n]{0,80}?\b(A\d{0,2}|B\d{0,2})\b",
     r"\bSpray[-_/ ](A\d{0,2}|B\d{0,2})\b[^\n]{0,160}?\b(?:Fluidic|status|[A-Za-z0-9_]+\.py)\b",
-    r"(?<!\S)(A\d{1,2}|B\d{1,2})(?!\S)",
 ]
 _DEFAULT_CHIP_PATTERNS = [
     r"\b(?:SlideUniqueNo|slide\s*unique\s*no|slide[_\s-]?[NF]?|chip[_\s-]?name|slide\s*name|flowcell\s*id)\s*[:=, ]+(\d{2}\.M\d_[A-Z]{2}_(?:HLAA|HLAB)[A-Za-z0-9]+)\b",
@@ -99,6 +98,28 @@ def _compiled_patterns_cached(path_key: tuple[str, ...], default_patterns: tuple
 
 def _compiled_patterns(*path: str, default: list[str]) -> list[re.Pattern[str]]:
     return list(_compiled_patterns_cached(tuple(path), tuple(default)))
+
+
+@lru_cache(maxsize=1)
+def _message_side_tokens() -> tuple[str, ...]:
+    configured = _rule_list("side_tokens", default=["A1", "A2", "B1", "B2"])
+    normalized = []
+    for item in configured:
+        side = normalize_side_scope(item)
+        # Standalone token fallback is intentionally limited to specific sub-sides.
+        # Bare "A"/"B" separated by spaces is too noisy in free-form messages.
+        if side and side_specificity(side) > 1:
+            normalized.append(side)
+    return tuple(dict.fromkeys(normalized))
+
+
+@lru_cache(maxsize=1)
+def _standalone_message_side_token_re() -> re.Pattern[str] | None:
+    tokens = _message_side_tokens()
+    if not tokens:
+        return None
+    token_pattern = "|".join(re.escape(token) for token in sorted(tokens, key=len, reverse=True))
+    return re.compile(rf"(?<!\S)({token_pattern})(?!\S)", re.IGNORECASE)
 
 
 def normalize_side_scope(value: str | None) -> str | None:
@@ -237,6 +258,12 @@ def extract_context_side(*texts: Any) -> str | None:
     for pattern in _compiled_patterns("context_side_patterns", default=_DEFAULT_CONTEXT_PATTERNS):
         for raw in texts:
             match = pattern.search(str(raw or ""))
+            if match:
+                return normalize_side_scope(match.group(1))
+    standalone_pattern = _standalone_message_side_token_re()
+    if standalone_pattern:
+        for raw in texts:
+            match = standalone_pattern.search(str(raw or ""))
             if match:
                 return normalize_side_scope(match.group(1))
     return None
