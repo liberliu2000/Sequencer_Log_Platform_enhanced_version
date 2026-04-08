@@ -4637,7 +4637,13 @@ elif page == "事件流时间轴":
                 for item in side_groups:
                     base_label = str(item.get("side_label") or item.get("side_scope") or "Unassigned")
                     uncertain_count = int(item.get("uncertain_count") or 0)
-                    side_label = f"{base_label}（含 {uncertain_count} 条不确定时间轴）" if uncertain_count > 0 else base_label
+                    shared_count = int(item.get("shared_count") or 0)
+                    label_parts: list[str] = []
+                    if uncertain_count > 0:
+                        label_parts.append(f"{uncertain_count} 条不确定时间轴")
+                    if shared_count > 0:
+                        label_parts.append(f"{shared_count} 条父边/分支边共享动作")
+                    side_label = f"{base_label}（{'，'.join(label_parts)}）" if label_parts else base_label
                     side_labels.append(side_label)
                     side_map[side_label] = str(item.get("side_scope") or "")
                 picked_side = st.selectbox("查看哪一边", side_labels, key="timeline_side_pick")
@@ -4721,8 +4727,13 @@ elif page == "事件流时间轴":
                 timeline_render_key = f"timeline_{hashlib.sha1(timeline_key_seed.encode('utf-8')).hexdigest()[:12]}"
                 render_fig(fig, key=timeline_render_key, height=min(max(500, 24 * len(df['track'].unique()) + 180), 2200), title=chart_title, title_outside=True)
                 uncertain_count = int(group.get("uncertain_count") or 0)
+                shared_count = int(group.get("shared_count") or 0)
+                shared_sides = [str(item) for item in (group.get("shared_side_scopes") or []) if str(item or "").strip()]
                 if uncertain_count > 0:
                     st.caption(f"当前图包含 {uncertain_count} 条边归属不确定的时间轴，已复制到该边视图中供对比。")
+                if shared_count > 0:
+                    shared_text = " / ".join(shared_sides) if shared_sides else "父边/分支边"
+                    st.caption(f"当前图额外合并 {shared_count} 条来自 {shared_text} 的共享动作。")
                 if show_error_points:
                     if ok_errors and not error_df.empty:
                         st.caption(f"当前图已标记 {len(error_df)} 个错误时间点，可按错误家族和严重级别自由筛选。")
@@ -4732,7 +4743,7 @@ elif page == "事件流时间轴":
                         st.caption("错误时间点加载失败，当前仅展示甘特图。")
                 if st.checkbox(f"显示时间轴表格明细 · {group.get('side_label') or group.get('side_scope') or 'Unassigned'}", value=False, key=f"timeline_table_{index}"):
                     safe_dataframe(
-                        df[[c for c in ["side_scope", "track", "cycle_no", "component", "sub_step", "is_uncertain_side", "start_time_sec", "end_time_sec", "duration_ms", "message"] if c in df.columns]],
+                        df[[c for c in ["render_side_scope", "side_scope", "original_side_scope", "is_shared_side_family", "track", "cycle_no", "component", "sub_step", "is_uncertain_side", "start_time_sec", "end_time_sec", "duration_ms", "message"] if c in df.columns]],
                         use_container_width=True,
                         height=300,
                     )

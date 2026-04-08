@@ -667,26 +667,30 @@
     const groupedRows = new Map();
     safeArray(rows).forEach((item) => {
       const renderSide = firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned");
+      const actualSide = firstNonEmpty(item?.side_scope, item?.original_side_scope, renderSide, "Unassigned");
       const componentName = firstNonEmpty(item?.component, item?.sub_step, "Movement");
       const uncertain = Boolean(item?.is_uncertain_side);
-      const groupKey = `${uncertain ? "uncertain" : "known"}|${renderSide}|${componentName}`;
+      const shared = Boolean(item?.is_shared_side_family);
+      const groupKey = `${uncertain ? "uncertain" : "known"}|${actualSide}|${componentName}`;
       if (!groupedRows.has(groupKey)) {
         groupedRows.set(groupKey, {
           sideScope: renderSide,
+          actualSide,
           componentName,
           uncertain,
+          shared,
           rows: [],
         });
       }
       groupedRows.get(groupKey).rows.push(item);
     });
     groupedRows.forEach((group) => {
-      const color = pickTimelineColor(group.sideScope, group.componentName);
+      const color = pickTimelineColor(group.actualSide, group.componentName);
       traces.push({
         type: "bar",
         orientation: "h",
-        name: group.uncertain ? `[?] ${group.sideScope} · ${group.componentName}` : `${group.sideScope} · ${group.componentName}`,
-        legendgroup: `${group.sideScope}|${group.componentName}`,
+        name: group.uncertain ? `[?] ${group.actualSide} · ${group.componentName}` : `${group.actualSide} · ${group.componentName}`,
+        legendgroup: `${group.actualSide}|${group.componentName}`,
         x: group.rows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
         base: group.rows.map((item) => item.start),
         y: group.rows.map((item) => item.track || item.sub_step || "-"),
@@ -698,7 +702,8 @@
           firstNonEmpty(item?.end_time_sec, item?.end, "-"),
           Number(item?.duration_ms || 0),
           firstNonEmpty(item?.message, "-"),
-          group.uncertain ? firstNonEmpty(item?.original_side_scope, item?.side_scope, "Unknown") : "-",
+          firstNonEmpty(item?.side_scope, item?.original_side_scope, "Unknown"),
+          Boolean(item?.is_shared_side_family),
         ]),
         marker: {
           color,
@@ -713,6 +718,7 @@
           "结束: %{customdata[4]}<br>" +
           "时长(ms): %{customdata[5]}<br>" +
           "原始边位: %{customdata[7]}<br>" +
+          "父/分支共享: %{customdata[8]}<br>" +
           "说明: %{customdata[6]}<extra></extra>",
       });
     });
@@ -1097,7 +1103,15 @@
                     <div class="chart-card">
                       <h4>Timeline · ${escapeHtml(firstNonEmpty(group.side_label, group.side_scope, "Unassigned"))}</h4>
                       <p class="small-note">
-                        ${Number(group.uncertain_count || 0) > 0 ? `Includes ${Number(group.uncertain_count || 0)} uncertain-side rows highlighted below.` : "Only rows assigned to this side are shown."}
+                        ${
+                          Number(group.shared_count || 0) > 0 && Number(group.uncertain_count || 0) > 0
+                            ? `Includes ${Number(group.uncertain_count || 0)} uncertain-side rows and ${Number(group.shared_count || 0)} shared parent/branch-side rows.`
+                            : Number(group.uncertain_count || 0) > 0
+                              ? `Includes ${Number(group.uncertain_count || 0)} uncertain-side rows highlighted below.`
+                              : Number(group.shared_count || 0) > 0
+                                ? `Includes ${Number(group.shared_count || 0)} shared parent/branch-side rows.`
+                                : "Only rows assigned to this side are shown."
+                        }
                       </p>
                       <div class="chart-box" id="timelineChart_${index}"></div>
                     </div>

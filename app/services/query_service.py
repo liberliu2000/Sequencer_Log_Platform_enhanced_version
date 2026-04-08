@@ -24,7 +24,14 @@ from app.services.perf_cache import TTLCache
 from app.services.performance_service import PerformanceService
 from app.services.streaming_aggregation import StreamingAggregationCoordinator
 from app.utils.error_family import get_error_family_metadata
-from app.utils.side_inference import UNASSIGNED_SCOPE_TOKEN, infer_side_group, repair_scope_inference
+from app.utils.side_inference import (
+    UNASSIGNED_SCOPE_TOKEN,
+    expand_parent_branch_side_family,
+    infer_side_group,
+    normalize_side_scope,
+    repair_scope_inference,
+    side_scopes_share_parent_branch_scope,
+)
 from app.utils.timeparse import format_seconds, parse_datetime, to_epoch_ms
 
 _SETTINGS = get_settings()
@@ -325,6 +332,63 @@ class QueryService:
             return UNASSIGNED_SCOPE_TOKEN in values
         return normalized_actual in values
 
+    @staticmethod
+    def _timeline_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            item.get("start_epoch_ms")
+            if item.get("start_epoch_ms") is not None
+            else item.get("epoch_ms")
+            if item.get("epoch_ms") is not None
+            else float("inf"),
+            item.get("cycle_no") if item.get("cycle_no") is not None else -1,
+            item.get("track") or "",
+        )
+
+    def _load_distinct_side_scopes(self, model: Any, task_id: int) -> list[str]:
+        rows = self.db.execute(
+            select(model.side_scope)
+            .where(
+                model.task_id == task_id,
+                model.side_scope.is_not(None),
+            )
+            .distinct()
+            .order_by(model.side_scope.asc())
+        )
+        return [
+            str(value)
+            for value in (row[0] for row in rows)
+            if str(value or "").strip()
+        ]
+
+    def _expand_timeline_side_scope_filters(self, model: Any, task_id: int, values: list[str]) -> list[str]:
+        if not values:
+            return []
+        requested = [normalize_side_scope(value) or str(value) for value in values if value != UNASSIGNED_SCOPE_TOKEN]
+        include_unassigned = UNASSIGNED_SCOPE_TOKEN in values
+        if not requested:
+            return [UNASSIGNED_SCOPE_TOKEN] if include_unassigned else []
+        known_side_scopes = self._load_distinct_side_scopes(model, task_id)
+        expanded: list[str] = []
+        for value in requested:
+            expanded.extend(expand_parent_branch_side_family(value, known_side_scopes))
+        if include_unassigned:
+            expanded.append(UNASSIGNED_SCOPE_TOKEN)
+        return list(dict.fromkeys(expanded))
+
+    @classmethod
+    def _value_matches_timeline_side_filter(cls, actual: Any, values: list[str]) -> bool:
+        if not values:
+            return True
+        normalized_actual = normalize_side_scope(actual)
+        if normalized_actual is None:
+            return UNASSIGNED_SCOPE_TOKEN in values
+        for value in values:
+            if value == UNASSIGNED_SCOPE_TOKEN:
+                continue
+            if side_scopes_share_parent_branch_scope(normalized_actual, value):
+                return True
+        return False
+
     @classmethod
     def _row_matches_scope_filters(
         cls,
@@ -336,6 +400,21 @@ class QueryService:
     ) -> bool:
         return (
             cls._value_matches_filter(row.get("side_scope"), side_scopes or [])
+            and cls._value_matches_filter(row.get("side_group"), side_groups or [])
+            and cls._value_matches_filter(row.get("chip_name"), chip_names or [])
+        )
+
+    @classmethod
+    def _row_matches_timeline_scope_filters(
+        cls,
+        row: dict[str, Any],
+        *,
+        side_scopes: list[str] | None = None,
+        side_groups: list[str] | None = None,
+        chip_names: list[str] | None = None,
+    ) -> bool:
+        return (
+            cls._value_matches_timeline_side_filter(row.get("side_scope"), side_scopes or [])
             and cls._value_matches_filter(row.get("side_group"), side_groups or [])
             and cls._value_matches_filter(row.get("chip_name"), chip_names or [])
         )
@@ -428,18 +507,25 @@ class QueryService:
         rows: list[dict[str, Any]],
         *,
         row_key: str,
+        render_side_scopes: list[str] | None = None,
     ) -> dict[str, Any]:
         normalized_rows = [dict(row) for row in rows]
         known_side_order = list(
             dict.fromkeys(
-                str(row.get("side_scope"))
+                normalize_side_scope(row.get("side_scope")) or str(row.get("side_scope"))
                 for row in normalized_rows
                 if row.get("side_scope") not in (None, "")
             )
         )
         uncertain_rows = [row for row in normalized_rows if self._is_uncertain_side(row.get("side_scope"), row.get("side_confidence"))]
+        requested_render_sides = [
+            normalize_side_scope(value) or str(value)
+            for value in (render_side_scopes or [])
+            if value not in (None, "", UNASSIGNED_SCOPE_TOKEN)
+        ]
+        render_side_order = list(dict.fromkeys(requested_render_sides or known_side_order))
 
-        if not known_side_order:
+        if not render_side_order:
             side_groups = [
                 {
                     "side_scope": None,
@@ -450,36 +536,48 @@ class QueryService:
             ]
         else:
             side_groups = []
-            for side_scope in known_side_order:
-                side_rows = [
-                    row
-                    for row in normalized_rows
-                    if row.get("side_scope") == side_scope and not self._is_uncertain_side(row.get("side_scope"), row.get("side_confidence"))
-                ]
+            for side_scope in render_side_order:
+                group_rows: list[dict[str, Any]] = []
+                shared_side_scopes: list[str] = []
+                shared_count = 0
+                for row in normalized_rows:
+                    actual_side_scope = normalize_side_scope(row.get("side_scope"))
+                    if self._is_uncertain_side(row.get("side_scope"), row.get("side_confidence")):
+                        continue
+                    if not side_scopes_share_parent_branch_scope(actual_side_scope, side_scope):
+                        continue
+                    copy_row = dict(row)
+                    copy_row["render_side_scope"] = side_scope
+                    copy_row["original_side_scope"] = actual_side_scope
+                    is_shared = bool(actual_side_scope and actual_side_scope != side_scope)
+                    copy_row["is_shared_side_family"] = is_shared
+                    if is_shared:
+                        shared_count += 1
+                        shared_side_scopes.append(actual_side_scope)
+                    group_rows.append(copy_row)
                 replicated_uncertain = []
                 for row in uncertain_rows:
                     copy_row = dict(row)
                     copy_row["is_uncertain_side"] = True
                     copy_row["original_side_scope"] = row.get("side_scope")
                     copy_row["render_side_scope"] = side_scope
+                    copy_row["is_shared_side_family"] = False
                     replicated_uncertain.append(copy_row)
                 side_groups.append(
                     {
                         "side_scope": side_scope,
                         "side_label": self._scope_display(side_scope),
                         row_key: sorted(
-                            side_rows + replicated_uncertain,
-                            key=lambda item: (
-                                item.get("start_epoch_ms") if item.get("start_epoch_ms") is not None else item.get("epoch_ms") if item.get("epoch_ms") is not None else float("inf"),
-                                item.get("cycle_no") if item.get("cycle_no") is not None else -1,
-                                item.get("track") or "",
-                            ),
+                            group_rows + replicated_uncertain,
+                            key=self._timeline_sort_key,
                         ),
                         "uncertain_count": len(replicated_uncertain),
+                        "shared_count": shared_count,
+                        "shared_side_scopes": list(dict.fromkeys(shared_side_scopes)),
                     }
                 )
         return {
-            "side_order": known_side_order,
+            "side_order": render_side_order,
             "by_side": side_groups,
             "unassigned_side_rows": uncertain_rows,
             row_key: normalized_rows,
@@ -1755,6 +1853,7 @@ class QueryService:
         chip_names: str | list[str] | None = None,
     ) -> dict[str, Any]:
         side_scope_values = self._normalize_filter_values(side_scopes)
+        timeline_side_scope_values = self._expand_timeline_side_scope_filters(StepSummaryModel, task_id, side_scope_values)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
         granularity = self._timeline_granularity(track_granularity)
@@ -1785,7 +1884,7 @@ class QueryService:
         )
         if cycle_no is not None:
             stmt = stmt.where(StepSummaryModel.cycle_no == cycle_no)
-        stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), StepSummaryModel.side_scope, side_scope_values)
+        stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), StepSummaryModel.side_scope, timeline_side_scope_values)
         stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), StepSummaryModel.side_group, side_group_values)
         stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), StepSummaryModel.chip_name, chip_value_list)
         stmt = stmt.order_by(StepSummaryModel.cycle_no.asc(), StepSummaryModel.start_epoch_ms.asc(), StepSummaryModel.sub_step.asc())
@@ -1827,7 +1926,7 @@ class QueryService:
             item["track_granularity"] = granularity
             item["is_uncertain_side"] = self._is_uncertain_side(item.get("side_scope"), item.get("side_confidence"))
             item["side_evidence"] = self._llm_extra(item.get("side_evidence")) or {}
-            if not self._row_matches_scope_filters(
+            if not self._row_matches_timeline_scope_filters(
                 item,
                 side_scopes=side_scope_values,
                 side_groups=side_group_values,
@@ -1853,7 +1952,7 @@ class QueryService:
                     item.get("track") or "",
                 )
             )
-        return self._group_timeline_records_by_side(output, row_key="rows")
+        return self._group_timeline_records_by_side(output, row_key="rows", render_side_scopes=side_scope_values)
 
     def get_timeline_error_points(
         self,
@@ -1865,6 +1964,7 @@ class QueryService:
         chip_names: str | list[str] | None = None,
     ) -> dict[str, Any]:
         side_scope_values = self._normalize_filter_values(side_scopes)
+        timeline_side_scope_values = self._expand_timeline_side_scope_filters(NormalizedEventModel, task_id, side_scope_values)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
         granularity = self._timeline_granularity(track_granularity)
@@ -1905,7 +2005,7 @@ class QueryService:
         )
         if cycle_no is not None:
             stmt = stmt.where(NormalizedEventModel.cycle_no == cycle_no)
-        stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), NormalizedEventModel.side_scope, side_scope_values)
+        stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), NormalizedEventModel.side_scope, timeline_side_scope_values)
         stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), NormalizedEventModel.side_group, side_group_values)
         stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), NormalizedEventModel.chip_name, chip_value_list)
         points: list[dict[str, Any]] = []
@@ -1960,7 +2060,7 @@ class QueryService:
             item["is_uncertain_side"] = self._is_uncertain_side(item["side_scope"], item["side_confidence"])
             if not self._is_timeline_error_relevant(item):
                 continue
-            if not self._row_matches_scope_filters(
+            if not self._row_matches_timeline_scope_filters(
                 item,
                 side_scopes=side_scope_values,
                 side_groups=side_group_values,
@@ -1968,7 +2068,7 @@ class QueryService:
             ):
                 continue
             points.append(item)
-        return self._group_timeline_records_by_side(points, row_key="points")
+        return self._group_timeline_records_by_side(points, row_key="points", render_side_scopes=side_scope_values)
 
     def get_operational_metrics(
         self,

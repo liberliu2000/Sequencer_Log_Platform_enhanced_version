@@ -600,3 +600,181 @@ def test_task_history_metadata_and_download_api(client: TestClient):
         if parent_dir.exists() and not any(parent_dir.iterdir()):
             parent_dir.rmdir()
         db.close()
+
+
+def test_timeline_parent_branch_side_groups_share_parent_actions(client: TestClient):
+    seed = uuid4().hex[:8]
+    task_uuid = f"timeline_branch_share_{seed}"
+    db = SessionLocal()
+    try:
+        task = UploadTaskModel(
+            task_uuid=task_uuid,
+            filename="branch-share.log",
+            stored_path="data",
+            status="completed",
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        db.add_all(
+            [
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=21,
+                    sub_step="Move slide from imager to chuck stage",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B",
+                    side_group="B",
+                    start_epoch_ms=1710001000000,
+                    end_epoch_ms=1710001005000,
+                    duration_ms=5000.0,
+                    start_time_text="2024-03-09 16:16:40",
+                    end_time_text="2024-03-09 16:16:45",
+                    side_confidence=0.99,
+                ),
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=21,
+                    sub_step="Move slide from imager to chuck stage",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B1",
+                    side_group="B",
+                    start_epoch_ms=1710001010000,
+                    end_epoch_ms=1710001014000,
+                    duration_ms=4000.0,
+                    start_time_text="2024-03-09 16:16:50",
+                    end_time_text="2024-03-09 16:16:54",
+                    side_confidence=0.99,
+                ),
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=21,
+                    sub_step="Move slide from imager to chuck stage",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                    start_epoch_ms=1710001020000,
+                    end_epoch_ms=1710001023000,
+                    duration_ms=3000.0,
+                    start_time_text="2024-03-09 16:17:00",
+                    end_time_text="2024-03-09 16:17:03",
+                    side_confidence=0.99,
+                ),
+            ]
+        )
+        db.add_all(
+            [
+                NormalizedEventModel(
+                    task_id=task.id,
+                    source_file=f"{task_uuid}.log",
+                    parser_name="service_log",
+                    level="ERROR",
+                    message="Move slide from imager to chuck stage failed on B",
+                    raw_text="Move slide from imager to chuck stage failed on B",
+                    cycle_no=21,
+                    component="Workflow",
+                    module="Workflow",
+                    sub_step="Move slide from imager to chuck stage",
+                    epoch_ms=1710001002500,
+                    formatted_ms="2024-03-09 16:16:42.500",
+                    original_time_text="2024-03-09 16:16:42.500",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B",
+                    side_group="B",
+                    normalized_signature="sig-branch-b",
+                    error_family="motion_axis_error",
+                    severity="error",
+                    side_confidence=0.99,
+                ),
+                NormalizedEventModel(
+                    task_id=task.id,
+                    source_file=f"{task_uuid}.log",
+                    parser_name="service_log",
+                    level="ERROR",
+                    message="Move slide from imager to chuck stage failed on B1",
+                    raw_text="Move slide from imager to chuck stage failed on B1",
+                    cycle_no=21,
+                    component="Workflow",
+                    module="Workflow",
+                    sub_step="Move slide from imager to chuck stage",
+                    epoch_ms=1710001011500,
+                    formatted_ms="2024-03-09 16:16:51.500",
+                    original_time_text="2024-03-09 16:16:51.500",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B1",
+                    side_group="B",
+                    normalized_signature="sig-branch-b1",
+                    error_family="motion_axis_error",
+                    severity="error",
+                    side_confidence=0.99,
+                ),
+                NormalizedEventModel(
+                    task_id=task.id,
+                    source_file=f"{task_uuid}.log",
+                    parser_name="service_log",
+                    level="ERROR",
+                    message="Move slide from imager to chuck stage failed on B2",
+                    raw_text="Move slide from imager to chuck stage failed on B2",
+                    cycle_no=21,
+                    component="Workflow",
+                    module="Workflow",
+                    sub_step="Move slide from imager to chuck stage",
+                    epoch_ms=1710001021500,
+                    formatted_ms="2024-03-09 16:17:01.500",
+                    original_time_text="2024-03-09 16:17:01.500",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                    normalized_signature="sig-branch-b2",
+                    error_family="motion_axis_error",
+                    severity="error",
+                    side_confidence=0.99,
+                ),
+            ]
+        )
+        db.commit()
+
+        timeline_all = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline")
+        assert timeline_all.status_code == 200
+        timeline_all_payload = timeline_all.json()
+        by_side = {str(row["side_scope"]): row for row in timeline_all_payload["by_side"]}
+
+        assert set(timeline_all_payload["side_order"]) == {"B", "B1", "B2"}
+        assert {row["side_scope"] for row in by_side["B"]["rows"]} == {"B", "B1", "B2"}
+        assert by_side["B"]["shared_count"] == 2
+        assert {row["side_scope"] for row in by_side["B1"]["rows"]} == {"B", "B1"}
+        assert by_side["B1"]["shared_count"] == 1
+        assert by_side["B1"]["shared_side_scopes"] == ["B"]
+        assert {row["side_scope"] for row in by_side["B2"]["rows"]} == {"B", "B2"}
+
+        timeline_b1 = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline", params={"side_scope": "B1"})
+        assert timeline_b1.status_code == 200
+        timeline_b1_payload = timeline_b1.json()
+        assert timeline_b1_payload["side_order"] == ["B1"]
+        assert len(timeline_b1_payload["by_side"]) == 1
+        assert {row["side_scope"] for row in timeline_b1_payload["rows"]} == {"B", "B1"}
+        assert {row["side_scope"] for row in timeline_b1_payload["by_side"][0]["rows"]} == {"B", "B1"}
+
+        error_b1 = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline/errors", params={"side_scope": "B1"})
+        assert error_b1.status_code == 200
+        error_b1_payload = error_b1.json()
+        assert error_b1_payload["side_order"] == ["B1"]
+        assert len(error_b1_payload["by_side"]) == 1
+        assert {row["side_scope"] for row in error_b1_payload["points"]} == {"B", "B1"}
+        assert {row["side_scope"] for row in error_b1_payload["by_side"][0]["points"]} == {"B", "B1"}
+    finally:
+        cleanup_db = SessionLocal()
+        try:
+            task = cleanup_db.query(UploadTaskModel).filter(UploadTaskModel.task_uuid == task_uuid).one_or_none()
+            if task is not None:
+                cleanup_db.query(NormalizedEventModel).filter(NormalizedEventModel.task_id == task.id).delete()
+                cleanup_db.query(StepSummaryModel).filter(StepSummaryModel.task_id == task.id).delete()
+                cleanup_db.delete(task)
+                cleanup_db.commit()
+        finally:
+            cleanup_db.close()
+        db.close()

@@ -1927,7 +1927,11 @@ function StreamlitTimelineChart({
         const track = String(
           row.track || `${row.component || row.module || "Unknown"} | Cycle ${row.cycle_no ?? "NA"}`,
         );
-        const series = String(row.sub_step || row.message || row.component || row.module || "Segment");
+        const viewSideScope = String(row.render_side_scope || row.side_scope || "Unassigned");
+        const actualSideScope = String(row.side_scope || row.original_side_scope || "Unassigned");
+        const componentLabel = String(row.component || row.module || row.sub_step || "Movement");
+        const label = String(row.sub_step || row.message || componentLabel);
+        const series = `${actualSideScope} · ${componentLabel}`;
         const cycleValue = Number(row.cycle_no);
         return {
           ...row,
@@ -1935,9 +1939,11 @@ function StreamlitTimelineChart({
           endMs,
           track,
           baseTrack: timelineBaseTrack(track) || track,
-          label: series,
+          label,
           series,
           color: timelineColor(series),
+          viewSideScope,
+          actualSideScope,
           cycleSort: Number.isFinite(cycleValue) ? cycleValue : Number.POSITIVE_INFINITY,
         };
       })
@@ -2465,6 +2471,8 @@ function StreamlitTimelineChart({
                             onMouseEnter={(event) => {
                               setActiveTrack(track.track);
                               openTooltip(event, row.label, track.track, [
+                                { label: "视图边", value: toDisplayValue(row.viewSideScope) },
+                                { label: "原始边", value: toDisplayValue(row.actualSideScope) },
                                 { label: "开始", value: formatDateTimeText(row.start ?? row.start_time_sec ?? row.startMs) },
                                 { label: "结束", value: formatDateTimeText(row.end ?? row.end_time_sec ?? row.endMs) },
                                 { label: "时长", value: formatDurationText(safeNumber(row.duration_ms, row.endMs - row.startMs) / 1000) },
@@ -2475,6 +2483,8 @@ function StreamlitTimelineChart({
                             onMouseMove={(event) => {
                               setActiveTrack(track.track);
                               openTooltip(event, row.label, track.track, [
+                                { label: "视图边", value: toDisplayValue(row.viewSideScope) },
+                                { label: "原始边", value: toDisplayValue(row.actualSideScope) },
                                 { label: "开始", value: formatDateTimeText(row.start ?? row.start_time_sec ?? row.startMs) },
                                 { label: "结束", value: formatDateTimeText(row.end ?? row.end_time_sec ?? row.endMs) },
                                 { label: "时长", value: formatDurationText(safeNumber(row.duration_ms, row.endMs - row.startMs) / 1000) },
@@ -2521,6 +2531,8 @@ function StreamlitTimelineChart({
                             onMouseEnter={(event) => {
                               setActiveTrack(track.track);
                               openTooltip(event, String(row.normalized_signature || row.message || "Error Point"), track.track, [
+                                { label: "视图边", value: toDisplayValue(row.render_side_scope || row.side_scope) },
+                                { label: "原始边", value: toDisplayValue(row.side_scope || row.original_side_scope) },
                                 { label: "时间", value: toDisplayValue(row.time_text || formatDateTimeText(row.time ?? row.timeMs)) },
                                 { label: "严重级别", value: toDisplayValue(row.severity) },
                                 { label: "错误家族", value: toDisplayValue(row.error_family_display || row.error_family) },
@@ -2530,6 +2542,8 @@ function StreamlitTimelineChart({
                             onMouseMove={(event) => {
                               setActiveTrack(track.track);
                               openTooltip(event, String(row.normalized_signature || row.message || "Error Point"), track.track, [
+                                { label: "视图边", value: toDisplayValue(row.render_side_scope || row.side_scope) },
+                                { label: "原始边", value: toDisplayValue(row.side_scope || row.original_side_scope) },
                                 { label: "时间", value: toDisplayValue(row.time_text || formatDateTimeText(row.time ?? row.timeMs)) },
                                 { label: "严重级别", value: toDisplayValue(row.severity) },
                                 { label: "错误家族", value: toDisplayValue(row.error_family_display || row.error_family) },

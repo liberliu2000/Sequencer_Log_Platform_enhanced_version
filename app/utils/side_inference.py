@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -141,6 +142,42 @@ def prefer_specific_side(primary: str | None, secondary: str | None) -> str | No
     if infer_side_group(left) == infer_side_group(right) and side_specificity(right) > side_specificity(left):
         return right
     return left
+
+
+def side_scopes_share_parent_branch_scope(left: str | None, right: str | None) -> bool:
+    normalized_left = normalize_side_scope(left)
+    normalized_right = normalize_side_scope(right)
+    if not normalized_left or not normalized_right:
+        return False
+    if normalized_left == normalized_right:
+        return True
+    group = infer_side_group(normalized_left)
+    if not group or group != infer_side_group(normalized_right):
+        return False
+    return normalized_left == group or normalized_right == group
+
+
+def expand_parent_branch_side_family(
+    side_scope: str | None,
+    known_side_scopes: Iterable[str | None] | None = None,
+) -> tuple[str, ...]:
+    normalized = normalize_side_scope(side_scope)
+    if not normalized:
+        return ()
+
+    group = infer_side_group(normalized) or normalized
+    related: list[str] = [normalized]
+    if normalized != group:
+        related.append(group)
+    else:
+        for candidate in known_side_scopes or ():
+            candidate_scope = normalize_side_scope(candidate)
+            if not candidate_scope or candidate_scope == normalized:
+                continue
+            if infer_side_group(candidate_scope) == group:
+                related.append(candidate_scope)
+
+    return tuple(dict.fromkeys(related))
 
 
 def normalize_chip_name(value: str | None) -> str | None:

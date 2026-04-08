@@ -2301,6 +2301,25 @@ export function LogPlatformConsole() {
       })
     : [];
 
+  function describeTimelineGroup(group: AnyRecord): string {
+    const uncertainCount = Number(group.uncertain_count || 0);
+    const sharedCount = Number(group.shared_count || 0);
+    const sharedSides = safeArray<string>(group.shared_side_scopes)
+      .map((item) => String(item || ""))
+      .filter(Boolean)
+      .join(" / ");
+    if (uncertainCount > 0 && sharedCount > 0) {
+      return `当前图包含 ${uncertainCount} 条边归属不确定的时间轴，并额外合并 ${sharedCount} 条来自 ${sharedSides || "父边/分支边"} 的共享动作。`;
+    }
+    if (uncertainCount > 0) {
+      return `当前图包含 ${uncertainCount} 条边归属不确定的时间轴，并已高亮显示。`;
+    }
+    if (sharedCount > 0) {
+      return `当前图额外合并 ${sharedCount} 条来自 ${sharedSides || "父边/分支边"} 的共享动作。`;
+    }
+    return "当前图仅显示该边内部时间轴。";
+  }
+
   useEffect(() => {
     if (!isAuthenticated || page !== "dashboard" || !selectedTaskUuid) {
       return;
@@ -2928,11 +2947,7 @@ export function LogPlatformConsole() {
             key={`timeline-${selectedTaskUuid}-${String(group.side_scope || "unassigned")}`}
             title={`运动时间轴 · ${String(group.side_label || group.side_scope || "Unassigned")}`}
             rows={safeArray(group.rows)}
-            description={
-              Number(group.uncertain_count || 0) > 0
-                ? `当前图包含 ${Number(group.uncertain_count || 0)} 条边归属不确定的时间轴，并已高亮显示。`
-                : "当前图仅显示该边内部时间轴。"
-            }
+            description={describeTimelineGroup(group)}
             errors={safeArray(visibleTimelineErrorGroupMap.get(String(group.side_scope || ""))).filter((row) => {
               if (!timelineShowErrors) {
                 return false;
@@ -2950,7 +2965,10 @@ export function LogPlatformConsole() {
             title="时间轴表格明细"
             rows={visibleTimelineGroups.flatMap((group) =>
               safeArray(group.rows).map((row) => ({
-                side_scope: group.side_scope,
+                view_side_scope: group.side_scope,
+                side_scope: row.side_scope,
+                original_side_scope: row.original_side_scope,
+                is_shared_side_family: row.is_shared_side_family,
                 track: row.track,
                 cycle_no: row.cycle_no,
                 component: row.component,
