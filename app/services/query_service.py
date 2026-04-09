@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 import gc
 import json
 import mimetypes
@@ -19,6 +20,7 @@ from app.models.db_models import ErrorClusterModel, LLMAnalysisResultModel, Norm
 from app.repositories.task_repository import TaskRepository
 from app.schemas.common import NormalizedEvent, ParameterResult, StepSummary
 from app.services.cycle_service import _definition_values, _event_time_text, _safe_seconds
+from app.services.cycle_inference import CURRENT_CYCLE_HINTS, NEXT_CYCLE_HINTS
 from app.services.parameter_definitions import PARAMETER_DEFINITIONS, PAIRING_RULES
 from app.services.perf_cache import TTLCache
 from app.services.performance_service import PerformanceService
@@ -45,6 +47,38 @@ TIMELINE_ERROR_NOISE_REGEXES = [
         r"\bunknown message format\b",
     ]
 ]
+SUBSTEP_CURRENT_CYCLE_HINTS = tuple(
+    dict.fromkeys(
+        list(CURRENT_CYCLE_HINTS)
+        + [
+            "coarsetheta",
+            "coarsethetawithoutmovestage",
+            "finealign",
+            "imaging_time_real",
+            "imaging",
+            "row scan",
+            "scan",
+            "cpas time",
+            "cpas completed",
+        ]
+    )
+)
+SUBSTEP_NEXT_CYCLE_HINTS = tuple(
+    dict.fromkeys(
+        list(NEXT_CYCLE_HINTS)
+        + [
+            "fill ir",
+            "priming",
+            "reagent priming",
+            "wash",
+            "washing",
+            "chuck stage",
+            "transfer from imager to chuck",
+            "transfer to chuck",
+            "cycle finished",
+        ]
+    )
+)
 
 
 class QueryService:
@@ -170,6 +204,183 @@ class QueryService:
                 except Exception:
                     pass
         return self._time_text_to_epoch_ms(row.get("start_time") or row.get("start_time_text") or row.get("end_time") or row.get("end_time_text"))
+
+    def _substep_time_epoch_ms(self, row: dict[str, Any]) -> int | None:
+        for key in ("start_epoch_ms", "min_start_epoch_ms", "end_epoch_ms", "max_end_epoch_ms"):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    pass
+        return self._time_text_to_epoch_ms(
+            row.get("start_time_text")
+            or row.get("end_time_text")
+            or row.get("start_time")
+            or row.get("end_time")
+        )
+
+    @staticmethod
+    def _coerce_cycle_no(value: Any) -> int | None:
+        try:
+            return int(value) if value not in (None, "") else None
+        except Exception:
+            return None
+
+    def _trusted_substep_cycle_anchor_catalog(self, task_id: int) -> dict[tuple[str | None, str | None], list[dict[str, int]]]:
+        key = self._cache_key(task_id, "trusted_substep_cycle_anchor_catalog")
+
+        def factory():
+            grouped: dict[tuple[str | None, str | None], dict[int, list[int]]] = defaultdict(lambda: defaultdict(list))
+            for row in self.get_parameter_results(task_id):
+                if row.get("parameter_name") not in {"imaging_time_real", "cycle_time"}:
+                    continue
+                cycle_no = self._coerce_cycle_no(row.get("cycle"))
+                time_epoch_ms = self._parameter_time_epoch_ms(row)
+                if cycle_no is None or time_epoch_ms is None:
+                    continue
+                repaired = self._repair_scope_fields(dict(row))
+                side_scope = normalize_side_scope(repaired.get("side_scope"))
+                chip_name = repaired.get("chip_name")
+                grouped[(side_scope, chip_name)][cycle_no].append(int(time_epoch_ms))
+                grouped[(side_scope, None)][cycle_no].append(int(time_epoch_ms))
+                grouped[(None, None)][cycle_no].append(int(time_epoch_ms))
+
+            catalog: dict[tuple[str | None, str | None], list[dict[str, int]]] = {}
+            for anchor_key, cycle_map in grouped.items():
+                anchors = [
+                    {"cycle": cycle_no, "epoch_ms": min(epochs)}
+                    for cycle_no, epochs in cycle_map.items()
+                    if epochs
+                ]
+                anchors.sort(key=lambda item: (item["epoch_ms"], item["cycle"]))
+                if anchors:
+                    catalog[anchor_key] = anchors
+            return catalog
+
+        return self._cached(key, factory)
+
+    def _substep_cycle_anchor_rows(
+        self,
+        task_id: int,
+        *,
+        side_scope: str | None,
+        chip_name: str | None,
+    ) -> list[dict[str, int]]:
+        catalog = self._trusted_substep_cycle_anchor_catalog(task_id)
+        normalized_side = normalize_side_scope(side_scope)
+        for anchor_key in (
+            (normalized_side, chip_name or None),
+            (normalized_side, None),
+            (None, None),
+        ):
+            anchors = catalog.get(anchor_key)
+            if anchors:
+                return anchors
+        return []
+
+    @staticmethod
+    def _is_plausible_cycle_between_anchors(
+        cycle_no: int | None,
+        prev_anchor: dict[str, int] | None,
+        next_anchor: dict[str, int] | None,
+    ) -> bool:
+        if cycle_no is None:
+            return False
+        if prev_anchor and next_anchor:
+            low = min(int(prev_anchor["cycle"]), int(next_anchor["cycle"]))
+            high = max(int(prev_anchor["cycle"]), int(next_anchor["cycle"]))
+            return high - low <= 4 and low <= cycle_no <= high
+        if prev_anchor:
+            return 0 <= cycle_no - int(prev_anchor["cycle"]) <= 2
+        if next_anchor:
+            return 0 <= int(next_anchor["cycle"]) - cycle_no <= 2
+        return False
+
+    @staticmethod
+    def _substep_cycle_relation(*parts: Any) -> str:
+        text = " ".join(str(part or "") for part in parts).strip().lower()
+        if not text:
+            return "nearest"
+        if any(token in text for token in SUBSTEP_NEXT_CYCLE_HINTS):
+            return "next"
+        if any(token in text for token in SUBSTEP_CURRENT_CYCLE_HINTS):
+            return "current"
+        return "nearest"
+
+    @classmethod
+    def _rank_aligned_cycle_from_anchors(
+        cls,
+        *,
+        index: int,
+        total_rows: int,
+        anchors: list[dict[str, int]],
+    ) -> int | None:
+        if not anchors or total_rows <= 0:
+            return None
+        if total_rows == 1:
+            return int(anchors[0]["cycle"])
+        anchor_index = round(index * max(len(anchors) - 1, 0) / max(total_rows - 1, 1))
+        anchor_index = max(0, min(anchor_index, len(anchors) - 1))
+        return int(anchors[anchor_index]["cycle"])
+
+    def _resolve_substep_cycle_from_anchors(
+        self,
+        task_id: int,
+        row: dict[str, Any],
+        *,
+        rank_index: int | None = None,
+        rank_total: int | None = None,
+    ) -> tuple[int | None, str]:
+        side_scope = row.get("side_scope")
+        chip_name = row.get("chip_name")
+        anchors = self._substep_cycle_anchor_rows(task_id, side_scope=side_scope, chip_name=chip_name)
+        original_cycle = self._coerce_cycle_no(row.get("cycle_no"))
+        if not anchors:
+            return original_cycle, "original_no_anchor"
+
+        time_epoch_ms = self._substep_time_epoch_ms(row)
+        relation = self._substep_cycle_relation(row.get("sub_step"), row.get("parameter_name"), row.get("component"))
+        if time_epoch_ms is not None:
+            anchor_times = [int(anchor["epoch_ms"]) for anchor in anchors]
+            anchor_pos = bisect_right(anchor_times, time_epoch_ms)
+            prev_anchor = anchors[anchor_pos - 1] if anchor_pos > 0 else None
+            next_anchor = anchors[anchor_pos] if anchor_pos < len(anchors) else None
+
+            if self._is_plausible_cycle_between_anchors(original_cycle, prev_anchor, next_anchor):
+                return original_cycle, "plausible_original_between_anchors"
+
+            if relation == "next" and next_anchor is not None:
+                return int(next_anchor["cycle"]), "time_anchor_next_cycle"
+            if relation == "current" and prev_anchor is not None:
+                return int(prev_anchor["cycle"]), "time_anchor_current_cycle"
+            if prev_anchor is not None and next_anchor is not None:
+                prev_time = int(prev_anchor["epoch_ms"])
+                next_time = int(next_anchor["epoch_ms"])
+                if abs(time_epoch_ms - prev_time) <= abs(next_time - time_epoch_ms):
+                    return int(prev_anchor["cycle"]), "time_anchor_nearest_prev"
+                return int(next_anchor["cycle"]), "time_anchor_nearest_next"
+            if prev_anchor is not None:
+                return int(prev_anchor["cycle"]), "time_anchor_prev_only"
+            if next_anchor is not None:
+                return int(next_anchor["cycle"]), "time_anchor_next_only"
+
+        if (
+            rank_index is not None
+            and rank_total is not None
+            and rank_total > 1
+            and abs(rank_total - len(anchors)) <= 3
+        ):
+            ranked_cycle = self._rank_aligned_cycle_from_anchors(index=rank_index, total_rows=rank_total, anchors=anchors)
+            if ranked_cycle is not None:
+                return ranked_cycle, "rank_anchor_fallback"
+
+        if original_cycle is not None:
+            anchor_cycles = {int(anchor["cycle"]) for anchor in anchors}
+            if original_cycle in anchor_cycles:
+                return original_cycle, "original_in_anchor_set"
+
+        return original_cycle or int(anchors[0]["cycle"]), "fallback_original_or_first_anchor"
 
     @staticmethod
     def _series_scope_label(side_scope: str | None, chip_name: str | None) -> str:
@@ -2133,67 +2344,52 @@ class QueryService:
         side_scope_values = self._normalize_filter_values(side_scopes)
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
-        agg_fn = func.sum if agg_mode == "sum" else func.avg
         x_axis_type = "time" if str(axis_mode or "").strip().lower() == "time" else "cycle"
         stmt = (
             select(
+                StepSummaryModel.id.label("id"),
                 StepSummaryModel.cycle_no.label("cycle_no"),
+                StepSummaryModel.parameter_name.label("parameter_name"),
                 StepSummaryModel.sub_step.label("sub_step"),
                 StepSummaryModel.instrument_scope.label("instrument_scope"),
                 StepSummaryModel.side_scope.label("side_scope"),
                 StepSummaryModel.side_group.label("side_group"),
                 StepSummaryModel.chip_name.label("chip_name"),
-                func.max(StepSummaryModel.chip_position).label("chip_position"),
-                func.max(StepSummaryModel.chuck_no).label("chuck_no"),
-                func.max(StepSummaryModel.slot_no).label("slot_no"),
-                func.min(StepSummaryModel.start_epoch_ms).label("min_start_epoch_ms"),
-                func.max(StepSummaryModel.end_epoch_ms).label("max_end_epoch_ms"),
-                func.min(StepSummaryModel.start_time_text).label("start_time_text"),
-                func.max(StepSummaryModel.end_time_text).label("end_time_text"),
-                agg_fn(StepSummaryModel.duration_ms).label("agg_duration_ms"),
-                func.count(StepSummaryModel.id).label("sample_count"),
+                StepSummaryModel.chip_position.label("chip_position"),
+                StepSummaryModel.chuck_no.label("chuck_no"),
+                StepSummaryModel.slot_no.label("slot_no"),
+                StepSummaryModel.start_epoch_ms.label("start_epoch_ms"),
+                StepSummaryModel.end_epoch_ms.label("end_epoch_ms"),
+                StepSummaryModel.start_time_text.label("start_time_text"),
+                StepSummaryModel.end_time_text.label("end_time_text"),
+                StepSummaryModel.duration_ms.label("duration_ms"),
+                StepSummaryModel.side_confidence.label("side_confidence"),
+                StepSummaryModel.side_evidence.label("side_evidence"),
             )
             .where(
                 StepSummaryModel.task_id == task_id,
                 StepSummaryModel.cycle_no.is_not(None),
                 StepSummaryModel.duration_ms.is_not(None),
             )
-            .group_by(
-                StepSummaryModel.cycle_no,
-                StepSummaryModel.sub_step,
-                StepSummaryModel.instrument_scope,
-                StepSummaryModel.side_scope,
-                StepSummaryModel.side_group,
-                StepSummaryModel.chip_name,
-            )
             .order_by(
-                StepSummaryModel.sub_step.asc(),
                 StepSummaryModel.side_scope.asc(),
                 StepSummaryModel.chip_name.asc(),
+                StepSummaryModel.sub_step.asc(),
+                StepSummaryModel.start_epoch_ms.asc(),
+                StepSummaryModel.end_epoch_ms.asc(),
                 StepSummaryModel.cycle_no.asc(),
+                StepSummaryModel.id.asc(),
             )
         )
         stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), StepSummaryModel.side_scope, side_scope_values)
         stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), StepSummaryModel.side_group, side_group_values)
         stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), StepSummaryModel.chip_name, chip_value_list)
-        out: list[dict[str, Any]] = []
+        raw_rows: list[dict[str, Any]] = []
+        grouped_raw_rows: dict[tuple[str | None, str | None, str], list[dict[str, Any]]] = defaultdict(list)
         for row in self.db.execute(stmt).mappings():
             repaired_row = self._repair_scope_fields(dict(row))
-            duration_ms = float(row["agg_duration_ms"] or 0.0)
-            time_epoch_ms = row["min_start_epoch_ms"] or row["max_end_epoch_ms"]
-            x_axis_value = (
-                self._preferred_time_text(
-                    row["start_time_text"],
-                    row["end_time_text"],
-                    self._epoch_to_seconds(time_epoch_ms),
-                )
-                if x_axis_type == "time"
-                else (row["cycle_no"] if row["cycle_no"] is not None else "NA")
-            )
             item = {
-                "cycle": row["cycle_no"],
-                "cycle_no": row["cycle_no"],
-                "sub_step": row["sub_step"] or "unknown",
+                **dict(row),
                 "instrument_scope": repaired_row["instrument_scope"],
                 "side_scope": repaired_row["side_scope"],
                 "side_group": repaired_row["side_group"],
@@ -2201,18 +2397,8 @@ class QueryService:
                 "chip_position": repaired_row.get("chip_position"),
                 "chuck_no": repaired_row.get("chuck_no"),
                 "slot_no": repaired_row.get("slot_no"),
-                "duration_ms": round(duration_ms, 3),
-                "duration_value": self._convert_duration(duration_ms, unit),
-                "duration_unit": unit,
-                "sample_count": int(row["sample_count"] or 0),
-                "time_epoch_ms": time_epoch_ms,
-                "start_time_text": row["start_time_text"],
-                "end_time_text": row["end_time_text"],
-                "x_axis_type": x_axis_type,
-                "x_axis_value": x_axis_value,
-                "x_axis_label": str(x_axis_value),
-                "x_axis_sort_value": time_epoch_ms if x_axis_type == "time" else (row["cycle_no"] if row["cycle_no"] is not None else -1),
-                "series_name": f"{self._series_scope_label(repaired_row['side_scope'], repaired_row['chip_name'])} | {row['sub_step'] or 'unknown'}",
+                "side_confidence": repaired_row.get("side_confidence"),
+                "side_evidence": repaired_row.get("side_evidence"),
             }
             if not self._row_matches_scope_filters(
                 item,
@@ -2221,7 +2407,145 @@ class QueryService:
                 chip_names=chip_value_list,
             ):
                 continue
-            out.append(item)
+            group_key = (
+                item.get("side_scope"),
+                item.get("chip_name"),
+                str(item.get("sub_step") or "unknown"),
+            )
+            grouped_raw_rows[group_key].append(item)
+            raw_rows.append(item)
+
+        corrected_rows: list[dict[str, Any]] = []
+        for group_rows in grouped_raw_rows.values():
+            ordered_group_rows = sorted(
+                group_rows,
+                key=lambda item: (
+                    self._substep_time_epoch_ms(item) if self._substep_time_epoch_ms(item) is not None else float("inf"),
+                    self._coerce_cycle_no(item.get("cycle_no")) if self._coerce_cycle_no(item.get("cycle_no")) is not None else -1,
+                    int(item.get("id") or 0),
+                ),
+            )
+            for index, row in enumerate(ordered_group_rows):
+                corrected_cycle, correction_source = self._resolve_substep_cycle_from_anchors(
+                    task_id,
+                    row,
+                    rank_index=index,
+                    rank_total=len(ordered_group_rows),
+                )
+                corrected_rows.append(
+                    {
+                        **row,
+                        "resolved_cycle_no": corrected_cycle,
+                        "original_cycle_no": row.get("cycle_no"),
+                        "cycle_resolution_source": correction_source,
+                    }
+                )
+
+        aggregated: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in corrected_rows:
+            resolved_cycle = self._coerce_cycle_no(row.get("resolved_cycle_no"))
+            if resolved_cycle is None:
+                continue
+            key = (
+                resolved_cycle,
+                str(row.get("sub_step") or "unknown"),
+                row.get("instrument_scope"),
+                row.get("side_scope"),
+                row.get("side_group"),
+                row.get("chip_name"),
+            )
+            stats = aggregated.get(key)
+            duration_ms = float(row.get("duration_ms") or 0.0)
+            row_time_epoch_ms = self._substep_time_epoch_ms(row)
+            if stats is None:
+                stats = {
+                    "cycle": resolved_cycle,
+                    "cycle_no": resolved_cycle,
+                    "sub_step": row.get("sub_step") or "unknown",
+                    "parameter_name": row.get("parameter_name"),
+                    "instrument_scope": row.get("instrument_scope"),
+                    "side_scope": row.get("side_scope"),
+                    "side_group": row.get("side_group"),
+                    "chip_name": row.get("chip_name"),
+                    "chip_position": row.get("chip_position"),
+                    "chuck_no": row.get("chuck_no"),
+                    "slot_no": row.get("slot_no"),
+                    "min_start_epoch_ms": row.get("start_epoch_ms"),
+                    "max_end_epoch_ms": row.get("end_epoch_ms"),
+                    "start_time_text": row.get("start_time_text"),
+                    "end_time_text": row.get("end_time_text"),
+                    "sample_count": 0,
+                    "sum_duration_ms": 0.0,
+                    "duration_values": [],
+                    "time_epoch_ms": row_time_epoch_ms,
+                    "cycle_resolution_sources": [],
+                    "original_cycle_values": [],
+                }
+                aggregated[key] = stats
+
+            stats["sample_count"] = int(stats["sample_count"]) + 1
+            stats["sum_duration_ms"] = float(stats["sum_duration_ms"]) + duration_ms
+            stats["duration_values"].append(duration_ms)
+            stats["cycle_resolution_sources"].append(str(row.get("cycle_resolution_source") or ""))
+            if row.get("original_cycle_no") is not None:
+                stats["original_cycle_values"].append(int(row["original_cycle_no"]))
+            if row.get("chip_position") and not stats.get("chip_position"):
+                stats["chip_position"] = row.get("chip_position")
+            if row.get("chuck_no") and not stats.get("chuck_no"):
+                stats["chuck_no"] = row.get("chuck_no")
+            if row.get("slot_no") and not stats.get("slot_no"):
+                stats["slot_no"] = row.get("slot_no")
+            start_epoch_ms = row.get("start_epoch_ms")
+            end_epoch_ms = row.get("end_epoch_ms")
+            if start_epoch_ms is not None:
+                current_min = stats.get("min_start_epoch_ms")
+                stats["min_start_epoch_ms"] = start_epoch_ms if current_min is None else min(int(current_min), int(start_epoch_ms))
+            if end_epoch_ms is not None:
+                current_max = stats.get("max_end_epoch_ms")
+                stats["max_end_epoch_ms"] = end_epoch_ms if current_max is None else max(int(current_max), int(end_epoch_ms))
+            if not stats.get("start_time_text"):
+                stats["start_time_text"] = row.get("start_time_text")
+            if row.get("end_time_text"):
+                current_end_text = stats.get("end_time_text")
+                if not current_end_text or (self._time_text_to_epoch_ms(row.get("end_time_text")) or 0) >= (self._time_text_to_epoch_ms(current_end_text) or 0):
+                    stats["end_time_text"] = row.get("end_time_text")
+            if row_time_epoch_ms is not None:
+                current_time_epoch_ms = stats.get("time_epoch_ms")
+                if current_time_epoch_ms is None or row_time_epoch_ms < current_time_epoch_ms:
+                    stats["time_epoch_ms"] = row_time_epoch_ms
+
+        out: list[dict[str, Any]] = []
+        for stats in aggregated.values():
+            duration_values = [float(value) for value in stats.pop("duration_values")]
+            if not duration_values:
+                continue
+            duration_ms = sum(duration_values) if agg_mode == "sum" else (sum(duration_values) / len(duration_values))
+            time_epoch_ms = stats.get("min_start_epoch_ms") or stats.get("max_end_epoch_ms") or stats.get("time_epoch_ms")
+            x_axis_value = (
+                self._preferred_time_text(
+                    stats.get("start_time_text"),
+                    stats.get("end_time_text"),
+                    self._epoch_to_seconds(time_epoch_ms),
+                )
+                if x_axis_type == "time"
+                else (stats["cycle_no"] if stats["cycle_no"] is not None else "NA")
+            )
+            out.append(
+                {
+                    **stats,
+                    "duration_ms": round(float(duration_ms), 3),
+                    "duration_value": self._convert_duration(duration_ms, unit),
+                    "duration_unit": unit,
+                    "x_axis_type": x_axis_type,
+                    "x_axis_value": x_axis_value,
+                    "x_axis_label": str(x_axis_value),
+                    "x_axis_sort_value": time_epoch_ms if x_axis_type == "time" else (stats["cycle_no"] if stats["cycle_no"] is not None else -1),
+                    "time_epoch_ms": time_epoch_ms,
+                    "cycle_resolution_source": ",".join(sorted(set(filter(None, stats.get("cycle_resolution_sources", []))))),
+                    "original_cycle_values": sorted(set(stats.get("original_cycle_values", []))),
+                    "series_name": f"{self._series_scope_label(stats['side_scope'], stats['chip_name'])} | {stats['sub_step'] or 'unknown'}",
+                }
+            )
         return self._collapse_trend_points(out)
 
     def get_error_clusters(

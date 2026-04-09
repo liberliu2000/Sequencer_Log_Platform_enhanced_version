@@ -10,7 +10,7 @@ from app.correlators.pairing import pair_start_end
 from app.core.settings import get_settings
 from app.db.base import Base
 from app.detectors.error_detection import annotate_errors
-from app.models.db_models import NormalizedEventModel, ParameterResultModel, UploadTaskModel
+from app.models.db_models import NormalizedEventModel, ParameterResultModel, StepSummaryModel, UploadTaskModel
 from app.repositories.task_repository import TaskRepository
 from app.schemas.common import NormalizedEvent
 from app.services.cycle_inference import infer_missing_cycles
@@ -389,3 +389,163 @@ def test_timeline_error_points_skip_bad_message_format_noise(tmp_path):
 
         assert len(rows["points"]) == 1
         assert rows["points"][0]["normalized_signature"] == "sig-move-fail"
+
+
+def test_substep_cycle_series_reprojects_fabricated_cycles_with_anchor_time_support(tmp_path):
+    SessionLocal = _create_session_factory(tmp_path)
+
+    with SessionLocal() as db:
+        task = UploadTaskModel(task_uuid="substep-anchor-task", filename="substep-anchor.log", stored_path=str(tmp_path), status="completed")
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        db.add_all(
+            [
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="imaging_time_real",
+                    parameter_display_name="imaging time real",
+                    cycle_no=55,
+                    duration_seconds=1.0,
+                    duration_ms=1000.0,
+                    start_time_text="2024-03-09 16:24:57",
+                    end_time_text="2024-03-09 16:24:58",
+                    source_file="b1.log",
+                    source_type="log",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B1",
+                    side_group="B",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="imaging_time_real",
+                    parameter_display_name="imaging time real",
+                    cycle_no=56,
+                    duration_seconds=1.0,
+                    duration_ms=1000.0,
+                    start_time_text="2024-03-09 16:39:29",
+                    end_time_text="2024-03-09 16:39:30",
+                    source_file="b1.log",
+                    source_type="log",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B1",
+                    side_group="B",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="imaging_time_real",
+                    parameter_display_name="imaging time real",
+                    cycle_no=74,
+                    duration_seconds=1.0,
+                    duration_ms=1000.0,
+                    start_time_text="2024-03-09 16:20:58",
+                    end_time_text="2024-03-09 16:20:59",
+                    source_file="a2.log",
+                    source_type="log",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="A2",
+                    side_group="A",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="imaging_time_real",
+                    parameter_display_name="imaging time real",
+                    cycle_no=104,
+                    duration_seconds=1.0,
+                    duration_ms=1000.0,
+                    start_time_text="2024-03-10 05:24:58",
+                    end_time_text="2024-03-10 05:24:59",
+                    source_file="b2.log",
+                    source_type="log",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                ),
+                ParameterResultModel(
+                    task_id=task.id,
+                    parameter_name="imaging_time_real",
+                    parameter_display_name="imaging time real",
+                    cycle_no=106,
+                    duration_seconds=1.0,
+                    duration_ms=1000.0,
+                    start_time_text="2024-03-10 05:55:14",
+                    end_time_text="2024-03-10 05:55:15",
+                    source_file="b2.log",
+                    source_type="log",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                ),
+            ]
+        )
+        db.add_all(
+            [
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=541,
+                    sub_step="b1 fill ir",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B1",
+                    side_group="B",
+                    start_time_text="2024-03-09 16:16:01",
+                    end_time_text="2024-03-09 16:16:37",
+                    duration_ms=36000.0,
+                ),
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=556,
+                    parameter_name="finealign",
+                    sub_step="Finealign",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B1",
+                    side_group="B",
+                    end_time_text="2024-03-09 16:30:00",
+                    duration_ms=7200.0,
+                ),
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=411,
+                    sub_step="a2 fill ir",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="A2",
+                    side_group="A",
+                    start_time_text="2024-03-09 16:15:57",
+                    end_time_text="2024-03-09 16:16:33",
+                    duration_ms=36000.0,
+                ),
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=105,
+                    sub_step="b2 cpas reagent priming",
+                    component="Workflow",
+                    instrument_scope="Whole Instrument",
+                    side_scope="B2",
+                    side_group="B",
+                    start_time_text="2024-03-10 05:43:15",
+                    end_time_text="2024-03-10 05:43:59",
+                    duration_ms=44000.0,
+                ),
+            ]
+        )
+        db.commit()
+
+        rows = QueryService(db).get_substep_cycle_series(task.id, axis_mode="cycle", unit="s")
+
+        index = {(row["side_scope"], row["sub_step"]): row for row in rows}
+
+        assert index[("B1", "b1 fill ir")]["cycle_no"] == 55
+        assert index[("B1", "Finealign")]["cycle_no"] == 55
+        assert index[("A2", "a2 fill ir")]["cycle_no"] == 74
+        assert index[("B2", "b2 cpas reagent priming")]["cycle_no"] == 105
+        assert "time_anchor_next_cycle" in str(index[("B1", "b1 fill ir")]["cycle_resolution_source"])
+        assert "time_anchor_current_cycle" in str(index[("B1", "Finealign")]["cycle_resolution_source"])
+        assert "plausible_original_between_anchors" in str(index[("B2", "b2 cpas reagent priming")]["cycle_resolution_source"])
