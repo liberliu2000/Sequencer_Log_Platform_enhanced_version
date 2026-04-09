@@ -1065,10 +1065,10 @@
     );
     mountPage(
       "Timeline",
-      "View separate movement timelines per side. Uncertain rows stay visible and are highlighted inside each side chart.",
+      "View separate full-process timelines per side. All timed substeps are included. Uncertain rows stay visible and are highlighted inside each side chart.",
       `
         ${renderCards([
-          { label: "Movements", value: formatNumber(safeArray(movementPayload.rows).length) },
+          { label: "Substeps", value: formatNumber(safeArray(movementPayload.rows).length) },
           { label: "Error Points", value: formatNumber(safeArray(errorPayload.points).length) },
           { label: "Sides", value: formatNumber(sideGroups.length) },
           { label: "Uncertain Rows", value: formatNumber(safeArray(movementPayload.unassigned_side_rows).length) },
@@ -1103,7 +1103,7 @@
               ? sideGroups
                   .map((group, index) => `
                     <div class="chart-card">
-                      <h4>Timeline · ${escapeHtml(firstNonEmpty(group.side_label, group.side_scope, "Unassigned"))}</h4>
+                      <h4>Full Timeline · ${escapeHtml(firstNonEmpty(group.side_label, group.side_scope, "Unassigned"))}</h4>
                       <p class="small-note">
                         ${
                           Number(group.shared_count || 0) > 0 && Number(group.uncertain_count || 0) > 0
@@ -1123,7 +1123,7 @@
           }
         </div>
         ${renderTabs("timelineTabs", [
-          { key: "movements", label: "Movement Payload", content: fmtJson(movementPayload) },
+          { key: "movements", label: "Timeline Payload", content: fmtJson(movementPayload) },
           { key: "errors", label: "Error Payload", content: fmtJson(errorPayload) },
         ])}
       `,

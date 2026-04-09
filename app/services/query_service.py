@@ -220,6 +220,61 @@ class QueryService:
             or row.get("end_time")
         )
 
+    def _timeline_time_bounds(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        start_epoch_ms = None
+        end_epoch_ms = None
+        for key in ("start_epoch_ms", "min_start_epoch_ms"):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    start_epoch_ms = int(value)
+                    break
+                except Exception:
+                    pass
+        for key in ("end_epoch_ms", "max_end_epoch_ms"):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    end_epoch_ms = int(value)
+                    break
+                except Exception:
+                    pass
+
+        start_time_text = self._preferred_time_text(row.get("start_time_text"), row.get("start_time"))
+        end_time_text = self._preferred_time_text(row.get("end_time_text"), row.get("end_time"))
+        if start_epoch_ms is None and start_time_text:
+            start_epoch_ms = self._time_text_to_epoch_ms(start_time_text)
+        if end_epoch_ms is None and end_time_text:
+            end_epoch_ms = self._time_text_to_epoch_ms(end_time_text)
+
+        numeric_duration_ms: float | None = None
+        if row.get("duration_ms") is not None:
+            try:
+                numeric_duration_ms = float(row["duration_ms"])
+            except Exception:
+                numeric_duration_ms = None
+
+        inferred = False
+        if start_epoch_ms is None and end_epoch_ms is not None and numeric_duration_ms is not None:
+            start_epoch_ms = max(0, int(round(end_epoch_ms - numeric_duration_ms)))
+            inferred = True
+        if end_epoch_ms is None and start_epoch_ms is not None and numeric_duration_ms is not None:
+            end_epoch_ms = int(round(start_epoch_ms + numeric_duration_ms))
+            inferred = True
+
+        if start_epoch_ms is None or end_epoch_ms is None or end_epoch_ms < start_epoch_ms:
+            return None
+
+        return {
+            "start_epoch_ms": start_epoch_ms,
+            "end_epoch_ms": end_epoch_ms,
+            "start": self._preferred_time_text(start_time_text, self._epoch_to_seconds(start_epoch_ms), self._epoch_to_iso_text(start_epoch_ms)),
+            "end": self._preferred_time_text(end_time_text, self._epoch_to_seconds(end_epoch_ms), self._epoch_to_iso_text(end_epoch_ms)),
+            "start_time_sec": self._epoch_to_seconds(start_epoch_ms),
+            "end_time_sec": self._epoch_to_seconds(end_epoch_ms),
+            "time_bounds_inferred": inferred,
+        }
+
     @staticmethod
     def _coerce_cycle_no(value: Any) -> int | None:
         try:
@@ -2102,9 +2157,8 @@ class QueryService:
         output: list[dict[str, Any]] = []
         lanes: dict[str, list[tuple[int, int]]] = defaultdict(list)
         for row in self.db.execute(stmt).mappings():
-            if not (row["start_epoch_ms"] and row["end_epoch_ms"]):
-                continue
-            if not self._is_movement_like(row["sub_step"], row["component"]):
+            bounds = self._timeline_time_bounds(dict(row))
+            if bounds is None:
                 continue
             item = self._repair_scope_fields(dict(row))
             base_track = self._build_timeline_base_track(
@@ -2115,8 +2169,8 @@ class QueryService:
                 track_granularity=granularity,
             )
             lane_idx = 0
-            start_ms = int(row["start_epoch_ms"])
-            end_ms = int(row["end_epoch_ms"])
+            start_ms = int(bounds["start_epoch_ms"])
+            end_ms = int(bounds["end_epoch_ms"])
             existing = lanes[base_track]
             while lane_idx < len(existing) and start_ms < existing[lane_idx][1]:
                 lane_idx += 1
@@ -2126,17 +2180,20 @@ class QueryService:
                 existing[lane_idx] = (start_ms, end_ms)
             track = base_track if lane_idx == 0 else f"{base_track} | lane {lane_idx + 1}"
             item["module"] = item.get("component")
-            item["message"] = item.get("sub_step")
-            item["start_time_sec"] = self._epoch_to_seconds(start_ms)
-            item["end_time_sec"] = self._epoch_to_seconds(end_ms)
+            item["message"] = item.get("sub_step") or item.get("parameter_name") or item.get("component")
+            item["start_epoch_ms"] = start_ms
+            item["end_epoch_ms"] = end_ms
+            item["start_time_sec"] = bounds["start_time_sec"]
+            item["end_time_sec"] = bounds["end_time_sec"]
             item["source_file"] = None
-            item["start"] = self._preferred_time_text(item.get("start_time_text"), self._epoch_to_seconds(start_ms), self._epoch_to_iso_text(start_ms))
-            item["end"] = self._preferred_time_text(item.get("end_time_text"), self._epoch_to_seconds(end_ms), self._epoch_to_iso_text(end_ms))
+            item["start"] = bounds["start"]
+            item["end"] = bounds["end"]
             item["base_track"] = base_track
             item["track"] = track
             item["track_granularity"] = granularity
             item["is_uncertain_side"] = self._is_uncertain_side(item.get("side_scope"), item.get("side_confidence"))
             item["side_evidence"] = self._llm_extra(item.get("side_evidence")) or {}
+            item["time_bounds_inferred"] = bool(bounds["time_bounds_inferred"])
             if not self._row_matches_timeline_scope_filters(
                 item,
                 side_scopes=side_scope_values,

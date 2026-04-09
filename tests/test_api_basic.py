@@ -407,6 +407,66 @@ def test_movement_timeline_error_points_api(client: TestClient):
         db.close()
 
 
+def test_movement_timeline_includes_all_substeps_and_infers_missing_bounds(client: TestClient):
+    seed = uuid4().hex[:8]
+    task_uuid = f"timeline_full_{seed}"
+    db = SessionLocal()
+    try:
+        task = UploadTaskModel(
+            task_uuid=task_uuid,
+            filename=f"{task_uuid}.log",
+            stored_path=f"/tmp/{task_uuid}.log",
+            status="done",
+        )
+        db.add(task)
+        db.flush()
+        db.add_all(
+            [
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=1,
+                    sub_step="MoveToScan",
+                    component="Scanner_1",
+                    start_epoch_ms=1710000000000,
+                    end_epoch_ms=1710000005000,
+                    duration_ms=5000,
+                    start_time_text="2024-03-09 16:00:00",
+                    end_time_text="2024-03-09 16:00:05",
+                ),
+                StepSummaryModel(
+                    task_id=task.id,
+                    cycle_no=1,
+                    sub_step="Prime reagent manifold",
+                    component="Fluidics",
+                    end_time_text="2024-03-09 16:01:05",
+                    duration_ms=5000,
+                ),
+            ]
+        )
+        db.commit()
+
+        timeline_resp = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline", params={"cycle_no": 1})
+        assert timeline_resp.status_code == 200
+        timeline_payload = timeline_resp.json()
+        rows = timeline_payload["rows"]
+        assert {row["sub_step"] for row in rows} == {"MoveToScan", "Prime reagent manifold"}
+        inferred_row = next(row for row in rows if row["sub_step"] == "Prime reagent manifold")
+        assert inferred_row["start"] == "2024-03-09 16:01:00"
+        assert inferred_row["end"] == "2024-03-09 16:01:05"
+        assert inferred_row["time_bounds_inferred"] is True
+    finally:
+        cleanup_db = SessionLocal()
+        try:
+            task = cleanup_db.query(UploadTaskModel).filter(UploadTaskModel.task_uuid == task_uuid).one_or_none()
+            if task is not None:
+                cleanup_db.query(StepSummaryModel).filter(StepSummaryModel.task_id == task.id).delete()
+                cleanup_db.delete(task)
+                cleanup_db.commit()
+        finally:
+            cleanup_db.close()
+        db.close()
+
+
 def test_scope_catalog_and_timeline_filters_api(client: TestClient):
     seed = uuid4().hex[:8]
     task_uuid = f"scope_api_{seed}"
