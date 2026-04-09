@@ -2655,7 +2655,11 @@ def _apply_dataframe_filters(df: pd.DataFrame, key: str) -> pd.DataFrame:
 
     filtered = df
     if len(df) <= 2000:
-        with st.expander("表格工具", expanded=False):
+        # Popovers can be rendered inside expanders, unlike nested expanders.
+        toolbar_container = st.popover("表格工具") if hasattr(st, "popover") else st.container()
+        with toolbar_container:
+            if not hasattr(st, "popover"):
+                st.caption("表格工具")
             search_col, field_col, value_col = st.columns([1.35, 1.0, 1.05], gap="small")
             search_text = str(search_col.text_input("搜索", key=f"{key}::search", placeholder="全文搜索当前表格")).strip()
             column_options = ["全部列"] + [str(col) for col in df.columns]
