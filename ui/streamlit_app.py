@@ -4617,7 +4617,7 @@ elif page == "事件流时间轴":
         cycle_pick = st.selectbox("选择 Cycle", options, key="timeline_cycle")
         track_order = st.selectbox("纵轴顺序", ["default", "cycle"], format_func=lambda x: "默认顺序" if x == "default" else "按 cycle 排序")
         cycle_no = None if cycle_pick == "全程" else int(cycle_pick)
-        track_granularity = st.selectbox("轨道粒度", ["component", "side", "side_chip"], index=2)
+        track_granularity = st.selectbox("轨道粒度", ["component", "side", "side_chip", "side_chip_substep"], index=3)
         ok, rows = api_get(
             f"/tasks/{task_uuid}/movement-timeline",
             cycle_no=cycle_no,

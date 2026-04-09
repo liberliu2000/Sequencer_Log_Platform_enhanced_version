@@ -14,7 +14,7 @@
       cycleNo: "",
       sideScope: "all",
       trackOrder: "default",
-      trackGranularity: "side_chip",
+      trackGranularity: "side_chip_substep",
     },
     parameterFilters: {
       parameterName: "",
@@ -664,52 +664,41 @@
 
   function buildTimelineTraces(rows, errors) {
     const traces = [];
-    const groupedRows = new Map();
-    safeArray(rows).forEach((item) => {
-      const renderSide = firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned");
-      const actualSide = firstNonEmpty(item?.side_scope, item?.original_side_scope, renderSide, "Unassigned");
-      const componentName = firstNonEmpty(item?.component, item?.sub_step, "Movement");
-      const subStepName = firstNonEmpty(item?.sub_step, item?.message, componentName, "Segment");
-      const uncertain = Boolean(item?.is_uncertain_side);
-      const groupKey = `${uncertain ? "uncertain" : "known"}|${subStepName}`;
-      if (!groupedRows.has(groupKey)) {
-        groupedRows.set(groupKey, {
-          sideScope: renderSide,
-          actualSide,
-          componentName,
-          subStepName,
-          uncertain,
-          rows: [],
-        });
-      }
-      groupedRows.get(groupKey).rows.push(item);
-    });
-    groupedRows.forEach((group) => {
-      const color = pickTimelineColor(group.subStepName);
+    const barRows = safeArray(rows);
+    if (barRows.length) {
       traces.push({
         type: "bar",
         orientation: "h",
-        name: group.uncertain ? `[?] ${group.subStepName}` : group.subStepName,
-        legendgroup: group.subStepName,
-        x: group.rows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
-        base: group.rows.map((item) => item.start),
-        y: group.rows.map((item) => item.track || item.sub_step || "-"),
-        customdata: group.rows.map((item) => [
-          firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned"),
-          firstNonEmpty(item?.component, item?.sub_step, "Movement"),
-          firstNonEmpty(item?.sub_step, item?.message, "Segment"),
-          item?.cycle_no ?? "-",
-          firstNonEmpty(item?.start_time_sec, item?.start, "-"),
-          firstNonEmpty(item?.end_time_sec, item?.end, "-"),
-          Number(item?.duration_ms || 0),
-          firstNonEmpty(item?.message, "-"),
-          firstNonEmpty(item?.side_scope, item?.original_side_scope, "Unknown"),
-          Boolean(item?.is_shared_side_family),
-        ]),
+        name: "Substeps",
+        x: barRows.map((item) => Math.max(Number(item?.duration_ms || 0), 1)),
+        base: barRows.map((item) => item.start),
+        y: barRows.map((item) => item.track || item.sub_step || "-"),
+        customdata: barRows.map((item) => {
+          const componentName = firstNonEmpty(item?.component, item?.sub_step, "Movement");
+          const subStepName = firstNonEmpty(item?.sub_step, item?.message, componentName, "Segment");
+          return [
+            firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned"),
+            componentName,
+            subStepName,
+            item?.cycle_no ?? "-",
+            firstNonEmpty(item?.start_time_sec, item?.start, "-"),
+            firstNonEmpty(item?.end_time_sec, item?.end, "-"),
+            Number(item?.duration_ms || 0),
+            firstNonEmpty(item?.message, "-"),
+            firstNonEmpty(item?.side_scope, item?.original_side_scope, "Unknown"),
+            Boolean(item?.is_shared_side_family),
+            Boolean(item?.is_uncertain_side),
+            subStepName,
+          ];
+        }),
         marker: {
-          color,
-          opacity: group.uncertain ? 0.42 : 0.82,
-          line: { color: group.uncertain ? "#b42318" : "rgba(255,255,255,0.25)", width: group.uncertain ? 1.5 : 1 },
+          color: barRows.map((item) => {
+            const componentName = firstNonEmpty(item?.component, item?.sub_step, "Movement");
+            const subStepName = firstNonEmpty(item?.sub_step, item?.message, componentName, "Segment");
+            const baseColor = pickTimelineColor(subStepName);
+            return Boolean(item?.is_uncertain_side) ? `${baseColor}80` : baseColor;
+          }),
+          line: { color: "rgba(255,255,255,0.25)", width: 1 },
         },
         hovertemplate:
           "边位: %{customdata[0]}<br>" +
@@ -721,9 +710,10 @@
           "时长(ms): %{customdata[6]}<br>" +
           "原始边位: %{customdata[8]}<br>" +
           "父/分支共享: %{customdata[9]}<br>" +
-          "说明: %{customdata[7]}<extra></extra>",
+          "不确定归属: %{customdata[10]}<br>" +
+          "说明: %{customdata[7]}<extra>%{customdata[11]}</extra>",
       });
-    });
+    }
     const errorGroups = new Map();
     safeArray(errors).forEach((item) => {
       const severity = firstNonEmpty(item?.severity, "unknown");
@@ -1088,7 +1078,7 @@
           </label>
           <label>Track Granularity
             <select id="timelineGranularitySelect">
-              ${["component", "side", "side_chip"].map((value) => `<option value="${value}" ${state.timelineFilters.trackGranularity === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+              ${["component", "side", "side_chip", "side_chip_substep"].map((value) => `<option value="${value}" ${state.timelineFilters.trackGranularity === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
             </select>
           </label>
           <label>Track Order

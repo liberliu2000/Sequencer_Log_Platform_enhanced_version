@@ -705,6 +705,7 @@ export function LogPlatformConsole() {
 
   const [timelineCycleNo, setTimelineCycleNo] = useState("");
   const [timelineTrackOrder, setTimelineTrackOrder] = useState("default");
+  const [timelineTrackGranularity, setTimelineTrackGranularity] = useState("side_chip_substep");
   const [timelineSideFilter, setTimelineSideFilter] = useState("all");
   const [timelineBundle, setTimelineBundle] = useState<AnyRecord>({
     cycles: [],
@@ -1082,10 +1083,10 @@ export function LogPlatformConsole() {
     const [cycles, rows, errors] = await Promise.all([
       request<any[]>(`/tasks/${selectedTaskUuid}/cycles`),
       request<AnyRecord>(`/tasks/${selectedTaskUuid}/movement-timeline`, {
-        query: { cycle_no: cycleParam, track_order: timelineTrackOrder },
+        query: { cycle_no: cycleParam, track_order: timelineTrackOrder, track_granularity: timelineTrackGranularity },
       }),
       request<AnyRecord>(`/tasks/${selectedTaskUuid}/movement-timeline/errors`, {
-        query: { cycle_no: cycleParam },
+        query: { cycle_no: cycleParam, track_granularity: timelineTrackGranularity },
       }),
     ]);
     const rowGroups = safeArray(rows.by_side);
@@ -2115,7 +2116,7 @@ export function LogPlatformConsole() {
     if (isAuthenticated && page === "timeline") {
       void loadTimeline().catch(showError);
     }
-  }, [isAuthenticated, page, selectedTaskUuid, timelineCycleNo, timelineTrackOrder]);
+  }, [isAuthenticated, page, selectedTaskUuid, timelineCycleNo, timelineTrackOrder, timelineTrackGranularity]);
 
   useEffect(() => {
     if (isAuthenticated && page === "errors") {
@@ -2907,6 +2908,14 @@ export function LogPlatformConsole() {
                 <option value="cycle">按 cycle 排序</option>
               </Select>
             </Field>
+            <Field label="轨道粒度">
+              <Select value={timelineTrackGranularity} onChange={(event) => setTimelineTrackGranularity(event.target.value)}>
+                <option value="component">component</option>
+                <option value="side">side</option>
+                <option value="side_chip">side_chip</option>
+                <option value="side_chip_substep">side_chip_substep</option>
+              </Select>
+            </Field>
             <Field label="边筛选">
               <Select value={timelineSideFilter} onChange={(event) => setTimelineSideFilter(event.target.value)}>
                 {timelineSideOptions.map((item) => (
@@ -2957,7 +2966,7 @@ export function LogPlatformConsole() {
               return activeTimelineFamilies.includes(family) && activeTimelineSeverities.includes(severity);
             })}
             orderMode={timelineTrackOrder === "cycle" ? "cycle" : "default"}
-            resetKey={`timeline-${selectedTaskUuid}-${timelineCycleNo || "all"}-${timelineTrackOrder}-${String(group.side_scope || "unassigned")}`}
+            resetKey={`timeline-${selectedTaskUuid}-${timelineCycleNo || "all"}-${timelineTrackOrder}-${timelineTrackGranularity}-${String(group.side_scope || "unassigned")}`}
           />
         ))}
         {timelineShowDetails ? (

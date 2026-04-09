@@ -445,7 +445,10 @@ def test_movement_timeline_includes_all_substeps_and_infers_missing_bounds(clien
         )
         db.commit()
 
-        timeline_resp = client.get(f"/api/v1/tasks/{task_uuid}/movement-timeline", params={"cycle_no": 1})
+        timeline_resp = client.get(
+            f"/api/v1/tasks/{task_uuid}/movement-timeline",
+            params={"cycle_no": 1, "track_granularity": "side_chip_substep"},
+        )
         assert timeline_resp.status_code == 200
         timeline_payload = timeline_resp.json()
         rows = timeline_payload["rows"]
@@ -454,6 +457,7 @@ def test_movement_timeline_includes_all_substeps_and_infers_missing_bounds(clien
         assert inferred_row["start"] == "2024-03-09 16:01:00"
         assert inferred_row["end"] == "2024-03-09 16:01:05"
         assert inferred_row["time_bounds_inferred"] is True
+        assert len({row["track"] for row in rows}) == 2
     finally:
         cleanup_db = SessionLocal()
         try:

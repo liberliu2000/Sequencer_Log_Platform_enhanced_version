@@ -729,7 +729,13 @@ class QueryService:
         normalized = str(value or "component").strip().lower().replace("+", "_")
         if normalized in {"sidechip", "chip", "chip_name"}:
             return "side_chip"
-        if normalized not in {"component", "side", "side_chip"}:
+        if normalized in {"substep", "sub_step", "step"}:
+            return "sub_step"
+        if normalized in {"sidesubstep", "side_substep"}:
+            return "side_substep"
+        if normalized in {"sidechipsubstep", "side_chip_substep", "chip_substep"}:
+            return "side_chip_substep"
+        if normalized not in {"component", "side", "side_chip", "sub_step", "side_substep", "side_chip_substep"}:
             return "component"
         return normalized
 
@@ -741,6 +747,7 @@ class QueryService:
         cycle_no: int | None,
         side_scope: str | None,
         chip_name: str | None,
+        sub_step: str | None,
         track_granularity: str,
     ) -> str:
         granularity = cls._timeline_granularity(track_granularity)
@@ -748,6 +755,16 @@ class QueryService:
         cycle_label = f"Cycle {cycle_no}" if cycle_no is not None else "Cycle NA"
         side_label = cls._scope_display(side_scope)
         chip_label = cls._scope_display(chip_name)
+        sub_step_label = str(sub_step or component_label or "Unknown Sub-step")
+
+        if granularity == "sub_step":
+            return f"{sub_step_label} | {cycle_label}"
+        if granularity == "side_substep":
+            return f"{side_label} | {sub_step_label}"
+        if granularity == "side_chip_substep":
+            if chip_name:
+                return f"{side_label} | {chip_label} | {sub_step_label}"
+            return f"{side_label} | {sub_step_label}"
 
         if granularity == "side":
             return f"{side_label} | {cycle_label}"
@@ -2123,104 +2140,121 @@ class QueryService:
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
         granularity = self._timeline_granularity(track_granularity)
-        stmt = (
-            select(
-                StepSummaryModel.cycle_no,
-                StepSummaryModel.sub_step,
-                StepSummaryModel.component,
-                StepSummaryModel.instrument_scope,
-                StepSummaryModel.side_scope,
-                StepSummaryModel.side_group,
-                StepSummaryModel.chip_name,
-                StepSummaryModel.chip_position,
-                StepSummaryModel.chuck_no,
-                StepSummaryModel.slot_no,
-                StepSummaryModel.stage_key,
-                StepSummaryModel.start_epoch_ms,
-                StepSummaryModel.end_epoch_ms,
-                StepSummaryModel.duration_ms,
-                StepSummaryModel.threshold_ms,
-                StepSummaryModel.is_over_threshold,
-                StepSummaryModel.start_time_text,
-                StepSummaryModel.end_time_text,
-                StepSummaryModel.side_confidence,
-                StepSummaryModel.side_evidence,
-            )
-            .where(StepSummaryModel.task_id == task_id)
+        cache_key = self._cache_key(
+            task_id,
+            "movement_timeline",
+            cycle_no=cycle_no if cycle_no is not None else "",
+            track_order=track_order,
+            track_granularity=granularity,
+            side_scopes=",".join(side_scope_values),
+            timeline_side_scopes=",".join(timeline_side_scope_values),
+            side_groups=",".join(side_group_values),
+            chip_names=",".join(chip_value_list),
         )
-        if cycle_no is not None:
-            stmt = stmt.where(StepSummaryModel.cycle_no == cycle_no)
-        stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), StepSummaryModel.side_scope, timeline_side_scope_values)
-        stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), StepSummaryModel.side_group, side_group_values)
-        stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), StepSummaryModel.chip_name, chip_value_list)
-        stmt = stmt.order_by(StepSummaryModel.cycle_no.asc(), StepSummaryModel.start_epoch_ms.asc(), StepSummaryModel.sub_step.asc())
-        output: list[dict[str, Any]] = []
-        lanes: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        for row in self.db.execute(stmt).mappings():
-            bounds = self._timeline_time_bounds(dict(row))
-            if bounds is None:
-                continue
-            item = self._repair_scope_fields(dict(row))
-            base_track = self._build_timeline_base_track(
-                component=item["component"],
-                cycle_no=item["cycle_no"],
-                side_scope=item["side_scope"],
-                chip_name=item["chip_name"],
-                track_granularity=granularity,
+
+        def factory() -> dict[str, Any]:
+            stmt = (
+                select(
+                    StepSummaryModel.cycle_no,
+                    StepSummaryModel.parameter_name,
+                    StepSummaryModel.sub_step,
+                    StepSummaryModel.component,
+                    StepSummaryModel.instrument_scope,
+                    StepSummaryModel.side_scope,
+                    StepSummaryModel.side_group,
+                    StepSummaryModel.chip_name,
+                    StepSummaryModel.chip_position,
+                    StepSummaryModel.chuck_no,
+                    StepSummaryModel.slot_no,
+                    StepSummaryModel.stage_key,
+                    StepSummaryModel.start_epoch_ms,
+                    StepSummaryModel.end_epoch_ms,
+                    StepSummaryModel.duration_ms,
+                    StepSummaryModel.threshold_ms,
+                    StepSummaryModel.is_over_threshold,
+                    StepSummaryModel.start_time_text,
+                    StepSummaryModel.end_time_text,
+                    StepSummaryModel.side_confidence,
+                    StepSummaryModel.side_evidence,
+                )
+                .where(StepSummaryModel.task_id == task_id)
             )
-            lane_idx = 0
-            start_ms = int(bounds["start_epoch_ms"])
-            end_ms = int(bounds["end_epoch_ms"])
-            existing = lanes[base_track]
-            while lane_idx < len(existing) and start_ms < existing[lane_idx][1]:
-                lane_idx += 1
-            if lane_idx == len(existing):
-                existing.append((start_ms, end_ms))
+            if cycle_no is not None:
+                stmt = stmt.where(StepSummaryModel.cycle_no == cycle_no)
+            stmt_with_filters, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), StepSummaryModel.side_scope, timeline_side_scope_values)
+            stmt_with_filters, _ = self._apply_optional_in_filter(stmt_with_filters, select(func.count()), StepSummaryModel.side_group, side_group_values)
+            stmt_with_filters, _ = self._apply_optional_in_filter(stmt_with_filters, select(func.count()), StepSummaryModel.chip_name, chip_value_list)
+            stmt_with_filters = stmt_with_filters.order_by(StepSummaryModel.cycle_no.asc(), StepSummaryModel.start_epoch_ms.asc(), StepSummaryModel.sub_step.asc())
+            output: list[dict[str, Any]] = []
+            lanes: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            for row in self.db.execute(stmt_with_filters).mappings():
+                bounds = self._timeline_time_bounds(dict(row))
+                if bounds is None:
+                    continue
+                item = self._repair_scope_fields(dict(row))
+                base_track = self._build_timeline_base_track(
+                    component=item["component"],
+                    cycle_no=item["cycle_no"],
+                    side_scope=item["side_scope"],
+                    chip_name=item["chip_name"],
+                    sub_step=item.get("sub_step") or item.get("parameter_name") or item.get("component"),
+                    track_granularity=granularity,
+                )
+                lane_idx = 0
+                start_ms = int(bounds["start_epoch_ms"])
+                end_ms = int(bounds["end_epoch_ms"])
+                existing = lanes[base_track]
+                while lane_idx < len(existing) and start_ms < existing[lane_idx][1]:
+                    lane_idx += 1
+                if lane_idx == len(existing):
+                    existing.append((start_ms, end_ms))
+                else:
+                    existing[lane_idx] = (start_ms, end_ms)
+                track = base_track if lane_idx == 0 else f"{base_track} | lane {lane_idx + 1}"
+                item["module"] = item.get("component")
+                item["message"] = item.get("sub_step") or item.get("parameter_name") or item.get("component")
+                item["start_epoch_ms"] = start_ms
+                item["end_epoch_ms"] = end_ms
+                item["start_time_sec"] = bounds["start_time_sec"]
+                item["end_time_sec"] = bounds["end_time_sec"]
+                item["source_file"] = None
+                item["start"] = bounds["start"]
+                item["end"] = bounds["end"]
+                item["base_track"] = base_track
+                item["track"] = track
+                item["track_granularity"] = granularity
+                item["is_uncertain_side"] = self._is_uncertain_side(item.get("side_scope"), item.get("side_confidence"))
+                item["side_evidence"] = self._llm_extra(item.get("side_evidence")) or {}
+                item["time_bounds_inferred"] = bool(bounds["time_bounds_inferred"])
+                if not self._row_matches_timeline_scope_filters(
+                    item,
+                    side_scopes=side_scope_values,
+                    side_groups=side_group_values,
+                    chip_names=chip_value_list,
+                ):
+                    continue
+                output.append(item)
+            if track_order == "cycle":
+                output.sort(
+                    key=lambda item: (
+                        (item.get("cycle_no") is None),
+                        item.get("cycle_no") or -1,
+                        item.get("side_scope") or "",
+                        item.get("chip_name") or "",
+                        item.get("track") or "",
+                    )
+                )
             else:
-                existing[lane_idx] = (start_ms, end_ms)
-            track = base_track if lane_idx == 0 else f"{base_track} | lane {lane_idx + 1}"
-            item["module"] = item.get("component")
-            item["message"] = item.get("sub_step") or item.get("parameter_name") or item.get("component")
-            item["start_epoch_ms"] = start_ms
-            item["end_epoch_ms"] = end_ms
-            item["start_time_sec"] = bounds["start_time_sec"]
-            item["end_time_sec"] = bounds["end_time_sec"]
-            item["source_file"] = None
-            item["start"] = bounds["start"]
-            item["end"] = bounds["end"]
-            item["base_track"] = base_track
-            item["track"] = track
-            item["track_granularity"] = granularity
-            item["is_uncertain_side"] = self._is_uncertain_side(item.get("side_scope"), item.get("side_confidence"))
-            item["side_evidence"] = self._llm_extra(item.get("side_evidence")) or {}
-            item["time_bounds_inferred"] = bool(bounds["time_bounds_inferred"])
-            if not self._row_matches_timeline_scope_filters(
-                item,
-                side_scopes=side_scope_values,
-                side_groups=side_group_values,
-                chip_names=chip_value_list,
-            ):
-                continue
-            output.append(item)
-        if track_order == "cycle":
-            output.sort(
-                key=lambda item: (
-                    (item.get("cycle_no") is None),
-                    item.get("cycle_no") or -1,
-                    item.get("side_scope") or "",
-                    item.get("chip_name") or "",
-                    item.get("track") or "",
+                output.sort(
+                    key=lambda item: (
+                        item.get("start_epoch_ms") if item.get("start_epoch_ms") is not None else float("inf"),
+                        item.get("cycle_no") if item.get("cycle_no") is not None else -1,
+                        item.get("track") or "",
+                    )
                 )
-            )
-        else:
-            output.sort(
-                key=lambda item: (
-                    item.get("start_epoch_ms") if item.get("start_epoch_ms") is not None else float("inf"),
-                    item.get("cycle_no") if item.get("cycle_no") is not None else -1,
-                    item.get("track") or "",
-                )
-            )
-        return self._group_timeline_records_by_side(output, row_key="rows", render_side_scopes=side_scope_values)
+            return self._group_timeline_records_by_side(output, row_key="rows", render_side_scopes=side_scope_values)
+
+        return self._cached(cache_key, factory)
 
     def get_timeline_error_points(
         self,
@@ -2236,107 +2270,122 @@ class QueryService:
         side_group_values = self._normalize_filter_values(side_groups)
         chip_value_list = self._normalize_filter_values(chip_names)
         granularity = self._timeline_granularity(track_granularity)
-        stmt = (
-            select(
-                NormalizedEventModel.id,
-                NormalizedEventModel.cycle_no,
-                NormalizedEventModel.component,
-                NormalizedEventModel.module,
-                NormalizedEventModel.sub_step,
-                NormalizedEventModel.instrument_scope,
-                NormalizedEventModel.side_scope,
-                NormalizedEventModel.side_group,
-                NormalizedEventModel.chip_name,
-                NormalizedEventModel.chip_position,
-                NormalizedEventModel.chuck_no,
-                NormalizedEventModel.slot_no,
-                NormalizedEventModel.stage_key,
-                NormalizedEventModel.epoch_ms,
-                NormalizedEventModel.original_time_text,
-                NormalizedEventModel.formatted_ms,
-                NormalizedEventModel.message,
-                NormalizedEventModel.normalized_signature,
-                NormalizedEventModel.error_family,
-                NormalizedEventModel.severity,
-                NormalizedEventModel.error_code,
-                NormalizedEventModel.exception_type,
-                NormalizedEventModel.source_file,
-                NormalizedEventModel.side_confidence,
-                NormalizedEventModel.side_evidence,
-            )
-            .where(
-                NormalizedEventModel.task_id == task_id,
-                NormalizedEventModel.normalized_signature.is_not(None),
-                NormalizedEventModel.epoch_ms.is_not(None),
-            )
-            .order_by(NormalizedEventModel.epoch_ms.asc(), NormalizedEventModel.id.asc())
+        cache_key = self._cache_key(
+            task_id,
+            "timeline_error_points",
+            cycle_no=cycle_no if cycle_no is not None else "",
+            track_granularity=granularity,
+            side_scopes=",".join(side_scope_values),
+            timeline_side_scopes=",".join(timeline_side_scope_values),
+            side_groups=",".join(side_group_values),
+            chip_names=",".join(chip_value_list),
         )
-        if cycle_no is not None:
-            stmt = stmt.where(NormalizedEventModel.cycle_no == cycle_no)
-        stmt, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), NormalizedEventModel.side_scope, timeline_side_scope_values)
-        stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), NormalizedEventModel.side_group, side_group_values)
-        stmt, _ = self._apply_optional_in_filter(stmt, select(func.count()), NormalizedEventModel.chip_name, chip_value_list)
-        points: list[dict[str, Any]] = []
-        for row in self.db.execute(stmt).mappings():
-            epoch_ms = row["epoch_ms"]
-            if epoch_ms is None:
-                continue
-            item = self._repair_scope_fields(
-                {
-                    "event_id": row["id"],
-                    "cycle_no": row["cycle_no"],
-                    "component": row["component"],
-                    "module": row["module"],
-                    "sub_step": row["sub_step"],
-                    "instrument_scope": row["instrument_scope"],
-                    "side_scope": row["side_scope"],
-                    "side_group": row["side_group"],
-                    "chip_name": row["chip_name"],
-                    "chip_position": row["chip_position"],
-                    "chuck_no": row["chuck_no"],
-                    "slot_no": row["slot_no"],
-                    "stage_key": row["stage_key"],
-                    "message": row["message"],
-                    "raw_text": row["message"],
-                    "source_file": row["source_file"],
-                    "side_confidence": row["side_confidence"],
-                    "side_evidence": self._llm_extra(row["side_evidence"]) or {},
-                }
+
+        def factory() -> dict[str, Any]:
+            stmt = (
+                select(
+                    NormalizedEventModel.id,
+                    NormalizedEventModel.cycle_no,
+                    NormalizedEventModel.component,
+                    NormalizedEventModel.module,
+                    NormalizedEventModel.sub_step,
+                    NormalizedEventModel.instrument_scope,
+                    NormalizedEventModel.side_scope,
+                    NormalizedEventModel.side_group,
+                    NormalizedEventModel.chip_name,
+                    NormalizedEventModel.chip_position,
+                    NormalizedEventModel.chuck_no,
+                    NormalizedEventModel.slot_no,
+                    NormalizedEventModel.stage_key,
+                    NormalizedEventModel.epoch_ms,
+                    NormalizedEventModel.original_time_text,
+                    NormalizedEventModel.formatted_ms,
+                    NormalizedEventModel.message,
+                    NormalizedEventModel.normalized_signature,
+                    NormalizedEventModel.error_family,
+                    NormalizedEventModel.severity,
+                    NormalizedEventModel.error_code,
+                    NormalizedEventModel.exception_type,
+                    NormalizedEventModel.source_file,
+                    NormalizedEventModel.side_confidence,
+                    NormalizedEventModel.side_evidence,
+                )
+                .where(
+                    NormalizedEventModel.task_id == task_id,
+                    NormalizedEventModel.normalized_signature.is_not(None),
+                    NormalizedEventModel.epoch_ms.is_not(None),
+                )
+                .order_by(NormalizedEventModel.epoch_ms.asc(), NormalizedEventModel.id.asc())
             )
-            base_track = self._build_timeline_base_track(
-                component=item["component"],
-                cycle_no=item["cycle_no"],
-                side_scope=item["side_scope"],
-                chip_name=item["chip_name"],
-                track_granularity=granularity,
-            )
-            item.update(
-                {
-                    "track": base_track,
-                    "base_track": base_track,
-                    "track_granularity": granularity,
-                    "time": self._preferred_time_text(row["original_time_text"], row["formatted_ms"], self._epoch_to_seconds(epoch_ms), self._epoch_to_iso_text(epoch_ms)),
-                    "time_text": self._preferred_time_text(row["original_time_text"], row["formatted_ms"], self._epoch_to_seconds(epoch_ms)),
-                    "epoch_ms": epoch_ms,
-                    "normalized_signature": row["normalized_signature"],
-                    **self._error_family_fields(row["error_family"]),
-                    "severity": row["severity"],
-                    "error_code": row["error_code"],
-                    "exception_type": row["exception_type"],
-                }
-            )
-            item["is_uncertain_side"] = self._is_uncertain_side(item["side_scope"], item["side_confidence"])
-            if not self._is_timeline_error_relevant(item):
-                continue
-            if not self._row_matches_timeline_scope_filters(
-                item,
-                side_scopes=side_scope_values,
-                side_groups=side_group_values,
-                chip_names=chip_value_list,
-            ):
-                continue
-            points.append(item)
-        return self._group_timeline_records_by_side(points, row_key="points", render_side_scopes=side_scope_values)
+            if cycle_no is not None:
+                stmt = stmt.where(NormalizedEventModel.cycle_no == cycle_no)
+            stmt_with_filters, _ = self._apply_side_scope_filter_with_repair_support(stmt, select(func.count()), NormalizedEventModel.side_scope, timeline_side_scope_values)
+            stmt_with_filters, _ = self._apply_optional_in_filter(stmt_with_filters, select(func.count()), NormalizedEventModel.side_group, side_group_values)
+            stmt_with_filters, _ = self._apply_optional_in_filter(stmt_with_filters, select(func.count()), NormalizedEventModel.chip_name, chip_value_list)
+            points: list[dict[str, Any]] = []
+            for row in self.db.execute(stmt_with_filters).mappings():
+                epoch_ms = row["epoch_ms"]
+                if epoch_ms is None:
+                    continue
+                item = self._repair_scope_fields(
+                    {
+                        "event_id": row["id"],
+                        "cycle_no": row["cycle_no"],
+                        "component": row["component"],
+                        "module": row["module"],
+                        "sub_step": row["sub_step"],
+                        "instrument_scope": row["instrument_scope"],
+                        "side_scope": row["side_scope"],
+                        "side_group": row["side_group"],
+                        "chip_name": row["chip_name"],
+                        "chip_position": row["chip_position"],
+                        "chuck_no": row["chuck_no"],
+                        "slot_no": row["slot_no"],
+                        "stage_key": row["stage_key"],
+                        "message": row["message"],
+                        "raw_text": row["message"],
+                        "source_file": row["source_file"],
+                        "side_confidence": row["side_confidence"],
+                        "side_evidence": self._llm_extra(row["side_evidence"]) or {},
+                    }
+                )
+                base_track = self._build_timeline_base_track(
+                    component=item["component"],
+                    cycle_no=item["cycle_no"],
+                    side_scope=item["side_scope"],
+                    chip_name=item["chip_name"],
+                    sub_step=item.get("sub_step") or item.get("message") or item.get("component"),
+                    track_granularity=granularity,
+                )
+                item.update(
+                    {
+                        "track": base_track,
+                        "base_track": base_track,
+                        "track_granularity": granularity,
+                        "time": self._preferred_time_text(row["original_time_text"], row["formatted_ms"], self._epoch_to_seconds(epoch_ms), self._epoch_to_iso_text(epoch_ms)),
+                        "time_text": self._preferred_time_text(row["original_time_text"], row["formatted_ms"], self._epoch_to_seconds(epoch_ms)),
+                        "epoch_ms": epoch_ms,
+                        "normalized_signature": row["normalized_signature"],
+                        **self._error_family_fields(row["error_family"]),
+                        "severity": row["severity"],
+                        "error_code": row["error_code"],
+                        "exception_type": row["exception_type"],
+                    }
+                )
+                item["is_uncertain_side"] = self._is_uncertain_side(item["side_scope"], item["side_confidence"])
+                if not self._is_timeline_error_relevant(item):
+                    continue
+                if not self._row_matches_timeline_scope_filters(
+                    item,
+                    side_scopes=side_scope_values,
+                    side_groups=side_group_values,
+                    chip_names=chip_value_list,
+                ):
+                    continue
+                points.append(item)
+            return self._group_timeline_records_by_side(points, row_key="points", render_side_scopes=side_scope_values)
+
+        return self._cached(cache_key, factory)
 
     def get_operational_metrics(
         self,
