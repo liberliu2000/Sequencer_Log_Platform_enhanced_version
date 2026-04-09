@@ -1929,9 +1929,10 @@ function StreamlitTimelineChart({
         );
         const viewSideScope = String(row.render_side_scope || row.side_scope || "Unassigned");
         const actualSideScope = String(row.side_scope || row.original_side_scope || "Unassigned");
-        const componentLabel = String(row.component || row.module || row.sub_step || "Movement");
-        const label = String(row.sub_step || row.message || componentLabel);
-        const series = `${actualSideScope} · ${componentLabel}`;
+        const componentLabel = String(row.component || row.module || "Movement");
+        const subStepLabel = String(row.sub_step || row.message || componentLabel || "Segment");
+        const label = subStepLabel;
+        const series = subStepLabel;
         const cycleValue = Number(row.cycle_no);
         return {
           ...row,

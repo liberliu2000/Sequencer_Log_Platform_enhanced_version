@@ -669,34 +669,35 @@
       const renderSide = firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned");
       const actualSide = firstNonEmpty(item?.side_scope, item?.original_side_scope, renderSide, "Unassigned");
       const componentName = firstNonEmpty(item?.component, item?.sub_step, "Movement");
+      const subStepName = firstNonEmpty(item?.sub_step, item?.message, componentName, "Segment");
       const uncertain = Boolean(item?.is_uncertain_side);
-      const shared = Boolean(item?.is_shared_side_family);
-      const groupKey = `${uncertain ? "uncertain" : "known"}|${actualSide}|${componentName}`;
+      const groupKey = `${uncertain ? "uncertain" : "known"}|${subStepName}`;
       if (!groupedRows.has(groupKey)) {
         groupedRows.set(groupKey, {
           sideScope: renderSide,
           actualSide,
           componentName,
+          subStepName,
           uncertain,
-          shared,
           rows: [],
         });
       }
       groupedRows.get(groupKey).rows.push(item);
     });
     groupedRows.forEach((group) => {
-      const color = pickTimelineColor(group.actualSide, group.componentName);
+      const color = pickTimelineColor(group.subStepName);
       traces.push({
         type: "bar",
         orientation: "h",
-        name: group.uncertain ? `[?] ${group.actualSide} · ${group.componentName}` : `${group.actualSide} · ${group.componentName}`,
-        legendgroup: `${group.actualSide}|${group.componentName}`,
+        name: group.uncertain ? `[?] ${group.subStepName}` : group.subStepName,
+        legendgroup: group.subStepName,
         x: group.rows.map((item) => Math.max(Number(item.duration_ms || 0), 1)),
         base: group.rows.map((item) => item.start),
         y: group.rows.map((item) => item.track || item.sub_step || "-"),
         customdata: group.rows.map((item) => [
           firstNonEmpty(item?.render_side_scope, item?.side_scope, "Unassigned"),
           firstNonEmpty(item?.component, item?.sub_step, "Movement"),
+          firstNonEmpty(item?.sub_step, item?.message, "Segment"),
           item?.cycle_no ?? "-",
           firstNonEmpty(item?.start_time_sec, item?.start, "-"),
           firstNonEmpty(item?.end_time_sec, item?.end, "-"),
@@ -713,13 +714,14 @@
         hovertemplate:
           "边位: %{customdata[0]}<br>" +
           "部件: %{customdata[1]}<br>" +
-          "Cycle: %{customdata[2]}<br>" +
-          "开始: %{customdata[3]}<br>" +
-          "结束: %{customdata[4]}<br>" +
-          "时长(ms): %{customdata[5]}<br>" +
-          "原始边位: %{customdata[7]}<br>" +
-          "父/分支共享: %{customdata[8]}<br>" +
-          "说明: %{customdata[6]}<extra></extra>",
+          "子步骤: %{customdata[2]}<br>" +
+          "Cycle: %{customdata[3]}<br>" +
+          "开始: %{customdata[4]}<br>" +
+          "结束: %{customdata[5]}<br>" +
+          "时长(ms): %{customdata[6]}<br>" +
+          "原始边位: %{customdata[8]}<br>" +
+          "父/分支共享: %{customdata[9]}<br>" +
+          "说明: %{customdata[7]}<extra></extra>",
       });
     });
     const errorGroups = new Map();

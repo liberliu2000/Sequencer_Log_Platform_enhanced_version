@@ -3445,17 +3445,20 @@ def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, 
 def build_movement_timeline_figure(df: pd.DataFrame, error_df: pd.DataFrame, *, order_mode: str, show_error_points: bool):
     working_df = df.copy()
     working_df["component_display"] = working_df.get("component", pd.Series(dtype=object)).fillna("未知组件").astype(str)
+    sub_step_series = working_df.get("sub_step", pd.Series(index=working_df.index, dtype=object)).replace("", pd.NA)
+    message_series = working_df.get("message", pd.Series(index=working_df.index, dtype=object)).replace("", pd.NA)
     render_side_series = working_df.get("render_side_scope", pd.Series(index=working_df.index, dtype=object)).replace("", pd.NA)
     raw_side_series = working_df.get("side_scope", pd.Series(index=working_df.index, dtype=object)).replace("", pd.NA)
     working_df["side_display"] = render_side_series.fillna(raw_side_series).fillna("Unassigned").astype(str)
     working_df["chip_display"] = working_df.get("chip_name", pd.Series(dtype=object)).fillna("Unassigned").astype(str)
+    working_df["sub_step_display"] = sub_step_series.fillna(message_series).fillna(working_df["component_display"]).astype(str)
     working_df["track"] = working_df["track"].fillna("未知轨道").astype(str)
     working_df["base_track"] = working_df["track"].map(_timeline_base_track)
     working_df["track_lane"] = working_df["track"].map(_timeline_lane_index)
     working_df["chuck_no"] = working_df.get("chuck_no", pd.Series(dtype=object)).fillna("").astype(str)
     working_df["source_file"] = working_df.get("source_file", pd.Series(dtype=object)).fillna("").astype(str)
-    working_df["timeline_color_key"] = working_df["side_display"] + " | " + working_df["component_display"]
-    working_df = working_df.sort_values(["cycle_no", "side_display", "component_display", "track_lane", "start", "end"], na_position="last")
+    working_df["timeline_color_key"] = working_df["sub_step_display"]
+    working_df = working_df.sort_values(["cycle_no", "sub_step_display", "side_display", "component_display", "track_lane", "start", "end"], na_position="last")
     track_order = _build_timeline_track_order(working_df, order_mode)
     color_map = {
         key: _stable_timeline_color(key)
