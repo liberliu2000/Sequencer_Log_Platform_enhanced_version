@@ -1,0 +1,74 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: sequencer-log-platform-api
+    env_file:
+      - .env.docker
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      DEBUG: ${DEBUG:-false}
+    volumes:
+      - ./.env.docker:/app/.env
+      - ./data:/app/data
+      - ./config:/app/config
+    ports:
+      - "${HOST_API_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000/api/v1}
+    container_name: sequencer-log-platform-web
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000/api/v1}
+    ports:
+      - "${HOST_WEB_PORT:-3000}:3000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: sequencer-log-platform-streamlit
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    environment:
+      STREAMLIT_API_BASE: ${STREAMLIT_API_BASE:-http://api:8000/api/v1}
+    volumes:
+      - ./.env.docker:/app/.env
+      - ./data:/app/data
+      - ./config:/app/config
+    ports:
+      - "${HOST_STREAMLIT_PORT:-8501}:8501"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s

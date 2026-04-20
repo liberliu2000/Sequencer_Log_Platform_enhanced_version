@@ -37,3 +37,6 @@ data/performance/
 local_config.py
 
 .vercel
+.codex_deploy_bundle/
+.migration_bundles/
+.tmp_real_logs/

@@ -8,7 +8,6 @@ build
 dist
 data
 docs
-installer
 recovered_ui
 tests
 ui
@@ -23,8 +22,5 @@ ui
 .env
 .env.*
 !.env.example
-build_exe.py
 docker-compose.yml
 Dockerfile
-setup_windows.bat
-setup_windows.ps1

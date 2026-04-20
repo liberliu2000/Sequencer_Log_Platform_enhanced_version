@@ -23,8 +23,8 @@ if docker compose version >/dev/null 2>&1; then
   docker compose -f "$COMPOSE_FILE" up -d --build
   docker compose -f "$COMPOSE_FILE" ps
 else
-  docker-compose -f "$COMPOSE_FILE" up -d --build
-  docker-compose -f "$COMPOSE_FILE" ps
+  PYTHONNOUSERSITE=1 docker-compose -f "$COMPOSE_FILE" up -d --build
+  PYTHONNOUSERSITE=1 docker-compose -f "$COMPOSE_FILE" ps
 fi
 
 echo "[5/5] Verify current commit and API health"

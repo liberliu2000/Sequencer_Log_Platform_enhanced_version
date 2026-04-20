@@ -11,11 +11,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY config ./config
 COPY scripts ./scripts
+COPY ui ./ui
 COPY VERSION ./
 COPY .env.example ./
 
 RUN mkdir -p data/uploads data/exports data/runtime_logs data/intermediate_cache data/tmp
 
-EXPOSE 8000
+EXPOSE 8501
 
-CMD ["sh", "-c", "python -m scripts.init_db && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "python -m streamlit run ui/streamlit_app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true --browser.serverAddress=0.0.0.0 --browser.serverPort=8501"]

@@ -249,6 +249,101 @@ npm run lint
 npm run build
 ```
 
+## Docker 一键启动
+
+仓库现在提供独立的 Docker 一键启动编排，包含：
+
+- FastAPI API：`8000`
+- Next.js Web：`3000`
+- Streamlit 运维界面：`8501`
+
+推荐命令：
+
+Linux / macOS：
+
+```bash
+cp .env.docker.example .env.docker
+./scripts/docker_up.sh
+```
+
+Windows PowerShell：
+
+```powershell
+Copy-Item .env.docker.example .env.docker
+powershell -ExecutionPolicy Bypass -File .\scripts\docker_up.ps1
+```
+
+说明：
+
+- `.env.docker` 不存在时，启动脚本会自动从 `.env.docker.example` 生成
+- 如果前端不是在当前机器本地浏览器打开，请把 `NEXT_PUBLIC_API_BASE_URL` 改成服务器真实地址，例如 `http://172.19.56.195:8000/api/v1`
+- 一键编排文件是 `docker-compose.oneclick.yml`
+- API 容器与 Streamlit 容器共享 `./data` 与 `./config`，数据会落在宿主机目录
+
+如果需要导出一套适合直接拷贝到服务器目录的精简部署包，可执行：
+
+```powershell
+python .\scripts\export_docker_bundle.py D:\mnt\data\LogPlatform --public-api-base-url http://127.0.0.1:8000/api/v1
+```
+
+如果服务器目录已经是完整项目，也可以直接在服务器项目根目录执行一键启动：
+
+```bash
+chmod +x ./scripts/docker_up.sh
+./scripts/docker_up.sh
+```
+
+说明：
+
+- 脚本会自动创建 `data/uploads`、`data/exports`、`data/runtime_logs`、`data/intermediate_cache`、`data/tmp`
+- 优先调用 `docker compose`
+- 若服务器只有 `docker-compose` v1，会自动注入 `PYTHONNOUSERSITE=1`，规避用户目录 Python 包污染导致的启动失败
+
+## 服务器迁移压缩包
+
+如果需要把“代码 + 配置 + data 数据目录”整体打包，方便通过移动硬盘迁移到另一台服务器，可在 Linux 服务器项目根目录执行：
+
+```bash
+chmod +x ./scripts/create_migration_bundle.sh
+./scripts/create_migration_bundle.sh
+```
+
+也可以指定输出目录：
+
+```bash
+./scripts/create_migration_bundle.sh /mnt/data/migration_bundles
+```
+
+脚本会生成：
+
+- `sequencer-log-platform_migration_<hostname>_<timestamp>.tar.gz`
+- 对应的 `sha256` 校验文件
+
+打包内容：
+
+- 项目代码
+- `.env`、`.env.docker`、Compose 文件与 Dockerfile
+- `config/`
+- `data/` 下的数据库、上传文件、导出文件和运行日志
+
+默认排除：
+
+- `.git`
+- `.venv` / `venv`
+- `frontend/node_modules`
+- `frontend/.next`
+- `.deploy_backups`
+- `.migration_bundles`
+
+迁移到新服务器后的基本步骤：
+
+```bash
+mkdir -p /mnt/data/LogPlatform
+tar -xzf sequencer-log-platform_migration_<hostname>_<timestamp>.tar.gz -C /mnt/data/LogPlatform
+cd /mnt/data/LogPlatform
+./scripts/docker_up.sh
+```
+
 ## 常用配置
 
 配置由 `app/core/settings.py` 定义，默认从项目根目录 `.env` 加载。常用项目包括：
